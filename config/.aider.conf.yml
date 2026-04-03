@@ -1,0 +1,12 @@
+alias:
+  - "qwen:openai/qwen-local"
+  - "codellama:openai/codellama-local"
+
+auto-commits: true
+dirty-commits: true
+attribute-author: false
+attribute-committer: false
+attribute-commit-message-author: true
+analytics-disable: true
+map-tokens: 4096
+show-model-warnings: false

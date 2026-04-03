@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeWorker V0.91b Web UI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">CW</div>
+        <div>
+          <h1>CodeWorker V0.91b</h1>
+          <p>本地離線專案分析與對話</p>
+        </div>
+      </div>
+
+      <section class="panel control-panel">
+        <div class="field-label-row">
+          <label for="projectPath">專案路徑</label>
+          <button type="button" class="help-trigger" data-help="project-path" aria-label="專案路徑說明">?</button>
+        </div>
+        <div class="path-row">
+          <input id="projectPath" type="text" placeholder="例如 C:\Users\Admin\Desktop\MyProject">
+          <div class="action-item">
+            <button id="pickFolderBtn" type="button" class="ghost">選擇資料夾</button>
+            <button type="button" class="help-trigger" data-help="pick-folder" aria-label="選擇資料夾說明">?</button>
+          </div>
+        </div>
+
+        <div class="field-label-row">
+          <label for="modelKey">模型</label>
+          <button type="button" class="help-trigger" data-help="model-key" aria-label="模型說明">?</button>
+        </div>
+        <select id="modelKey">
+          <option value="qwen">Qwen 2.5 Coder 7B</option>
+          <option value="codellama">Code Llama 7B</option>
+        </select>
+
+        <div id="progressPanel" class="progress-panel hidden">
+          <div class="panel-title-row compact">
+            <div class="title-with-help">
+              <strong id="progressTitle">正在開啟專案</strong>
+              <button type="button" class="help-trigger" data-help="progress-panel" aria-label="進度條說明">?</button>
+            </div>
+            <span id="progressPercent">0%</span>
+          </div>
+          <div class="progress-track">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <div id="progressStep" class="hint">等待中</div>
+        </div>
+
+        <div class="actions">
+          <div class="action-item">
+            <button id="openProjectBtn" class="primary">開啟專案</button>
+            <button type="button" class="help-trigger" data-help="open-project" aria-label="開啟專案說明">?</button>
+          </div>
+          <div class="action-item">
+            <button id="analyzeBtn">分析專案</button>
+            <button type="button" class="help-trigger" data-help="analyze-project" aria-label="分析專案說明">?</button>
+          </div>
+        </div>
+
+        <p class="hint">第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。</p>
+      </section>
+
+      <section id="errorPanel" class="panel error-panel hidden">
+        <div class="panel-title-row compact">
+          <div class="title-with-help">
+            <h2>錯誤訊息</h2>
+            <button type="button" class="help-trigger" data-help="error-panel" aria-label="錯誤訊息說明">?</button>
+          </div>
+          <span id="errorCode" class="badge"></span>
+        </div>
+        <div id="errorMessage" class="error-message"></div>
+        <pre id="errorDetails" class="error-details"></pre>
+        <div id="errorMeta" class="meta"></div>
+        <div class="actions">
+          <div class="action-item">
+            <button id="errorActionBtn" class="primary hidden" type="button">重新下載模型</button>
+            <button type="button" class="help-trigger" data-help="redownload-model" aria-label="重新下載模型說明">?</button>
+          </div>
+          <div class="action-item">
+            <button id="dismissErrorBtn" class="ghost" type="button">關閉</button>
+            <button type="button" class="help-trigger" data-help="dismiss-error" aria-label="關閉錯誤說明">?</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel summary-panel">
+        <div class="panel-title-row">
+          <div class="title-with-help">
+            <h2>專案摘要</h2>
+            <button type="button" class="help-trigger" data-help="project-summary" aria-label="專案摘要說明">?</button>
+          </div>
+          <div class="action-item">
+            <button id="refreshStatusBtn" class="ghost">重新整理</button>
+            <button type="button" class="help-trigger" data-help="refresh-status" aria-label="重新整理說明">?</button>
+          </div>
+        </div>
+        <pre id="projectSummary" class="summary">尚未開啟專案。</pre>
+      </section>
+
+      <section class="panel grow">
+        <div class="panel-title-row">
+          <div class="title-with-help">
+            <h2>檔案樹</h2>
+            <button type="button" class="help-trigger" data-help="file-tree" aria-label="檔案樹說明">?</button>
+          </div>
+          <div class="action-item">
+            <button id="applyPinsBtn" class="ghost">套用釘選</button>
+            <button type="button" class="help-trigger" data-help="apply-pins" aria-label="套用釘選說明">?</button>
+          </div>
+        </div>
+        <div id="fileTree" class="tree empty">尚未載入檔案。</div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div class="workspace-grid">
+      <section class="panel chat-panel">
+        <div class="panel-title-row">
+          <div class="title-with-help">
+            <h2>對話</h2>
+            <button type="button" class="help-trigger" data-help="chat-panel" aria-label="對話說明">?</button>
+          </div>
+          <div id="statusBadge" class="status">待命</div>
+        </div>
+        <div id="chatLog" class="chat-log"></div>
+        <form id="chatForm" class="chat-form">
+          <div class="field-label-row">
+            <label for="chatInput" class="meta">對話輸入</label>
+            <button type="button" class="help-trigger" data-help="chat-input" aria-label="對話輸入說明">?</button>
+          </div>
+          <textarea id="chatInput" rows="4" placeholder="輸入你的問題，例如：請分析登入流程涉及哪些檔案？"></textarea>
+          <div class="actions">
+            <div class="action-item">
+              <button id="sendChatBtn" type="submit" class="primary">送出</button>
+              <button type="button" class="help-trigger" data-help="send-chat" aria-label="送出說明">?</button>
+            </div>
+            <div class="action-item">
+              <button type="button" id="clearChatBtn">清空對話</button>
+              <button type="button" class="help-trigger" data-help="clear-chat" aria-label="清空對話說明">?</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel preview-panel">
+        <div class="panel-title-row">
+          <div class="title-with-help">
+            <h2>檔案預覽</h2>
+            <button type="button" class="help-trigger" data-help="file-preview" aria-label="檔案預覽說明">?</button>
+          </div>
+          <div id="previewPath" class="meta">未選擇檔案</div>
+        </div>
+        <pre id="filePreview" class="code-preview">點左側檔案即可預覽內容，並可勾選釘選到對話上下文。</pre>
+      </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="helpModal" class="help-modal hidden" aria-hidden="true">
+    <div class="help-dialog">
+      <div class="panel-title-row">
+        <h2 id="helpTitle">功能說明</h2>
+        <button id="closeHelpBtn" type="button" class="ghost">關閉</button>
+      </div>
+      <div id="helpBody" class="help-body"></div>
+    </div>
+  </div>
+
+  <template id="treeItemTemplate">
+    <label class="tree-item">
+      <input type="checkbox" class="pin-checkbox">
+      <button type="button" class="tree-link"></button>
+    </label>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

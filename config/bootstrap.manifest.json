@@ -1,0 +1,42 @@
+{
+  "runtime": {
+    "llamaCpp": {
+      "provider": "github-release",
+      "repo": "ggml-org/llama.cpp",
+      "assetPattern": "^llama-.*-bin-win-cpu-x64\\.zip$",
+      "targetDir": "runtime/llama.cpp",
+      "extract": "zip"
+    },
+    "portableGit": {
+      "provider": "github-release",
+      "repo": "git-for-windows/git",
+      "assetPattern": "^PortableGit-.*-64-bit\\.7z\\.exe$",
+      "targetDir": "runtime/PortableGit",
+      "extract": "7z-sfx"
+    },
+    "winPython": {
+      "provider": "github-release",
+      "repo": "winpython/winpython",
+      "assetPattern": "^WinPython64-3\\.13\\..*dot\\.zip$",
+      "targetDir": "runtime/WinPython",
+      "extract": "zip"
+    }
+  },
+  "models": {
+    "qwen": {
+      "enabled": true,
+      "provider": "huggingface",
+      "repo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "filePattern": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+      "targetDir": "models/qwen2.5-coder-7b-instruct-q4"
+    },
+    "codellama": {
+      "enabled": false,
+      "provider": "huggingface",
+      "repo": "",
+      "filePattern": "",
+      "targetDir": "models/codellama-7b-instruct-q4",
+      "note": "Code Llama does not have an official Meta GGUF repo. Fill repo and filePattern with a GGUF source you trust before enabling."
+    }
+  }
+}
