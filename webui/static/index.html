@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CodeWorker V0.91b Web UI</title>
+  <title>CodeWorker V0.92b Web UI</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
       <div class="brand">
         <div class="brand-mark">CW</div>
         <div>
-          <h1>CodeWorker V0.91b</h1>
+          <h1>CodeWorker V0.92b</h1>
           <p>本地離線專案分析與對話</p>
         </div>
       </div>
@@ -142,11 +142,34 @@
               <button type="button" class="help-trigger" data-help="send-chat" aria-label="送出說明">?</button>
             </div>
             <div class="action-item">
+              <button type="button" id="generateEditBtn">產生修改草案</button>
+              <button type="button" class="help-trigger" data-help="generate-edit" aria-label="產生修改草案說明">?</button>
+            </div>
+            <div class="action-item">
+              <button type="button" id="applyEditBtn" class="primary hidden">套用修改</button>
+              <button type="button" class="help-trigger" data-help="apply-edit" aria-label="套用修改說明">?</button>
+            </div>
+            <div class="action-item">
+              <button type="button" id="discardEditBtn" class="hidden">丟棄草案</button>
+              <button type="button" class="help-trigger" data-help="discard-edit" aria-label="丟棄草案說明">?</button>
+            </div>
+            <div class="action-item">
               <button type="button" id="clearChatBtn">清空對話</button>
               <button type="button" class="help-trigger" data-help="clear-chat" aria-label="清空對話說明">?</button>
             </div>
           </div>
         </form>
+        <section id="editPlanPanel" class="edit-plan hidden">
+          <div class="panel-title-row compact">
+            <div class="title-with-help">
+              <strong>修改草案</strong>
+              <button type="button" class="help-trigger" data-help="edit-plan" aria-label="修改草案說明">?</button>
+            </div>
+            <div id="editPlanMeta" class="meta">尚未產生草案</div>
+          </div>
+          <div id="editPlanSummary" class="edit-plan-summary"></div>
+          <pre id="editPlanDiff" class="edit-plan-diff"></pre>
+        </section>
       </section>
 
       <section class="panel preview-panel">

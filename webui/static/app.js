@@ -3,6 +3,7 @@ const state = {
   projectPath: "",
   modelKey: "qwen",
   pinnedFiles: new Set(),
+  pendingEdit: null,
   history: [],
   currentTaskId: null,
   currentTaskKind: null,
@@ -169,6 +170,41 @@ const HELP_CONTENT = {
       "不會刪除專案、模型、摘要或檔案樹。",
     ],
   },
+  "generate-edit": {
+    title: "產生修改草案",
+    description: "根據你目前輸入的需求，讓模型先產生一份可套用的修改草案，不會立刻寫入檔案。",
+    usage: [
+      "建議先在檔案樹勾選相關檔案，再按這個按鈕。",
+      "系統會顯示修改摘要與 diff 預覽。",
+      "草案確認無誤後，再按「套用修改」。",
+    ],
+  },
+  "apply-edit": {
+    title: "套用修改",
+    description: "把目前的修改草案正式寫回專案檔案，並自動建立 git commit。",
+    usage: [
+      "只有在已產生草案時才可按。",
+      "套用後會寫入檔案並嘗試 commit。",
+      "目前版本只支援修改既有文字檔，不支援新增檔案。",
+    ],
+  },
+  "discard-edit": {
+    title: "丟棄草案",
+    description: "把目前尚未套用的修改草案清掉，不會改動任何檔案。",
+    usage: [
+      "適合草案不滿意時重新生成。",
+      "只會移除預覽內容，不會寫入專案。",
+    ],
+  },
+  "edit-plan": {
+    title: "修改草案",
+    description: "顯示目前待套用的修改摘要與 unified diff 預覽，讓你先確認內容再決定是否寫回檔案。",
+    usage: [
+      "先按「產生修改草案」。",
+      "這裡會列出修改檔案、原因與 diff。",
+      "確認後按「套用修改」，不滿意就按「丟棄草案」。",
+    ],
+  },
 };
 
 const elements = {
@@ -187,7 +223,14 @@ const elements = {
   chatForm: document.getElementById("chatForm"),
   chatInput: document.getElementById("chatInput"),
   sendChatBtn: document.getElementById("sendChatBtn"),
+  generateEditBtn: document.getElementById("generateEditBtn"),
+  applyEditBtn: document.getElementById("applyEditBtn"),
+  discardEditBtn: document.getElementById("discardEditBtn"),
   clearChatBtn: document.getElementById("clearChatBtn"),
+  editPlanPanel: document.getElementById("editPlanPanel"),
+  editPlanMeta: document.getElementById("editPlanMeta"),
+  editPlanSummary: document.getElementById("editPlanSummary"),
+  editPlanDiff: document.getElementById("editPlanDiff"),
   statusBadge: document.getElementById("statusBadge"),
   treeItemTemplate: document.getElementById("treeItemTemplate"),
   progressPanel: document.getElementById("progressPanel"),
@@ -251,6 +294,7 @@ function setUiState(nextState) {
   const ready = nextState === "ready";
   const opening = nextState === "opening";
   const busy = opening || state.currentTaskKind === "redownload-model";
+  const hasPendingEdit = !!state.pendingEdit;
 
   elements.openProjectBtn.disabled = opening;
   elements.pickFolderBtn.disabled = opening;
@@ -259,8 +303,11 @@ function setUiState(nextState) {
   elements.analyzeBtn.disabled = !ready || busy;
   elements.applyPinsBtn.disabled = !ready || busy;
   elements.sendChatBtn.disabled = !ready || busy;
+  elements.generateEditBtn.disabled = !ready || busy;
   elements.chatInput.disabled = !ready || busy;
   elements.clearChatBtn.disabled = !ready;
+  elements.applyEditBtn.disabled = !ready || busy || !hasPendingEdit;
+  elements.discardEditBtn.disabled = !ready || busy || !hasPendingEdit;
 }
 
 function renderProgress(progress = 0, step = "", title = "背景作業執行中") {
@@ -336,6 +383,30 @@ function clearError() {
   elements.errorActionBtn.classList.add("hidden");
 }
 
+function renderPendingEdit(plan) {
+  state.pendingEdit = plan || null;
+  if (!plan || !plan.edits || !plan.edits.length) {
+    elements.editPlanPanel.classList.add("hidden");
+    elements.applyEditBtn.classList.add("hidden");
+    elements.discardEditBtn.classList.add("hidden");
+    elements.editPlanMeta.textContent = "尚未產生草案";
+    elements.editPlanSummary.textContent = "";
+    elements.editPlanDiff.textContent = "";
+    return;
+  }
+  const diffs = plan.edits.map((item) => {
+    const reason = item.reason ? `# ${item.path} | ${item.reason}` : `# ${item.path}`;
+    return `${reason}\n${item.diff}`;
+  });
+  elements.editPlanPanel.classList.remove("hidden");
+  elements.applyEditBtn.classList.remove("hidden");
+  elements.discardEditBtn.classList.remove("hidden");
+  elements.editPlanMeta.textContent = `${plan.edits.length} 個檔案待修改`;
+  const needMore = plan.needMoreContext?.length ? `\n需要補充：${plan.needMoreContext.join("、")}` : "";
+  elements.editPlanSummary.textContent = `${plan.summary || "已產生修改草案"}${needMore}`;
+  elements.editPlanDiff.textContent = diffs.join("\n\n");
+}
+
 function appendMessage(role, content) {
   const item = document.createElement("div");
   item.className = `chat-item ${role}`;
@@ -382,12 +453,14 @@ async function refreshStatus() {
   state.projectPath = data.projectPath || "";
   state.modelKey = data.modelKey || "qwen";
   state.pinnedFiles = new Set(data.pinnedFiles || []);
+  state.pendingEdit = data.pendingEdit || null;
   state.history = data.history || [];
   elements.projectPath.value = state.projectPath;
   elements.modelKey.value = state.modelKey;
   elements.projectSummary.textContent = data.summary || "尚未開啟專案。";
   renderTree(data.tree || []);
   renderHistory(state.history);
+  renderPendingEdit(state.pendingEdit);
   if (state.uiState !== "opening" && state.currentTaskKind !== "redownload-model") {
     setUiState(data.uiState || (data.projectPath ? "ready" : "idle"));
     if (data.projectPath) {
@@ -403,6 +476,7 @@ function resetProjectViews(message = "尚未開啟專案。") {
   elements.projectSummary.textContent = message;
   elements.previewPath.textContent = "未選擇檔案";
   elements.filePreview.textContent = "點左側檔案即可預覽內容，並可勾選釘選到對話上下文。";
+  renderPendingEdit(null);
   renderTree([]);
 }
 
@@ -538,6 +612,74 @@ async function analyzeProject() {
   }
 }
 
+async function generateEditPlan() {
+  const message = elements.chatInput.value.trim();
+  if (!message) {
+    showError({ code: "EDIT_PLAN_FAILED", message: "請先輸入修改需求。", details: "" });
+    return;
+  }
+  if (state.uiState !== "ready") {
+    showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
+    return;
+  }
+  clearError();
+  setStatus("正在產生修改草案", true);
+  try {
+    const data = await requestJson("/api/edit/plan", {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
+    renderPendingEdit(data.plan);
+    appendMessage("assistant", `已產生修改草案：${data.plan.summary}`);
+    setStatus("修改草案已產生");
+    setUiState("ready");
+  } catch (error) {
+    setStatus("產生草案失敗");
+    showError(normalizeError(error, "EDIT_PLAN_FAILED", "產生修改草案失敗。"));
+  }
+}
+
+async function applyEditPlan() {
+  if (!state.pendingEdit) {
+    showError({ code: "NO_PENDING_EDIT", message: "目前沒有可套用的修改草案。", details: "" });
+    return;
+  }
+  clearError();
+  setStatus("正在套用修改", true);
+  try {
+    const data = await requestJson("/api/edit/apply", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    renderPendingEdit(null);
+    await refreshStatus();
+    if (elements.previewPath.textContent && elements.previewPath.textContent !== "未選擇檔案") {
+      await loadFilePreview(elements.previewPath.textContent);
+    }
+    appendMessage("assistant", `已套用修改${data.commitHash ? `，commit: ${data.commitHash}` : ""}`);
+    setStatus("修改已套用");
+    setUiState("ready");
+  } catch (error) {
+    setStatus("套用修改失敗");
+    showError(normalizeError(error, "APPLY_EDIT_FAILED", "套用修改失敗。"));
+  }
+}
+
+async function discardEditPlan() {
+  if (!state.pendingEdit) return;
+  try {
+    await requestJson("/api/edit/discard", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    renderPendingEdit(null);
+    setStatus("已丟棄草案");
+    setUiState("ready");
+  } catch (error) {
+    showError(normalizeError(error, "DISCARD_EDIT_FAILED", "丟棄草案失敗。"));
+  }
+}
+
 async function loadFilePreview(path) {
   if (state.uiState !== "ready") {
     showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
@@ -622,6 +764,9 @@ elements.analyzeBtn.addEventListener("click", analyzeProject);
 elements.refreshStatusBtn.addEventListener("click", refreshStatus);
 elements.applyPinsBtn.addEventListener("click", applyPins);
 elements.chatForm.addEventListener("submit", sendChat);
+elements.generateEditBtn.addEventListener("click", generateEditPlan);
+elements.applyEditBtn.addEventListener("click", applyEditPlan);
+elements.discardEditBtn.addEventListener("click", discardEditPlan);
 elements.clearChatBtn.addEventListener("click", clearChat);
 elements.errorActionBtn.addEventListener("click", redownloadModel);
 elements.dismissErrorBtn.addEventListener("click", clearError);

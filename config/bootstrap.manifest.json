@@ -17,7 +17,8 @@
     "winPython": {
       "provider": "github-release",
       "repo": "winpython/winpython",
-      "assetPattern": "^WinPython64-3\\.13\\..*dot\\.zip$",
+      "releaseTag": "16.6.20250620final",
+      "assetPattern": "^WinPython64-3\\.12\\..*dot\\.zip$",
       "targetDir": "runtime/WinPython",
       "extract": "zip"
     }

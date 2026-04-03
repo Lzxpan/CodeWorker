@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import json
 import mimetypes
 import os
@@ -57,6 +58,9 @@ DEFAULT_ANALYSIS_PROMPT = (
 )
 TASK_OPEN_PROJECT = "open-project"
 TASK_REDOWNLOAD_MODEL = "redownload-model"
+MAX_EDIT_FILES = 3
+MAX_EDIT_FILE_CHARS = 1800
+MAX_EDIT_TOTAL_CHARS = 6500
 
 
 @dataclass
@@ -78,6 +82,7 @@ class SessionState:
     tests: List[str] = field(default_factory=list)
     pinned_files: List[str] = field(default_factory=list)
     history: List[Dict[str, str]] = field(default_factory=list)
+    pending_edit: Optional[Dict[str, object]] = None
     ui_state: str = "idle"
 
 
@@ -183,6 +188,7 @@ def clear_session(ui_state: str = "idle") -> None:
         STATE.tests = []
         STATE.pinned_files = []
         STATE.history = []
+        STATE.pending_edit = None
         STATE.ui_state = ui_state
 
 
@@ -690,6 +696,15 @@ def read_file_excerpt(project_root: Path, relative_path: str, max_chars: int = M
     return content[:max_chars] + ("\n... [truncated]" if len(content) > max_chars else "")
 
 
+def read_file_full(project_root: Path, relative_path: str) -> str:
+    target = (project_root / relative_path).resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError("Invalid file path.") from exc
+    return target.read_text(encoding="utf-8", errors="replace")
+
+
 def choose_context_files(message: str, files: List[ProjectFile], entrypoints: List[str], tests: List[str], pinned: List[str]) -> List[str]:
     lowered = message.lower()
     tokens = {token for token in re.split(r"[^a-zA-Z0-9_./-]+", lowered) if len(token) >= 2}
@@ -738,6 +753,226 @@ def build_project_context(project_root: Path, state: SessionState, message: str)
         chunks.append(block)
         total_chars += len(block)
     return "\n\n".join(chunks)
+
+
+def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
+    selected_paths = choose_context_files(message, state.files, state.entrypoints, state.tests, state.pinned_files)
+    selected_paths = selected_paths[:MAX_EDIT_FILES]
+    chunks = [
+        state.summary,
+        "可編輯候選檔案:\n" + "\n".join(selected_paths) if selected_paths else "可編輯候選檔案:\n(無)",
+    ]
+    total_chars = sum(len(chunk) for chunk in chunks)
+    for relative_path in selected_paths:
+        try:
+            excerpt = read_file_excerpt(project_root, relative_path, max_chars=MAX_EDIT_FILE_CHARS)
+        except (OSError, ValueError):
+            continue
+        block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
+        if total_chars + len(block) > MAX_EDIT_TOTAL_CHARS:
+            break
+        chunks.append(block)
+        total_chars += len(block)
+    return "\n\n".join(chunks), selected_paths
+
+
+def extract_json_payload(raw: str) -> Dict[str, object]:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    if not cleaned.startswith("{"):
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            cleaned = cleaned[start:end + 1]
+    return json.loads(cleaned)
+
+
+def generate_diff(relative_path: str, before: str, after: str) -> str:
+    diff = difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=f"a/{relative_path}",
+        tofile=f"b/{relative_path}",
+        lineterm="",
+    )
+    return "\n".join(diff)
+
+
+def resolve_git_executable() -> str:
+    candidates = [
+        ROOT_DIR / "runtime" / "PortableGit" / "cmd" / "git.exe",
+        ROOT_DIR / "runtime" / "PortableGit" / "bin" / "git.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return "git"
+
+
+def run_git(project_root: Path, *args: str, timeout_seconds: int = 60) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+    return subprocess.run(
+        [resolve_git_executable(), "-C", str(project_root), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=timeout_seconds,
+        env=env,
+    )
+
+
+def build_edit_messages(message: str, context: str, allowed_files: List[str]) -> List[Dict[str, str]]:
+    allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無可編輯檔案)"
+    schema = (
+        '{\n'
+        '  "summary": "一句話說明修改目的",\n'
+        '  "needMoreContext": ["若需要更多檔案請列出"],\n'
+        '  "edits": [\n'
+        '    {\n'
+        '      "path": "相對路徑",\n'
+        '      "reason": "修改原因",\n'
+        '      "updatedContent": "該檔案修改後的完整內容"\n'
+        '    }\n'
+        '  ]\n'
+        '}'
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是本機離線 code assistant，現在要產生可直接套用到檔案的修改草案。"
+                "請全程使用繁體中文說明，但 JSON key 與檔案內容保留原文。"
+                "你只能修改提供給你的候選檔案，不可新增檔案、不可刪除檔案。"
+                "若資訊不足或無法安全修改，請回傳 edits 為空陣列，並把需要補看的檔案寫到 needMoreContext。"
+                "請只輸出 JSON，不要加 markdown 或其他文字。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"使用者需求:\n{message}\n\n"
+                f"只允許修改以下檔案:\n{allowed_block}\n\n"
+                f"以下是專案上下文:\n{context}\n\n"
+                f"回傳格式必須符合這個 JSON schema:\n{schema}"
+            ),
+        },
+    ]
+
+
+def create_edit_plan(project_root: Path, state: SessionState, message: str) -> Dict[str, object]:
+    context, allowed_files = build_edit_context(project_root, state, message)
+    if not allowed_files:
+        raise RuntimeError("目前沒有可用的候選檔案可修改。請先釘選目標檔案或確認專案已正確載入。")
+
+    raw_reply = call_local_model(state.model_alias, build_edit_messages(message, context, allowed_files))
+    payload = extract_json_payload(raw_reply)
+    edits = payload.get("edits", [])
+    if not isinstance(edits, list):
+        raise RuntimeError("模型回傳的 edits 格式不正確。")
+
+    normalized_edits: List[Dict[str, object]] = []
+    for item in edits[:MAX_EDIT_FILES]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        updated = item.get("updatedContent")
+        if path not in allowed_files or not isinstance(updated, str):
+            continue
+        before = read_file_full(project_root, path)
+        if before == updated:
+            continue
+        diff_text = generate_diff(path, before, updated)
+        if not diff_text.strip():
+            continue
+        normalized_edits.append(
+            {
+                "path": path,
+                "reason": reason or "模型未提供原因",
+                "before": before,
+                "after": updated,
+                "diff": diff_text,
+            }
+        )
+
+    need_more_context = payload.get("needMoreContext", [])
+    if not isinstance(need_more_context, list):
+        need_more_context = []
+
+    plan = {
+        "request": message,
+        "summary": str(payload.get("summary", "")).strip() or "已產生修改草案",
+        "needMoreContext": [str(item).strip() for item in need_more_context if str(item).strip()],
+        "edits": normalized_edits,
+    }
+    return plan
+
+
+def apply_edit_plan(project_root: Path, plan: Dict[str, object]) -> Dict[str, object]:
+    edits = plan.get("edits", [])
+    if not isinstance(edits, list) or not edits:
+        raise RuntimeError("目前沒有可套用的修改草案。")
+
+    changed_paths: List[str] = []
+    for item in edits:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).strip()
+        after = item.get("after")
+        if not path or not isinstance(after, str):
+            continue
+        target = (project_root / path).resolve()
+        try:
+            target.relative_to(project_root)
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid edit target: {path}") from exc
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8", errors="replace", newline="") as handle:
+            handle.write(after)
+        changed_paths.append(path)
+
+    if not changed_paths:
+        raise RuntimeError("沒有任何檔案被寫入。")
+
+    add_result = run_git(project_root, "add", "--", *changed_paths, timeout_seconds=90)
+    if add_result.returncode != 0:
+        raise RuntimeError(add_result.stdout + add_result.stderr)
+
+    diff_result = run_git(project_root, "diff", "--cached", "--quiet", timeout_seconds=30)
+    commit_hash = ""
+    if diff_result.returncode == 1:
+        title = f"CodeWorker 套用修改草案: {plan.get('summary', '更新專案檔案')}"
+        commit_result = run_git(
+            project_root,
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            title[:72],
+            "--no-verify",
+            "--no-gpg-sign",
+            timeout_seconds=90,
+        )
+        if commit_result.returncode != 0:
+            raise RuntimeError(commit_result.stdout + commit_result.stderr)
+        rev_result = run_git(project_root, "rev-parse", "--short", "HEAD", timeout_seconds=30)
+        if rev_result.returncode == 0:
+            commit_hash = rev_result.stdout.strip()
+
+    return {
+        "changedFiles": changed_paths,
+        "commitHash": commit_hash,
+    }
 
 
 def call_local_model(model_alias: str, messages: List[Dict[str, str]]) -> str:
@@ -805,7 +1040,12 @@ def classify_start_server_error(output: str, model_key: str) -> Dict[str, object
     )
 
 
-def build_session_payload(project_root: Path, model_key: str) -> Dict[str, object]:
+def build_session_payload(
+    project_root: Path,
+    model_key: str,
+    preserve_history: bool = False,
+    preserve_pins: bool = False,
+) -> Dict[str, object]:
     files = collect_project_files(project_root)
     file_paths = [file.path for file in files]
     entrypoints = detect_entrypoints(file_paths)
@@ -814,6 +1054,8 @@ def build_session_payload(project_root: Path, model_key: str) -> Dict[str, objec
     tree = file_paths[:MAX_TREE_ITEMS]
     model_alias = "codellama-local" if model_key == "codellama" else "qwen-local"
     with STATE_LOCK:
+        existing_history = list(STATE.history)
+        existing_pins = [path for path in STATE.pinned_files if path in file_paths]
         STATE.project_path = str(project_root)
         STATE.model_key = model_key
         STATE.model_alias = model_alias
@@ -822,8 +1064,9 @@ def build_session_payload(project_root: Path, model_key: str) -> Dict[str, objec
         STATE.files = files
         STATE.entrypoints = entrypoints
         STATE.tests = tests
-        STATE.pinned_files = []
-        STATE.history = []
+        STATE.pinned_files = existing_pins if preserve_pins else []
+        STATE.history = existing_history if preserve_history else []
+        STATE.pending_edit = None
         STATE.ui_state = "ready"
     return {
         "projectPath": str(project_root),
@@ -987,6 +1230,7 @@ def get_status_payload() -> Dict[str, object]:
             "tests": STATE.tests,
             "pinnedFiles": STATE.pinned_files,
             "history": STATE.history[-20:],
+            "pendingEdit": STATE.pending_edit,
             "uiState": STATE.ui_state,
         }
 
@@ -1026,6 +1270,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/chat":
             self.handle_chat()
+            return
+        if parsed.path == "/api/edit/plan":
+            self.handle_edit_plan()
+            return
+        if parsed.path == "/api/edit/apply":
+            self.handle_apply_edit()
+            return
+        if parsed.path == "/api/edit/discard":
+            self.handle_discard_edit()
             return
         if parsed.path == "/api/pin-files":
             self.handle_pin_files()
@@ -1075,6 +1328,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 raise ValueError("Unsupported model. Use qwen or codellama.")
             if not project_path:
                 raise ValueError("Project path is required.")
+            setattr(self.server, "_pending_edit_internal", None)
             task = start_background_task(TASK_OPEN_PROJECT, open_project_worker, project_path, model_key)
             json_response(self, {"ok": True, "data": {"taskId": task.id, "kind": task.kind}})
         except ValueError as exc:
@@ -1142,6 +1396,111 @@ class WebUIHandler(BaseHTTPRequestHandler):
             error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Chat failed.", str(exc)))
+
+    def handle_edit_plan(self) -> None:
+        try:
+            payload = self.read_json_body()
+            message = str(payload.get("message", "")).strip()
+            if not message:
+                raise ValueError("message is required.")
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                project_root = Path(STATE.project_path)
+                snapshot = SessionState(
+                    project_path=STATE.project_path,
+                    model_key=STATE.model_key,
+                    model_alias=STATE.model_alias,
+                    summary=STATE.summary,
+                    tree=list(STATE.tree),
+                    files=list(STATE.files),
+                    entrypoints=list(STATE.entrypoints),
+                    tests=list(STATE.tests),
+                    pinned_files=list(STATE.pinned_files),
+                    history=list(STATE.history),
+                    pending_edit=STATE.pending_edit,
+                    ui_state=STATE.ui_state,
+                )
+            plan = create_edit_plan(project_root, snapshot, message)
+            if not plan.get("edits"):
+                need_more = "\n".join(plan.get("needMoreContext", [])) if plan.get("needMoreContext") else "模型未產生可安全套用的修改。"
+                raise RuntimeError(
+                    json.dumps(
+                        make_error(
+                            "EDIT_PLAN_EMPTY",
+                            "模型沒有產生可套用的修改草案。",
+                            need_more,
+                        )
+                    )
+                )
+            public_plan = {
+                "request": plan["request"],
+                "summary": plan["summary"],
+                "needMoreContext": plan.get("needMoreContext", []),
+                "edits": [
+                    {
+                        "path": item["path"],
+                        "reason": item["reason"],
+                        "diff": item["diff"],
+                    }
+                    for item in plan["edits"]
+                ],
+            }
+            with STATE_LOCK:
+                STATE.pending_edit = public_plan
+                STATE.history.append({"role": "user", "content": message, "kind": "edit-request"})
+                STATE.history.append({"role": "assistant", "content": f"已產生修改草案：{plan['summary']}", "kind": "edit-plan"})
+            setattr(self.server, "_pending_edit_internal", plan)
+            json_response(self, {"ok": True, "data": {"plan": public_plan}})
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except RuntimeError as exc:
+            try:
+                error_payload = json.loads(str(exc))
+            except json.JSONDecodeError:
+                error_payload = make_error("EDIT_PLAN_FAILED", "Generate edit plan failed.", str(exc))
+            error_response(self, error_payload)
+        except Exception as exc:
+            error_response(self, make_error("EDIT_PLAN_FAILED", "Generate edit plan failed.", str(exc)))
+
+    def handle_apply_edit(self) -> None:
+        try:
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                project_root = Path(STATE.project_path)
+            internal_plan = getattr(self.server, "_pending_edit_internal", None)
+            if not internal_plan:
+                raise RuntimeError("目前沒有可套用的修改草案。")
+            result = apply_edit_plan(project_root, internal_plan)
+            with STATE_LOCK:
+                STATE.pending_edit = None
+                STATE.history.append(
+                    {
+                        "role": "assistant",
+                        "content": "已套用修改草案。"
+                        + (f" commit: {result['commitHash']}" if result.get("commitHash") else ""),
+                        "kind": "edit-apply",
+                    }
+                )
+            setattr(self.server, "_pending_edit_internal", None)
+            with STATE_LOCK:
+                model_key = STATE.model_key
+            payload = build_session_payload(project_root, model_key, preserve_history=True, preserve_pins=True)
+            payload.update(result)
+            json_response(self, {"ok": True, "data": payload})
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except RuntimeError as exc:
+            error_response(self, make_error("APPLY_EDIT_FAILED", "Apply edit failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("APPLY_EDIT_FAILED", "Apply edit failed.", str(exc)))
+
+    def handle_discard_edit(self) -> None:
+        with STATE_LOCK:
+            STATE.pending_edit = None
+        setattr(self.server, "_pending_edit_internal", None)
+        json_response(self, {"ok": True, "data": {"discarded": True}})
 
     def handle_pin_files(self) -> None:
         try:

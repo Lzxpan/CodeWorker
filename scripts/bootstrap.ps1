@@ -3,6 +3,7 @@ param(
     [switch]$SkipRuntime,
     [switch]$SkipModels,
     [switch]$Force,
+    [switch]$ForceWinPython,
     [string[]]$Models
 )
 
@@ -38,17 +39,23 @@ function Clear-Directory {
 function Get-GitHubReleaseAsset {
     param(
         [string]$Repo,
-        [string]$AssetPattern
+        [string]$AssetPattern,
+        [string]$ReleaseTag
     )
 
     $headers = @{
         "User-Agent" = "CodeWorker-Bootstrap"
         "Accept"     = "application/vnd.github+json"
     }
-    $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/latest"
+    if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+        $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/latest"
+    } else {
+        $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/tags/$ReleaseTag"
+    }
     $asset = $release.assets | Where-Object { $_.name -match $AssetPattern } | Select-Object -First 1
     if (-not $asset) {
-        throw "No asset matched pattern '$AssetPattern' in $Repo latest release."
+        $releaseLabel = if ([string]::IsNullOrWhiteSpace($ReleaseTag)) { "latest release" } else { "release tag '$ReleaseTag'" }
+        throw "No asset matched pattern '$AssetPattern' in $Repo $releaseLabel."
     }
 
     return [pscustomobject]@{
@@ -225,8 +232,24 @@ function Install-RuntimePackage {
             }
         }
         "winPython" {
-            if (((Test-Path -LiteralPath (Join-Path $targetDir "python.exe")) -or (Test-Path -LiteralPath (Join-Path $targetDir "python\python.exe"))) -and -not $Force) {
-                $skip = $true
+            $pythonExe = Join-Path $targetDir "python.exe"
+            if (-not (Test-Path -LiteralPath $pythonExe)) {
+                $pythonExe = Join-Path $targetDir "python\python.exe"
+            }
+
+            if ((Test-Path -LiteralPath $pythonExe) -and -not $Force -and -not $ForceWinPython) {
+                $versionText = ""
+                try {
+                    $versionText = & $pythonExe -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"
+                } catch {
+                    $versionText = ""
+                }
+
+                if ($versionText -match '^3\.(10|11|12)$') {
+                    $skip = $true
+                } else {
+                    Write-Step "Portable Python at '$pythonExe' is incompatible with aider-chat (detected $versionText). Reinstalling WinPython."
+                }
             }
         }
     }
@@ -237,7 +260,7 @@ function Install-RuntimePackage {
     }
 
     Write-Step "Resolving latest asset for $Name"
-    $asset = Get-GitHubReleaseAsset -Repo $Config.repo -AssetPattern $Config.assetPattern
+    $asset = Get-GitHubReleaseAsset -Repo $Config.repo -AssetPattern $Config.assetPattern -ReleaseTag $Config.releaseTag
     $downloadDir = Join-Path $RootDir "downloads"
     Ensure-Directory -Path $downloadDir
     $archivePath = Join-Path $downloadDir $asset.Name
