@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -28,8 +29,11 @@ LLM_ENDPOINT = "http://127.0.0.1:8080/v1/chat/completions"
 MAX_SCAN_FILES = 800
 MAX_TREE_ITEMS = 400
 MAX_CONTEXT_FILES = 4
-MAX_FILE_CHARS = 2200
-MAX_TOTAL_CONTEXT = 8000
+MAX_FILE_CHARS = 3600
+MAX_TOTAL_CONTEXT = 12000
+MAX_FOCUSED_CHAT_FILE_CHARS = 22000
+MAX_FOCUSED_CHAT_TOTAL_CHARS = 22000
+MAX_PREVIEW_CHAT_CHARS = 22000
 MAX_TREE_CONTEXT_ITEMS = 30
 MAX_CHAT_HISTORY_ITEMS = 4
 ATTACH_PROJECT_TIMEOUT_SECONDS = 180
@@ -59,8 +63,24 @@ DEFAULT_ANALYSIS_PROMPT = (
 TASK_OPEN_PROJECT = "open-project"
 TASK_REDOWNLOAD_MODEL = "redownload-model"
 MAX_EDIT_FILES = 3
-MAX_EDIT_FILE_CHARS = 1800
-MAX_EDIT_TOTAL_CHARS = 6500
+MAX_EDIT_FILE_CHARS = 4200
+MAX_EDIT_TOTAL_CHARS = 14000
+MAX_EDIT_SINGLE_FILE_CHARS = 22000
+MAX_ADVISORY_FILE_CHARS = 18000
+EDIT_PLAN_TIMEOUT_SECONDS = 300
+CSHARP_RESERVED_IDENTIFIERS = {
+    "if", "else", "switch", "case", "break", "return", "true", "false", "null",
+    "new", "var", "int", "long", "short", "byte", "float", "double", "decimal",
+    "bool", "string", "char", "object", "void", "public", "private", "protected",
+    "internal", "static", "readonly", "async", "await", "foreach", "for", "while",
+    "do", "try", "catch", "finally", "using", "namespace", "class", "struct",
+    "partial", "this", "base", "out", "ref", "in", "params",
+}
+CSHARP_ALLOWED_GLOBAL_IDENTIFIERS = {
+    "Keys", "Math", "Color", "Point", "Path", "AppContext", "Form",
+    "EventArgs", "KeyEventArgs", "Enumerable", "Array", "Task", "List",
+    "Dictionary", "HashSet",
+}
 
 
 @dataclass
@@ -81,6 +101,7 @@ class SessionState:
     entrypoints: List[str] = field(default_factory=list)
     tests: List[str] = field(default_factory=list)
     pinned_files: List[str] = field(default_factory=list)
+    current_preview_path: Optional[str] = None
     history: List[Dict[str, str]] = field(default_factory=list)
     pending_edit: Optional[Dict[str, object]] = None
     ui_state: str = "idle"
@@ -135,6 +156,9 @@ def json_response(handler: BaseHTTPRequestHandler, payload: Dict, status: int = 
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Expires", "0")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -148,6 +172,9 @@ def text_response(handler: BaseHTTPRequestHandler, body: str, status: int = 200,
     data = body.encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
+    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Expires", "0")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
@@ -187,6 +214,7 @@ def clear_session(ui_state: str = "idle") -> None:
         STATE.entrypoints = []
         STATE.tests = []
         STATE.pinned_files = []
+        STATE.current_preview_path = None
         STATE.history = []
         STATE.pending_edit = None
         STATE.ui_state = ui_state
@@ -705,32 +733,330 @@ def read_file_full(project_root: Path, relative_path: str) -> str:
     return target.read_text(encoding="utf-8", errors="replace")
 
 
-def choose_context_files(message: str, files: List[ProjectFile], entrypoints: List[str], tests: List[str], pinned: List[str]) -> List[str]:
+def truncate_middle(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars < 64:
+        return text[:max_chars]
+    keep_each_side = (max_chars - 24) // 2
+    return f"{text[:keep_each_side]}\n... [truncated] ...\n{text[-keep_each_side:]}"
+
+
+def char_index_to_line(content: str, index: int) -> int:
+    if index <= 0:
+        return 1
+    return content.count("\n", 0, min(index, len(content))) + 1
+
+
+def slice_lines(content: str, start_line: int, end_line: int) -> str:
+    lines = content.splitlines()
+    if not lines:
+        return ""
+    start = max(1, start_line)
+    end = min(len(lines), end_line)
+    return "\n".join(lines[start - 1:end])
+
+
+def find_matching_brace(content: str, brace_start: int) -> Optional[int]:
+    depth = 0
+    for index in range(brace_start, len(content)):
+        char = content[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def detect_csharp_regions(content: str) -> List[Dict[str, object]]:
+    patterns = [
+        re.compile(
+            r"(?m)^[ \t]*(?:public|private|protected|internal)(?:\s+static)?(?:\s+async)?\s+[A-Za-z_][\w<>\[\],?. ]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;\n{}]*\)\s*\{"
+        ),
+        re.compile(
+            r"(?m)^[ \t]*(?:public|private|protected|internal)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;\n{}]*\)\s*\{"
+        ),
+    ]
+    regions: List[Dict[str, object]] = []
+    seen_starts = set()
+    for pattern in patterns:
+        for match in pattern.finditer(content):
+            start = match.start()
+            if start in seen_starts:
+                continue
+            brace_start = content.find("{", match.end() - 1)
+            if brace_start < 0:
+                continue
+            end = find_matching_brace(content, brace_start)
+            if end is None or end <= start:
+                continue
+            seen_starts.add(start)
+            start_line = char_index_to_line(content, start)
+            end_line = char_index_to_line(content, end)
+            regions.append(
+                {
+                    "name": match.group(1),
+                    "start": start,
+                    "end": end,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "text": content[start:end].strip(),
+                }
+            )
+    regions.sort(key=lambda item: int(item["start"]))
+    return regions
+
+
+def build_query_terms(message: str) -> List[str]:
+    terms: List[str] = []
+    seen = set()
+
+    def add(term: str) -> None:
+        key = term.lower()
+        if term and key not in seen:
+            seen.add(key)
+            terms.append(term)
+
+    for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,}", message):
+        add(ident)
+
     lowered = message.lower()
-    tokens = {token for token in re.split(r"[^a-zA-Z0-9_./-]+", lowered) if len(token) >= 2}
-    scores: Dict[str, int] = {}
-    for path in pinned:
-        scores[path] = scores.get(path, 0) + 100
-    for path in entrypoints:
-        scores[path] = scores.get(path, 0) + 30
-    for path in tests[:5]:
-        scores[path] = scores.get(path, 0) + 10
-    for file in files:
-        path_lower = file.path.lower()
-        score = scores.get(file.path, 0)
-        if any(token in path_lower for token in tokens):
+    if "ctrl" in lowered or "control" in lowered or "鍵盤" in message or "按鍵" in message:
+        for term in ("KeyDown", "Form1_KeyDown", "KeyPreview", "Control", "Ctrl"):
+            add(term)
+    if "落到底" in message or "落到底部" in message or "直接落下" in message or "快速落下" in message:
+        for term in ("HardDrop", "LockPiece", "MovePiece", "GameTick"):
+            add(term)
+    if "旋轉" in message:
+        for term in ("RotatePiece", "kicks"):
+            add(term)
+    if "暫停" in message:
+        add("TogglePause")
+    return terms
+
+
+def parse_forbidden_identifiers(message: str) -> List[str]:
+    identifiers: List[str] = []
+    seen = set()
+    patterns = [
+        re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b\s*不存在"),
+        re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b\s*不要用"),
+        re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b\s*不能用"),
+        re.compile(r"不要使用\s*\b([A-Za-z_][A-Za-z0-9_]*)\b"),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(message):
+            identifier = match.group(1)
+            key = identifier.lower()
+            if key not in seen:
+                seen.add(key)
+                identifiers.append(identifier)
+    return identifiers
+
+
+def extract_free_identifiers(text: str) -> List[str]:
+    identifiers: List[str] = []
+    for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", text):
+        start = match.start()
+        if start > 0 and text[start - 1] == ".":
+            continue
+        identifiers.append(match.group(0))
+    return identifiers
+
+
+def extract_declared_identifiers(text: str) -> List[str]:
+    declared: List[str] = []
+    patterns = [
+        re.compile(r"\b(?:var|int|long|short|byte|float|double|decimal|bool|string|char|object)\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
+        re.compile(r"\b(?:Point|Color|Path|Form|EventArgs|KeyEventArgs|List|Dictionary|HashSet)\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            declared.append(match.group(1))
+    return declared
+
+
+def collect_edit_safety_issues(before_snippet: str, after_snippet: str, full_content: str, message: str) -> List[str]:
+    issues: List[str] = []
+    forbidden = {item.lower(): item for item in parse_forbidden_identifiers(message)}
+    after_identifiers = extract_free_identifiers(after_snippet)
+    before_identifiers = set(item.lower() for item in extract_free_identifiers(before_snippet))
+    declared_identifiers = set(item.lower() for item in extract_declared_identifiers(after_snippet))
+    full_identifiers = set(item.lower() for item in extract_free_identifiers(full_content))
+
+    forbidden_hits = sorted({identifier for identifier in after_identifiers if identifier.lower() in forbidden})
+    if forbidden_hits:
+        issues.append(f"建議片段仍引用被明確否定的 identifier：{', '.join(forbidden_hits)}")
+
+    unknown_identifiers: List[str] = []
+    for identifier in after_identifiers:
+        lowered = identifier.lower()
+        if lowered in before_identifiers or lowered in declared_identifiers:
+            continue
+        if identifier in CSHARP_RESERVED_IDENTIFIERS or identifier in CSHARP_ALLOWED_GLOBAL_IDENTIFIERS:
+            continue
+        if lowered in full_identifiers:
+            continue
+        unknown_identifiers.append(identifier)
+    if unknown_identifiers:
+        issues.append(f"建議片段引入未在目標檔案中出現的 identifier：{', '.join(sorted(set(unknown_identifiers)))}")
+
+    return issues
+
+
+def build_line_window_from_index(content: str, index: int, before_lines: int = 10, after_lines: int = 20) -> Dict[str, object]:
+    line_count = max(1, len(content.splitlines()))
+    target_line = char_index_to_line(content, index)
+    start_line = max(1, target_line - before_lines)
+    end_line = min(line_count, target_line + after_lines)
+    snippet = slice_lines(content, start_line, end_line)
+    return {
+        "name": f"line {target_line}",
+        "start_line": start_line,
+        "end_line": end_line,
+        "text": snippet.strip(),
+    }
+
+
+def select_relevant_sections(content: str, relative_path: str, message: str, max_sections: int = 3) -> List[Dict[str, object]]:
+    suffix = Path(relative_path).suffix.lower()
+    terms = build_query_terms(message)
+    if not terms:
+        return []
+
+    regions = detect_csharp_regions(content) if suffix == ".cs" else []
+    ranked: List[Tuple[int, Dict[str, object]]] = []
+    lowered_message = message.lower()
+
+    for region in regions:
+        region_name = str(region["name"]).lower()
+        region_text = str(region["text"]).lower()
+        score = 0
+        for term in terms:
+            term_lower = term.lower()
+            if term_lower == region_name:
+                score += 30
+            elif term_lower in region_name:
+                score += 20
+            count = region_text.count(term_lower)
+            if count:
+                score += min(count, 4) * 6
+        if "keydown" in region_name and ("ctrl" in lowered_message or "鍵盤" in message):
+            score += 18
+        if "harddrop" in region_name and ("ctrl" in lowered_message or "落到底" in message):
             score += 20
-        if Path(file.path).name.lower() in lowered:
-            score += 25
         if score > 0:
-            scores[file.path] = score
-    ranked = [path for path, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0]))]
-    if not ranked:
-        ranked = entrypoints[:4] + tests[:2]
+            ranked.append((score, region))
+
+    if ranked:
+        ranked.sort(key=lambda item: (-item[0], int(item[1]["start"])))
+        return [item[1] for item in ranked[:max_sections]]
+
+    fallback_sections: List[Dict[str, object]] = []
+    lowered_content = content.lower()
+    seen_lines = set()
+    for term in terms:
+        index = lowered_content.find(term.lower())
+        if index < 0:
+            continue
+        section = build_line_window_from_index(content, index)
+        marker = (section["start_line"], section["end_line"])
+        if marker in seen_lines:
+            continue
+        seen_lines.add(marker)
+        fallback_sections.append(section)
+        if len(fallback_sections) >= max_sections:
+            break
+    return fallback_sections
+
+
+def score_file_relevance(content: str, relative_path: str, message: str) -> int:
+    terms = build_query_terms(message)
+    if not terms:
+        return 0
+    lowered_content = content.lower()
+    score = 0
+    for term in terms:
+        term_lower = term.lower()
+        score += min(lowered_content.count(term_lower), 6) * 4
+    if Path(relative_path).suffix.lower() == ".cs":
+        for region in detect_csharp_regions(content):
+            region_name = str(region["name"]).lower()
+            for term in terms:
+                term_lower = term.lower()
+                if term_lower == region_name:
+                    score += 24
+                elif term_lower in region_name:
+                    score += 12
+    return score
+
+
+def rank_paths_for_message(project_root: Path, paths: List[str], message: str) -> List[str]:
+    ranked: List[Tuple[int, str]] = []
+    for path in paths:
+        try:
+            content = read_file_full(project_root, path)
+        except (OSError, ValueError):
+            ranked.append((0, path))
+            continue
+        ranked.append((score_file_relevance(content, path, message), path))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    positive = [path for score, path in ranked if score > 0]
+    if positive:
+        remainder = [path for score, path in ranked if score <= 0]
+        return positive + remainder
+    return [path for _, path in ranked]
+
+
+def build_excerpt_for_message(
+    project_root: Path,
+    relative_path: str,
+    message: str,
+    max_chars: int,
+    max_sections: int = 3,
+) -> str:
+    content = read_file_full(project_root, relative_path)
+    sections = select_relevant_sections(content, relative_path, message, max_sections=max_sections)
+    if not sections:
+        return read_file_excerpt(project_root, relative_path, max_chars=max_chars)
+
+    blocks: List[str] = []
+    total_chars = 0
+    for section in sections:
+        header = f"區段: {section['name']} (約第 {section['start_line']}-{section['end_line']} 行)"
+        block = f"{header}\n{section['text']}"
+        if total_chars + len(block) > max_chars:
+            if not blocks:
+                blocks.append(truncate_middle(block, max_chars))
+            break
+        blocks.append(block)
+        total_chars += len(block)
+    return "\n\n".join(blocks)
+
+
+def locate_change_region(content: str, match_index: int) -> Dict[str, object]:
+    regions = detect_csharp_regions(content)
+    for region in regions:
+        if int(region["start"]) <= match_index < int(region["end"]):
+            return region
+    return build_line_window_from_index(content, match_index)
+
+
+def choose_context_files(
+    message: str,
+    files: List[ProjectFile],
+    entrypoints: List[str],
+    tests: List[str],
+    pinned: List[str],
+    preview_path: Optional[str] = None,
+) -> List[str]:
+    allowed = {file.path for file in files}
     unique: List[str] = []
     seen = set()
-    for path in ranked:
-        if path not in seen:
+    for path in pinned:
+        if path in allowed and path not in seen:
             unique.append(path)
             seen.add(path)
         if len(unique) >= MAX_CONTEXT_FILES:
@@ -738,17 +1064,121 @@ def choose_context_files(message: str, files: List[ProjectFile], entrypoints: Li
     return unique
 
 
+def normalize_preview_path(raw_preview_path: object, files: List[ProjectFile]) -> Optional[str]:
+    if not isinstance(raw_preview_path, str):
+        return None
+    preview_path = raw_preview_path.strip()
+    if not preview_path:
+        return None
+    allowed = {file.path for file in files}
+    return preview_path if preview_path in allowed else None
+
+
+def require_pinned_context(state: SessionState) -> List[str]:
+    allowed = {file.path for file in state.files}
+    pinned = [path for path in state.pinned_files if path in allowed]
+    if not pinned:
+        raise ValueError("請先在檔案樹勾選並套用至少一個檔案，模型才會根據這些檔案分析。")
+    return pinned
+
+
+def iter_pending_edit_items(pending_edit: Optional[Dict[str, object]]) -> List[Dict[str, object]]:
+    if not isinstance(pending_edit, dict):
+        return []
+    edits = pending_edit.get("edits")
+    if isinstance(edits, list) and edits:
+        return [item for item in edits if isinstance(item, dict)]
+    suggestions = pending_edit.get("suggestions")
+    if isinstance(suggestions, list) and suggestions:
+        return [item for item in suggestions if isinstance(item, dict)]
+    return []
+
+
+def is_refinement_request(message: str, pending_edit: Optional[Dict[str, object]]) -> bool:
+    if not pending_edit:
+        return False
+    lowered = message.lower()
+    correction_tokens = (
+        "不存在", "不對", "錯", "錯誤", "有問題", "不該", "不是", "不要", "不能",
+        "請用", "改用", "改成", "改為", "應該", "應改", "上一版", "前一版",
+        "這份建議", "這個建議", "請改", "請修正",
+    )
+    english_tokens = ("wrong", "incorrect", "doesn't exist", "not exist", "use existing", "replace with")
+    return any(token in message for token in correction_tokens) or any(token in lowered for token in english_tokens)
+
+
+def build_refinement_ranking_message(message: str, pending_edit: Optional[Dict[str, object]]) -> str:
+    if not pending_edit:
+        return message
+    parts = [message]
+    summary = str(pending_edit.get("summary", "")).strip()
+    if summary:
+        parts.append(summary)
+    for item in iter_pending_edit_items(pending_edit)[:3]:
+        path = str(item.get("path", "")).strip()
+        target = str(item.get("target", "")).strip()
+        location = str(item.get("location", "")).strip()
+        if path:
+            parts.append(path)
+        if target:
+            parts.append(target)
+        if location:
+            parts.append(location)
+    return "\n".join(part for part in parts if part)
+
+
+def build_pending_edit_prompt_block(pending_edit: Optional[Dict[str, object]]) -> str:
+    if not pending_edit:
+        return ""
+    mode = str(pending_edit.get("mode", "precise")).strip() or "precise"
+    lines = [
+        "上一版修改建議如下：",
+        f"- 摘要：{str(pending_edit.get('summary', '')).strip() or '未提供'}",
+        f"- 模式：{'文字模式' if mode == 'advisory' else '精準模式'}",
+    ]
+    failure_reason = str(pending_edit.get("failureReason", "")).strip()
+    if failure_reason:
+        lines.append(f"- 精準模式未套用原因：{failure_reason}")
+    for item in iter_pending_edit_items(pending_edit)[:3]:
+        lines.extend([
+            "",
+            f"檔案：{str(item.get('path', '')).strip() or '(未指定檔案)'}",
+            f"修改位置：{str(item.get('location', '')).strip() or '未提供'}",
+            f"命中函式/區塊：{str(item.get('target', '')).strip() or '未提供'}",
+            f"原因：{str(item.get('reason', item.get('whyHere', ''))).strip() or '未提供'}",
+            "上一版建議替換前片段：",
+            truncate_middle(str(item.get('beforeSnippet', item.get('before', ''))).strip() or "未提供", 1000),
+            "",
+            "上一版建議替換後片段：",
+            truncate_middle(str(item.get('afterSnippet', item.get('after', ''))).strip() or "未提供", 1000),
+        ])
+    need_more_context = pending_edit.get("needMoreContext")
+    if isinstance(need_more_context, list):
+        visible = [str(item).strip() for item in need_more_context if str(item).strip()]
+        if visible:
+            lines.extend(["", "上一版需要補充：", *[f"- {item}" for item in visible]])
+    return "\n".join(lines).strip()
+
+
 def build_project_context(project_root: Path, state: SessionState, message: str) -> str:
-    selected_paths = choose_context_files(message, state.files, state.entrypoints, state.tests, state.pinned_files)
-    chunks = [state.summary, "檔案樹(節錄):\n" + "\n".join(state.tree[:MAX_TREE_CONTEXT_ITEMS])]
+    selected_paths = rank_paths_for_message(project_root, require_pinned_context(state), message)
+    chunks = ["已套用釘選檔案:\n" + "\n".join(selected_paths)]
+    single_file_focus = len(selected_paths) == 1
+    total_limit = MAX_FOCUSED_CHAT_TOTAL_CHARS if single_file_focus else MAX_TOTAL_CONTEXT
     total_chars = sum(len(chunk) for chunk in chunks)
     for relative_path in selected_paths:
         try:
-            excerpt = read_file_excerpt(project_root, relative_path)
+            excerpt = build_excerpt_for_message(
+                project_root,
+                relative_path,
+                message,
+                max_chars=MAX_FOCUSED_CHAT_FILE_CHARS if single_file_focus else MAX_FILE_CHARS,
+                max_sections=3 if single_file_focus else 2,
+            )
         except (OSError, ValueError):
             continue
         block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
-        if total_chars + len(block) > MAX_TOTAL_CONTEXT:
+        if total_chars + len(block) > total_limit:
             break
         chunks.append(block)
         total_chars += len(block)
@@ -756,24 +1186,172 @@ def build_project_context(project_root: Path, state: SessionState, message: str)
 
 
 def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
-    selected_paths = choose_context_files(message, state.files, state.entrypoints, state.tests, state.pinned_files)
-    selected_paths = selected_paths[:MAX_EDIT_FILES]
+    selected_paths = rank_paths_for_message(project_root, require_pinned_context(state), message)[:MAX_EDIT_FILES]
+    single_file_focus = len(selected_paths) == 1
+    total_limit = MAX_EDIT_SINGLE_FILE_CHARS if single_file_focus else MAX_EDIT_TOTAL_CHARS
     chunks = [
-        state.summary,
         "可編輯候選檔案:\n" + "\n".join(selected_paths) if selected_paths else "可編輯候選檔案:\n(無)",
     ]
     total_chars = sum(len(chunk) for chunk in chunks)
     for relative_path in selected_paths:
         try:
-            excerpt = read_file_excerpt(project_root, relative_path, max_chars=MAX_EDIT_FILE_CHARS)
+            excerpt = build_excerpt_for_message(
+                project_root,
+                relative_path,
+                message,
+                max_chars=MAX_EDIT_SINGLE_FILE_CHARS if single_file_focus else MAX_EDIT_FILE_CHARS,
+                max_sections=3 if single_file_focus else 2,
+            )
         except (OSError, ValueError):
             continue
         block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
-        if total_chars + len(block) > MAX_EDIT_TOTAL_CHARS:
+        if total_chars + len(block) > total_limit:
             break
         chunks.append(block)
         total_chars += len(block)
     return "\n\n".join(chunks), selected_paths
+
+
+def build_advisory_context(project_root: Path, state: SessionState, message: str, allowed_files: List[str]) -> str:
+    allowed_files = rank_paths_for_message(project_root, allowed_files, message)
+    chunks = [
+        "建議優先參考檔案:\n" + "\n".join(allowed_files) if allowed_files else "建議優先參考檔案:\n(無)",
+    ]
+    total_chars = sum(len(chunk) for chunk in chunks)
+    total_limit = min(MAX_EDIT_SINGLE_FILE_CHARS, 20000)
+    for relative_path in allowed_files[:MAX_EDIT_FILES]:
+        try:
+            excerpt = build_excerpt_for_message(
+                project_root,
+                relative_path,
+                message,
+                max_chars=MAX_ADVISORY_FILE_CHARS,
+                max_sections=3,
+            )
+        except (OSError, ValueError):
+            continue
+        block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
+        if total_chars + len(block) > total_limit:
+            break
+        chunks.append(block)
+        total_chars += len(block)
+    return "\n\n".join(chunks)
+
+
+def try_resolve_identifier_question(project_root: Path, state: SessionState, message: str) -> Optional[str]:
+    lowered = message.lower()
+    is_identifier_question = any(token in message for token in ("函式名稱", "方法名稱", "事件處理函式")) or "function name" in lowered
+    if not is_identifier_question:
+        return None
+
+    selected_paths = require_pinned_context(state)
+    if "鍵盤" in message or "keydown" in lowered:
+        for relative_path in selected_paths:
+            try:
+                content = read_file_full(project_root, relative_path)
+            except (OSError, ValueError):
+                continue
+            event_match = re.search(r"KeyDown\s*\+=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;", content)
+            if event_match:
+                handler = event_match.group(1)
+                return f"在 {relative_path} 中，鍵盤事件處理函式名稱是 `{handler}`。對應綁定寫法是 `KeyDown += {handler};`。"
+            method_match = re.search(
+                r"\b(?:private|protected|public|internal)\s+\w+\s+([A-Za-z_][A-Za-z0-9_]*KeyDown[A-Za-z0-9_]*)\s*\(",
+                content,
+            )
+            if method_match:
+                handler = method_match.group(1)
+                return f"在 {relative_path} 中，鍵盤事件處理函式名稱是 `{handler}`。"
+    return None
+
+
+def is_code_change_request(message: str) -> bool:
+    lowered = message.lower()
+    keywords = (
+        "修改", "修正", "新增", "增加", "改成", "改為", "實作", "達到這個功能",
+        "請幫我修改", "請幫我修正", "替換", "patch", "refactor",
+    )
+    return any(token in message for token in keywords) or any(token in lowered for token in ("modify", "change", "fix", "implement"))
+
+
+def format_notes(value: object) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def build_diff_window(relative_path: str, before: str, after: str) -> str:
+    return generate_diff(relative_path, before, after)
+
+
+def format_plan_for_chat(plan: Dict[str, object]) -> str:
+    sections = [f"修改目的：{str(plan.get('summary', '')).strip() or '未提供'}"]
+    mode = plan.get("mode", "precise")
+    if plan.get("failureReason"):
+        sections.append(f"精準模式未套用原因：{plan['failureReason']}")
+
+    if mode == "precise":
+        for item in plan.get("edits", []):
+            parts = [
+                f"檔案：{item.get('path', '(未指定檔案)')}",
+                f"修改位置：{item.get('location', '未提供')}",
+                f"命中函式/區塊：{item.get('target', '未提供')}",
+                f"原因：{item.get('reason', '未提供')}",
+                "建議替換區塊：",
+                item.get("diffWindow") or item.get("diff") or "(無)",
+            ]
+            notes = format_notes(item.get("notes"))
+            if notes:
+                parts.extend(["補充說明：", "\n".join(f"- {note}" for note in notes)])
+            sections.append("\n".join(str(part) for part in parts))
+    else:
+        for item in plan.get("suggestions", []):
+            parts = [
+                f"檔案：{item.get('path', '(未指定檔案)')}",
+                f"修改位置：{item.get('location', '未提供')}",
+                f"命中函式/區塊：{item.get('target', '未提供')}",
+                f"原因：{item.get('whyHere', item.get('reason', '未提供'))}",
+                "建議替換前片段：",
+                item.get("before") or "(未提供)",
+                "建議替換後片段：",
+                item.get("after") or "(未提供)",
+                "Diff 視窗：",
+                item.get("diffWindow") or "(未提供)",
+            ]
+            notes = format_notes(item.get("notes"))
+            if notes:
+                parts.extend(["補充說明：", "\n".join(f"- {note}" for note in notes)])
+            sections.append("\n".join(str(part) for part in parts))
+    return "\n\n".join(sections)
+
+
+def build_public_plan(plan: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "mode": plan.get("mode", "precise"),
+        "request": plan["request"],
+        "refineMode": bool(plan.get("refineMode")),
+        "summary": plan["summary"],
+        "needMoreContext": plan.get("needMoreContext", []),
+        "failureReason": plan.get("failureReason", ""),
+        "edits": [
+            {
+                "path": item["path"],
+                "target": item.get("target", ""),
+                "location": item.get("location", ""),
+                "reason": item["reason"],
+                "notes": item.get("notes", []),
+                "beforeSnippet": item.get("beforeSnippet", ""),
+                "afterSnippet": item.get("afterSnippet", ""),
+                "diff": item["diff"],
+                "diffWindow": item.get("diffWindow", item["diff"]),
+            }
+            for item in plan.get("edits", [])
+        ],
+        "suggestions": plan.get("suggestions", []),
+        "displayText": plan.get("displayText", ""),
+    }
 
 
 def extract_json_payload(raw: str) -> Dict[str, object]:
@@ -831,8 +1409,26 @@ def run_git(project_root: Path, *args: str, timeout_seconds: int = 60) -> subpro
     )
 
 
-def build_edit_messages(message: str, context: str, allowed_files: List[str]) -> List[Dict[str, str]]:
+def build_edit_messages(
+    message: str,
+    context: str,
+    allowed_files: List[str],
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+) -> List[Dict[str, str]]:
     allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無可編輯檔案)"
+    forbidden_identifiers = parse_forbidden_identifiers(message)
+    forbidden_block = (
+        "\n不得使用以下 identifier:\n" + "\n".join(f"- {item}" for item in forbidden_identifiers)
+        if forbidden_identifiers else ""
+    )
+    pending_edit_block = build_pending_edit_prompt_block(pending_edit)
+    refine_block = (
+        "這一輪不是全新需求，而是在修正上一版修改建議。"
+        "你必須先理解上一版哪裡錯，再只針對同一批已釘選檔案與已命中的區塊重新提出較正確的最小修改。"
+        if refine_mode else
+        "這一輪是新的修改需求，請直接根據目前已套用的釘選檔案提出最小修改。"
+    )
     schema = (
         '{\n'
         '  "summary": "一句話說明修改目的",\n'
@@ -840,8 +1436,15 @@ def build_edit_messages(message: str, context: str, allowed_files: List[str]) ->
         '  "edits": [\n'
         '    {\n'
         '      "path": "相對路徑",\n'
+        '      "target": "命中的函式、方法或區塊名稱",\n'
         '      "reason": "修改原因",\n'
-        '      "updatedContent": "該檔案修改後的完整內容"\n'
+        '      "notes": ["補充說明"],\n'
+        '      "operations": [\n'
+        '        {\n'
+        '          "search": "要被精確取代的原始片段",\n'
+        '          "replace": "修改後的新片段"\n'
+        '        }\n'
+        '      ]\n'
         '    }\n'
         '  ]\n'
         '}'
@@ -850,10 +1453,17 @@ def build_edit_messages(message: str, context: str, allowed_files: List[str]) ->
         {
             "role": "system",
             "content": (
-                "你是本機離線 code assistant，現在要產生可直接套用到檔案的修改草案。"
+                "你是本機離線 code assistant，現在要產生可供人工參考的修改建議。"
                 "請全程使用繁體中文說明，但 JSON key 與檔案內容保留原文。"
                 "你只能修改提供給你的候選檔案，不可新增檔案、不可刪除檔案。"
+                "請優先做最小修改，避免重寫整個檔案。"
+                "請優先鎖定真正需要修改的函式或區塊，避免從檔案開頭輸出整份檔案。"
+                "operations.search 必須是提供給你的檔案節錄中的原文片段，且必須可唯一定位。"
+                "operations.replace 只放修改後的片段，不要重複整份檔案。"
                 "若資訊不足或無法安全修改，請回傳 edits 為空陣列，並把需要補看的檔案寫到 needMoreContext。"
+                "若需求是改功能，請務必指出 target 與修改原因。"
+                "若需求明確指出某個名稱不存在或不可用，禁止在 target、search、replace 中繼續使用該名稱。"
+                "若這一輪是在修正上一版建議，請先修正上一版的錯誤，再輸出新的最小修改，不要忽略使用者指出的問題。"
                 "請只輸出 JSON，不要加 markdown 或其他文字。"
             ),
         },
@@ -861,7 +1471,10 @@ def build_edit_messages(message: str, context: str, allowed_files: List[str]) ->
             "role": "user",
             "content": (
                 f"使用者需求:\n{message}\n\n"
+                f"本輪任務說明:\n{refine_block}\n\n"
                 f"只允許修改以下檔案:\n{allowed_block}\n\n"
+                f"{forbidden_block}\n\n"
+                f"{pending_edit_block}\n\n"
                 f"以下是專案上下文:\n{context}\n\n"
                 f"回傳格式必須符合這個 JSON schema:\n{schema}"
             ),
@@ -869,12 +1482,94 @@ def build_edit_messages(message: str, context: str, allowed_files: List[str]) ->
     ]
 
 
-def create_edit_plan(project_root: Path, state: SessionState, message: str) -> Dict[str, object]:
-    context, allowed_files = build_edit_context(project_root, state, message)
+def build_advisory_edit_messages(
+    message: str,
+    context: str,
+    allowed_files: List[str],
+    failure_reason: str = "",
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+) -> List[Dict[str, str]]:
+    allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無候選檔案)"
+    forbidden_identifiers = parse_forbidden_identifiers(message)
+    forbidden_block = (
+        "\n不得使用以下 identifier:\n" + "\n".join(f"- {item}" for item in forbidden_identifiers)
+        if forbidden_identifiers else ""
+    )
+    pending_edit_block = build_pending_edit_prompt_block(pending_edit)
+    schema = (
+        '{\n'
+        '  "summary": "一句話說明修改目的",\n'
+        '  "needMoreContext": ["若需要更多檔案請列出"],\n'
+        '  "suggestions": [\n'
+        '    {\n'
+        '      "path": "相對路徑",\n'
+        '      "target": "應修改的函式、方法或區塊名稱",\n'
+        '      "whyHere": "為什麼判斷這裡要修改",\n'
+        '      "before": "建議替換前片段，請只放局部原始碼",\n'
+        '      "after": "建議替換後片段，請只放局部原始碼",\n'
+        '      "notes": ["補充說明"]\n'
+        '    }\n'
+        '  ]\n'
+        '}'
+    )
+    failure_block = f"\n上一輪精準修改失敗原因:\n{failure_reason}\n" if failure_reason else ""
+    refine_block = (
+        "這一輪是在修正上一版修改建議。請明確指出上一版哪裡錯，並根據使用者新意見提出新的局部替換片段。"
+        if refine_mode else
+        "這一輪是新的修改需求。請提供人工可操作的局部替換片段。"
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是本機離線 code assistant，現在要產生可手動複製的修改建議。"
+                "請全程使用繁體中文說明，但檔案路徑、程式碼與 JSON key 保留原文。"
+                "你只能針對提供的候選檔案提出建議，不可虛構不存在的檔案。"
+                "若無法安全給出精準 search/replace，請改用人工可操作的局部替換片段。"
+                "你必須具體指出 target、whyHere、before、after。"
+                "before 與 after 只放需要修改的局部片段，不要輸出整份檔案。"
+                "若需求明確指出某個名稱不存在或不可用，禁止在 target、before、after 中繼續使用該名稱。"
+                "notes 用來補充風險、前置條件或需要人工確認的地方。"
+                "若這一輪是在修正上一版建議，請直接說明上一版錯在哪裡，並給出新的局部替換片段。"
+                "請只輸出 JSON，不要加 markdown 或其他前後文。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"使用者需求:\n{message}\n\n"
+                f"本輪任務說明:\n{refine_block}\n\n"
+                f"可參考檔案:\n{allowed_block}\n"
+                f"{forbidden_block}\n"
+                f"{failure_block}\n"
+                f"{pending_edit_block}\n\n"
+                f"以下是專案上下文:\n{context}\n\n"
+                f"回傳格式必須符合這個 JSON schema:\n{schema}"
+            ),
+        },
+    ]
+
+
+def create_precise_edit_plan(
+    project_root: Path,
+    state: SessionState,
+    message: str,
+    context_message: Optional[str] = None,
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+) -> Dict[str, object]:
+    context_message = context_message or message
+    context, allowed_files = build_edit_context(project_root, state, context_message)
     if not allowed_files:
         raise RuntimeError("目前沒有可用的候選檔案可修改。請先釘選目標檔案或確認專案已正確載入。")
 
-    raw_reply = call_local_model(state.model_alias, build_edit_messages(message, context, allowed_files))
+    raw_reply = call_local_model(
+        state.model_alias,
+        build_edit_messages(message, context, allowed_files, pending_edit=pending_edit, refine_mode=refine_mode),
+        timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+        max_tokens=900,
+    )
     payload = extract_json_payload(raw_reply)
     edits = payload.get("edits", [])
     if not isinstance(edits, list):
@@ -885,23 +1580,63 @@ def create_edit_plan(project_root: Path, state: SessionState, message: str) -> D
         if not isinstance(item, dict):
             continue
         path = str(item.get("path", "")).strip()
+        target = str(item.get("target", "")).strip()
         reason = str(item.get("reason", "")).strip()
-        updated = item.get("updatedContent")
-        if path not in allowed_files or not isinstance(updated, str):
+        notes = format_notes(item.get("notes"))
+        operations = item.get("operations")
+        if path not in allowed_files or not isinstance(operations, list):
             continue
         before = read_file_full(project_root, path)
-        if before == updated:
+        after = before
+        normalized_operations: List[Dict[str, str]] = []
+        first_match_index: Optional[int] = None
+        for operation in operations[:8]:
+            if not isinstance(operation, dict):
+                continue
+            search = str(operation.get("search", ""))
+            replace = str(operation.get("replace", ""))
+            if not search:
+                continue
+            occurrences = after.count(search)
+            if occurrences != 1:
+                raise RuntimeError(
+                    f"修改建議無法安全定位到 {path}：search 片段必須剛好匹配 1 次，目前匹配到 {occurrences} 次。"
+                )
+            if first_match_index is None:
+                first_match_index = after.find(search)
+            after = after.replace(search, replace, 1)
+            normalized_operations.append({"search": search, "replace": replace})
+        if before == after or not normalized_operations:
             continue
-        diff_text = generate_diff(path, before, updated)
+        before_snippet = normalized_operations[0]["search"]
+        after_snippet = normalized_operations[0]["replace"]
+        safety_issues = collect_edit_safety_issues(before_snippet, after_snippet, before, message)
+        if safety_issues:
+            raise RuntimeError("精準修改未通過安全檢查：" + "；".join(safety_issues))
+        diff_text = generate_diff(path, before, after)
         if not diff_text.strip():
             continue
+        location = "未提供"
+        diff_window = truncate_middle(diff_text, 12000)
+        if first_match_index is not None:
+            region = locate_change_region(before, first_match_index)
+            location = f"約第 {region['start_line']}-{region['end_line']} 行"
+            if not target:
+                target = str(region["name"])
         normalized_edits.append(
             {
                 "path": path,
+                "target": target or path,
+                "location": location,
                 "reason": reason or "模型未提供原因",
+                "notes": notes,
                 "before": before,
-                "after": updated,
+                "after": after,
+                "beforeSnippet": before_snippet,
+                "afterSnippet": after_snippet,
+                "operations": normalized_operations,
                 "diff": diff_text,
+                "diffWindow": diff_window,
             }
         )
 
@@ -910,74 +1645,199 @@ def create_edit_plan(project_root: Path, state: SessionState, message: str) -> D
         need_more_context = []
 
     plan = {
+        "mode": "precise",
         "request": message,
-        "summary": str(payload.get("summary", "")).strip() or "已產生修改草案",
+        "refineMode": refine_mode,
+        "summary": str(payload.get("summary", "")).strip() or "已產生修改建議",
         "needMoreContext": [str(item).strip() for item in need_more_context if str(item).strip()],
         "edits": normalized_edits,
     }
     return plan
 
 
-def apply_edit_plan(project_root: Path, plan: Dict[str, object]) -> Dict[str, object]:
-    edits = plan.get("edits", [])
-    if not isinstance(edits, list) or not edits:
-        raise RuntimeError("目前沒有可套用的修改草案。")
+def create_advisory_edit_plan(
+    project_root: Path,
+    state: SessionState,
+    message: str,
+    allowed_files: List[str],
+    failure_reason: str = "",
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+    context_message: Optional[str] = None,
+) -> Dict[str, object]:
+    context = build_advisory_context(project_root, state, context_message or message, allowed_files)
+    raw_reply = call_local_model(
+        state.model_alias,
+        build_advisory_edit_messages(
+            message,
+            context,
+            allowed_files,
+            failure_reason,
+            pending_edit=pending_edit,
+            refine_mode=refine_mode,
+        ),
+        timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+        max_tokens=1200,
+    )
+    try:
+        payload = extract_json_payload(raw_reply)
+    except Exception:
+        text = raw_reply.strip() or "模型未提供可用內容。"
+        return {
+        "mode": "advisory",
+        "request": message,
+        "refineMode": refine_mode,
+        "summary": "已產生文字建議",
+        "needMoreContext": [],
+        "edits": [],
+            "suggestions": [],
+            "displayText": text,
+            "failureReason": failure_reason,
+        }
 
-    changed_paths: List[str] = []
-    for item in edits:
+    suggestions = payload.get("suggestions", [])
+    if not isinstance(suggestions, list):
+        suggestions = []
+    normalized_suggestions: List[Dict[str, str]] = []
+    display_blocks: List[str] = []
+    for item in suggestions[:MAX_EDIT_FILES]:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path", "")).strip()
-        after = item.get("after")
-        if not path or not isinstance(after, str):
+        target = str(item.get("target", "")).strip() or "未提供"
+        why_here = str(item.get("whyHere", "")).strip() or "模型未提供原因"
+        before_snippet = str(item.get("before", "")).strip()
+        after_snippet = str(item.get("after", "")).strip()
+        notes = format_notes(item.get("notes"))
+        if path and path not in allowed_files:
             continue
-        target = (project_root / path).resolve()
-        try:
-            target.relative_to(project_root)
-        except ValueError as exc:
-            raise RuntimeError(f"Invalid edit target: {path}") from exc
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "w", encoding="utf-8", errors="replace", newline="") as handle:
-            handle.write(after)
-        changed_paths.append(path)
-
-    if not changed_paths:
-        raise RuntimeError("沒有任何檔案被寫入。")
-
-    add_result = run_git(project_root, "add", "--", *changed_paths, timeout_seconds=90)
-    if add_result.returncode != 0:
-        raise RuntimeError(add_result.stdout + add_result.stderr)
-
-    diff_result = run_git(project_root, "diff", "--cached", "--quiet", timeout_seconds=30)
-    commit_hash = ""
-    if diff_result.returncode == 1:
-        title = f"CodeWorker 套用修改草案: {plan.get('summary', '更新專案檔案')}"
-        commit_result = run_git(
-            project_root,
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-m",
-            title[:72],
-            "--no-verify",
-            "--no-gpg-sign",
-            timeout_seconds=90,
+        display_path = path or "(未指定檔案)"
+        location = "未提供"
+        diff_window = build_diff_window(display_path, before_snippet or "(未提供)", after_snippet or "(未提供)")
+        if path:
+            try:
+                full_before = read_file_full(project_root, path)
+                if before_snippet:
+                    occurrences = full_before.count(before_snippet)
+                    if occurrences == 1:
+                        match_index = full_before.find(before_snippet)
+                        full_after = full_before.replace(before_snippet, after_snippet, 1)
+                        region = locate_change_region(full_before, match_index)
+                        location = f"約第 {region['start_line']}-{region['end_line']} 行"
+                        if target == "未提供":
+                            target = str(region["name"])
+                        diff_window = truncate_middle(generate_diff(path, full_before, full_after), 12000)
+            except (OSError, ValueError):
+                pass
+        if path:
+            try:
+                full_before = read_file_full(project_root, path)
+                safety_issues = collect_edit_safety_issues(before_snippet, after_snippet, full_before, message)
+            except (OSError, ValueError):
+                safety_issues = []
+        else:
+            safety_issues = []
+        if safety_issues:
+            notes = notes + [f"保守檢查：{'；'.join(safety_issues)}", "請補充正確的函式、欄位或變數名稱後再重新產生建議。"]
+            before_snippet = ""
+            after_snippet = ""
+            diff_window = "模型建議引用未確認或被否定的 identifier，已停止輸出具體替換片段。"
+        normalized_suggestions.append(
+            {
+                "path": display_path,
+                "location": location,
+                "target": target,
+                "whyHere": why_here,
+                "before": before_snippet,
+                "after": after_snippet,
+                "diffWindow": diff_window,
+                "notes": notes,
+            }
         )
-        if commit_result.returncode != 0:
-            raise RuntimeError(commit_result.stdout + commit_result.stderr)
-        rev_result = run_git(project_root, "rev-parse", "--short", "HEAD", timeout_seconds=30)
-        if rev_result.returncode == 0:
-            commit_hash = rev_result.stdout.strip()
+        block = [
+            f"檔案：{display_path}",
+            f"修改位置：{location}",
+            f"命中函式/區塊：{target}",
+            f"原因：{why_here}",
+            "建議替換前片段：",
+            before_snippet or "模型未提供原始片段。",
+            "",
+            "建議替換後片段：",
+            after_snippet or "模型未提供建議片段。",
+            "",
+            "Diff 視窗：",
+            diff_window,
+        ]
+        if notes:
+            block.extend(["", "補充說明：", "\n".join(f"- {note}" for note in notes)])
+        display_blocks.append("\n".join(block))
+
+    need_more_context = payload.get("needMoreContext", [])
+    if not isinstance(need_more_context, list):
+        need_more_context = []
+    display_text = "\n\n---\n\n".join(display_blocks).strip()
+    if not display_text:
+        display_text = raw_reply.strip() or "模型未提供可用內容。"
 
     return {
-        "changedFiles": changed_paths,
-        "commitHash": commit_hash,
+        "mode": "advisory",
+        "request": message,
+        "refineMode": refine_mode,
+        "summary": str(payload.get("summary", "")).strip() or "已產生文字建議",
+        "needMoreContext": [str(item).strip() for item in need_more_context if str(item).strip()],
+        "edits": [],
+        "suggestions": normalized_suggestions,
+        "displayText": display_text,
+        "failureReason": failure_reason,
     }
 
 
-def call_local_model(model_alias: str, messages: List[Dict[str, str]]) -> str:
+def create_edit_plan(project_root: Path, state: SessionState, message: str) -> Dict[str, object]:
+    refine_mode = is_refinement_request(message, state.pending_edit)
+    effective_message = build_refinement_ranking_message(message, state.pending_edit) if refine_mode else message
+    context, allowed_files = build_edit_context(project_root, state, effective_message)
+    if not allowed_files:
+        raise RuntimeError("目前沒有可用的候選檔案可修改。請先釘選目標檔案或確認專案已正確載入。")
+    try:
+        plan = create_precise_edit_plan(
+            project_root,
+            state,
+            message,
+            context_message=effective_message,
+            pending_edit=state.pending_edit,
+            refine_mode=refine_mode,
+        )
+        if plan.get("edits"):
+            return plan
+        failure_reason = "模型沒有產生可安全套用的精準修改。"
+    except RuntimeError as exc:
+        failure_reason = str(exc)
+    return create_advisory_edit_plan(
+        project_root,
+        state,
+        message,
+        allowed_files,
+        failure_reason,
+        pending_edit=state.pending_edit,
+        refine_mode=refine_mode,
+        context_message=effective_message,
+    )
+
+
+def call_local_model(
+    model_alias: str,
+    messages: List[Dict[str, str]],
+    timeout_seconds: int = 180,
+    max_tokens: int = 600,
+) -> str:
     payload = json.dumps(
-        {"model": model_alias, "messages": messages, "temperature": 0.2, "stream": False},
+        {
+            "model": model_alias,
+            "messages": messages,
+            "temperature": 0.2,
+            "stream": False,
+            "max_tokens": max_tokens,
+        },
         ensure_ascii=False,
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -987,8 +1847,12 @@ def call_local_model(model_alias: str, messages: List[Dict[str, str]]) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             body = json.loads(response.read().decode("utf-8"))
+    except (TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(
+            f"本地模型回應逾時。模型可能正在生成過長內容、主機效能不足，或需要縮小上下文。timeout={timeout_seconds}s"
+        ) from exc
     except urllib.error.HTTPError as exc:
         details = ""
         try:
@@ -1001,6 +1865,11 @@ def call_local_model(model_alias: str, messages: List[Dict[str, str]]) -> str:
             ) from exc
         raise RuntimeError(f"Failed to call local model endpoint: HTTP {exc.code}: {details}") from exc
     except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+            raise RuntimeError(
+                f"本地模型回應逾時。模型可能正在生成過長內容、主機效能不足，或需要縮小上下文。timeout={timeout_seconds}s"
+            ) from exc
         raise RuntimeError(f"Failed to call local model endpoint: {exc}") from exc
     try:
         return body["choices"][0]["message"]["content"].strip()
@@ -1056,6 +1925,7 @@ def build_session_payload(
     with STATE_LOCK:
         existing_history = list(STATE.history)
         existing_pins = [path for path in STATE.pinned_files if path in file_paths]
+        existing_preview = STATE.current_preview_path if STATE.current_preview_path in file_paths else None
         STATE.project_path = str(project_root)
         STATE.model_key = model_key
         STATE.model_alias = model_alias
@@ -1065,6 +1935,7 @@ def build_session_payload(
         STATE.entrypoints = entrypoints
         STATE.tests = tests
         STATE.pinned_files = existing_pins if preserve_pins else []
+        STATE.current_preview_path = existing_preview if preserve_history or preserve_pins else None
         STATE.history = existing_history if preserve_history else []
         STATE.pending_edit = None
         STATE.ui_state = "ready"
@@ -1229,6 +2100,7 @@ def get_status_payload() -> Dict[str, object]:
             "entrypoints": STATE.entrypoints,
             "tests": STATE.tests,
             "pinnedFiles": STATE.pinned_files,
+            "currentPreviewPath": STATE.current_preview_path,
             "history": STATE.history[-20:],
             "pendingEdit": STATE.pending_edit,
             "uiState": STATE.ui_state,
@@ -1273,9 +2145,6 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/edit/plan":
             self.handle_edit_plan()
-            return
-        if parsed.path == "/api/edit/apply":
-            self.handle_apply_edit()
             return
         if parsed.path == "/api/edit/discard":
             self.handle_discard_edit()
@@ -1350,19 +2219,23 @@ class WebUIHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
+                require_pinned_context(STATE)
                 project_root = Path(STATE.project_path)
                 context = build_project_context(project_root, STATE, prompt)
                 model_alias = STATE.model_alias
             messages = [
-                {"role": "system", "content": "你是本機離線 code assistant。請使用繁體中文回答，並根據提供的專案上下文分析；若資訊不足請直接說不確定。"},
+                {"role": "system", "content": "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案分析；若資訊不足請直接說不確定。"},
                 {"role": "user", "content": f"{prompt}\n\n以下是專案上下文：\n{context}"},
             ]
-            reply = call_local_model(model_alias, messages)
+            reply = call_local_model(model_alias, messages, max_tokens=900)
             with STATE_LOCK:
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "analysis"})
             json_response(self, {"ok": True, "data": {"reply": reply}})
         except ValueError as exc:
-            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+            details = str(exc)
+            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "PINNED_CONTEXT_REQUIRED"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先套用釘選檔案。"
+            error_response(self, make_error(code, message, details))
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Analyze failed.", str(exc)))
 
@@ -1375,25 +2248,67 @@ class WebUIHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
+                require_pinned_context(STATE)
                 project_root = Path(STATE.project_path)
-                context = build_project_context(project_root, STATE, message)
-                history = STATE.history[-MAX_CHAT_HISTORY_ITEMS:]
+                snapshot = SessionState(
+                    project_path=STATE.project_path,
+                    model_key=STATE.model_key,
+                    model_alias=STATE.model_alias,
+                    summary=STATE.summary,
+                    tree=list(STATE.tree),
+                    files=list(STATE.files),
+                    entrypoints=list(STATE.entrypoints),
+                    tests=list(STATE.tests),
+                    pinned_files=list(STATE.pinned_files),
+                    current_preview_path=None,
+                    history=list(STATE.history),
+                    pending_edit=STATE.pending_edit,
+                    ui_state=STATE.ui_state,
+                )
+                context = build_project_context(project_root, snapshot, message)
+                history = [
+                    item for item in snapshot.history[-MAX_CHAT_HISTORY_ITEMS:]
+                    if item.get("role") == "user" and item.get("content")
+                ]
                 model_alias = STATE.model_alias
+            resolved_reply = try_resolve_identifier_question(project_root, snapshot, message)
+            if resolved_reply:
+                with STATE_LOCK:
+                    STATE.history.append({"role": "user", "content": message, "kind": "chat"})
+                    STATE.history.append({"role": "assistant", "content": resolved_reply, "kind": "chat"})
+                json_response(self, {"ok": True, "data": {"reply": resolved_reply}})
+                return
+            refine_mode = is_refinement_request(message, snapshot.pending_edit)
+            if refine_mode or is_code_change_request(message):
+                plan = create_edit_plan(project_root, snapshot, message)
+                public_plan = build_public_plan(plan)
+                reply = format_plan_for_chat(plan)
+                if refine_mode:
+                    reply = "以下是根據上一版修改建議修正後的版本：\n\n" + reply
+                with STATE_LOCK:
+                    STATE.pending_edit = public_plan
+                    STATE.history.append({"role": "user", "content": message, "kind": "chat"})
+                    STATE.history.append({"role": "assistant", "content": reply, "kind": "chat-refine" if refine_mode else "chat-edit"})
+                setattr(self.server, "_pending_edit_internal", plan)
+                json_response(self, {"ok": True, "data": {"reply": reply, "plan": public_plan}})
+                return
             messages = [
-                {"role": "system", "content": "你是本機離線 code assistant。請使用繁體中文回答，回答時盡量引用具體檔案路徑。若還需要更多檔案才足以判斷，請直接指出。"},
-                {"role": "system", "content": f"目前專案上下文如下：\n{context}"},
+                {"role": "system", "content": "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案回答。檔案預覽僅供閱讀，不是模型上下文來源。若資訊不足請直接回答不確定。若問題是在問函式名稱、方法名稱、類別名稱、變數名稱、檔案名稱或事件處理函式，請先從上下文找出精確 identifier，再直接回覆該名稱與所在檔案；若上下文已經有明確名稱，禁止改寫成泛化的可能性清單。"},
+                {"role": "system", "content": f"目前已套用釘選檔案上下文如下：\n{context}"},
             ]
             for item in history:
-                if item.get("role") in {"user", "assistant"} and item.get("content"):
-                    messages.append({"role": item["role"], "content": item["content"]})
+                messages.append({"role": item["role"], "content": item["content"]})
             messages.append({"role": "user", "content": message})
-            reply = call_local_model(model_alias, messages)
+            reply = call_local_model(model_alias, messages, max_tokens=900)
             with STATE_LOCK:
                 STATE.history.append({"role": "user", "content": message, "kind": "chat"})
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "chat"})
             json_response(self, {"ok": True, "data": {"reply": reply}})
         except ValueError as exc:
-            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+            details = str(exc)
+            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "PINNED_CONTEXT_REQUIRED"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先套用釘選檔案。"
+            error_response(self, make_error(code, message, details))
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Chat failed.", str(exc)))
 
@@ -1406,6 +2321,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
+                require_pinned_context(STATE)
                 project_root = Path(STATE.project_path)
                 snapshot = SessionState(
                     project_path=STATE.project_path,
@@ -1417,84 +2333,36 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     entrypoints=list(STATE.entrypoints),
                     tests=list(STATE.tests),
                     pinned_files=list(STATE.pinned_files),
+                    current_preview_path=None,
                     history=list(STATE.history),
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
             plan = create_edit_plan(project_root, snapshot, message)
-            if not plan.get("edits"):
-                need_more = "\n".join(plan.get("needMoreContext", [])) if plan.get("needMoreContext") else "模型未產生可安全套用的修改。"
-                raise RuntimeError(
-                    json.dumps(
-                        make_error(
-                            "EDIT_PLAN_EMPTY",
-                            "模型沒有產生可套用的修改草案。",
-                            need_more,
-                        )
-                    )
-                )
-            public_plan = {
-                "request": plan["request"],
-                "summary": plan["summary"],
-                "needMoreContext": plan.get("needMoreContext", []),
-                "edits": [
-                    {
-                        "path": item["path"],
-                        "reason": item["reason"],
-                        "diff": item["diff"],
-                    }
-                    for item in plan["edits"]
-                ],
-            }
+            public_plan = build_public_plan(plan)
+            reply_text = format_plan_for_chat(public_plan)
             with STATE_LOCK:
                 STATE.pending_edit = public_plan
                 STATE.history.append({"role": "user", "content": message, "kind": "edit-request"})
-                STATE.history.append({"role": "assistant", "content": f"已產生修改草案：{plan['summary']}", "kind": "edit-plan"})
+                STATE.history.append({"role": "assistant", "content": reply_text, "kind": "edit-plan"})
             setattr(self.server, "_pending_edit_internal", plan)
             json_response(self, {"ok": True, "data": {"plan": public_plan}})
         except ValueError as exc:
-            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+            details = str(exc)
+            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "PINNED_CONTEXT_REQUIRED"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先套用釘選檔案。"
+            error_response(self, make_error(code, message, details))
         except RuntimeError as exc:
             try:
                 error_payload = json.loads(str(exc))
             except json.JSONDecodeError:
-                error_payload = make_error("EDIT_PLAN_FAILED", "Generate edit plan failed.", str(exc))
+                details = str(exc)
+                code = "EDIT_PLAN_TIMEOUT" if "逾時" in details or "timeout=" in details else "EDIT_PLAN_FAILED"
+                message = "產生修改建議逾時。" if code == "EDIT_PLAN_TIMEOUT" else "Generate edit plan failed."
+                error_payload = make_error(code, message, details)
             error_response(self, error_payload)
         except Exception as exc:
             error_response(self, make_error("EDIT_PLAN_FAILED", "Generate edit plan failed.", str(exc)))
-
-    def handle_apply_edit(self) -> None:
-        try:
-            with STATE_LOCK:
-                if STATE.ui_state != "ready" or not STATE.project_path:
-                    raise ValueError("請先完成開啟專案。")
-                project_root = Path(STATE.project_path)
-            internal_plan = getattr(self.server, "_pending_edit_internal", None)
-            if not internal_plan:
-                raise RuntimeError("目前沒有可套用的修改草案。")
-            result = apply_edit_plan(project_root, internal_plan)
-            with STATE_LOCK:
-                STATE.pending_edit = None
-                STATE.history.append(
-                    {
-                        "role": "assistant",
-                        "content": "已套用修改草案。"
-                        + (f" commit: {result['commitHash']}" if result.get("commitHash") else ""),
-                        "kind": "edit-apply",
-                    }
-                )
-            setattr(self.server, "_pending_edit_internal", None)
-            with STATE_LOCK:
-                model_key = STATE.model_key
-            payload = build_session_payload(project_root, model_key, preserve_history=True, preserve_pins=True)
-            payload.update(result)
-            json_response(self, {"ok": True, "data": payload})
-        except ValueError as exc:
-            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
-        except RuntimeError as exc:
-            error_response(self, make_error("APPLY_EDIT_FAILED", "Apply edit failed.", str(exc)))
-        except Exception as exc:
-            error_response(self, make_error("APPLY_EDIT_FAILED", "Apply edit failed.", str(exc)))
 
     def handle_discard_edit(self) -> None:
         with STATE_LOCK:
@@ -1521,7 +2389,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_reset_history(self) -> None:
         with STATE_LOCK:
             STATE.history = []
-        json_response(self, {"ok": True, "data": {"history": []}})
+            STATE.pending_edit = None
+        setattr(self.server, "_pending_edit_internal", None)
+        json_response(self, {"ok": True, "data": {"history": [], "pendingEdit": None}})
 
     def handle_file_request(self, parsed: urllib.parse.ParseResult) -> None:
         try:
@@ -1535,7 +2405,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 project_root = Path(STATE.project_path)
                 if relative_path not in {file.path for file in STATE.files}:
                     raise ValueError("File is not part of the indexed project.")
-            content = read_file_excerpt(project_root, relative_path, max_chars=12000)
+                STATE.current_preview_path = relative_path
+            content = read_file_full(project_root, relative_path)
             json_response(self, {"ok": True, "data": {"path": relative_path, "content": content}})
         except ValueError as exc:
             error_response(self, make_error("PROJECT_NOT_READY", "Cannot preview file.", str(exc)))

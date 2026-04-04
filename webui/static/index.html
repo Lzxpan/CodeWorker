@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CodeWorker V0.92b Web UI</title>
+  <title>CodeWorker V0.94b Web UI</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -12,32 +12,30 @@
       <div class="brand">
         <div class="brand-mark">CW</div>
         <div>
-          <h1>CodeWorker V0.92b</h1>
+          <h1>CodeWorker V0.94b</h1>
           <p>本地離線專案分析與對話</p>
         </div>
       </div>
 
       <section class="panel control-panel">
-        <div class="field-label-row">
-          <label for="projectPath">專案路徑</label>
-          <button type="button" class="help-trigger" data-help="project-path" aria-label="專案路徑說明">?</button>
-        </div>
-        <div class="path-row">
-          <input id="projectPath" type="text" placeholder="例如 C:\Users\Admin\Desktop\MyProject">
-          <div class="action-item">
-            <button id="pickFolderBtn" type="button" class="ghost">選擇資料夾</button>
-            <button type="button" class="help-trigger" data-help="pick-folder" aria-label="選擇資料夾說明">?</button>
+        <div class="compact-field">
+          <div class="inline-label">
+            <label for="projectPath">專案路徑</label>
+            <button type="button" class="help-trigger" data-help="project-path" aria-label="專案路徑說明">?</button>
           </div>
+          <input id="projectPath" class="picker-input" type="text" readonly placeholder="點擊這裡選擇專案資料夾">
         </div>
 
-        <div class="field-label-row">
-          <label for="modelKey">模型</label>
-          <button type="button" class="help-trigger" data-help="model-key" aria-label="模型說明">?</button>
+        <div class="compact-field compact-field-tight">
+          <div class="inline-label">
+            <label for="modelKey">模型</label>
+            <button type="button" class="help-trigger" data-help="model-key" aria-label="模型說明">?</button>
+          </div>
+          <select id="modelKey">
+            <option value="qwen">Qwen 2.5 Coder 7B</option>
+            <option value="codellama">Code Llama 7B</option>
+          </select>
         </div>
-        <select id="modelKey">
-          <option value="qwen">Qwen 2.5 Coder 7B</option>
-          <option value="codellama">Code Llama 7B</option>
-        </select>
 
         <div id="progressPanel" class="progress-panel hidden">
           <div class="panel-title-row compact">
@@ -142,34 +140,11 @@
               <button type="button" class="help-trigger" data-help="send-chat" aria-label="送出說明">?</button>
             </div>
             <div class="action-item">
-              <button type="button" id="generateEditBtn">產生修改草案</button>
-              <button type="button" class="help-trigger" data-help="generate-edit" aria-label="產生修改草案說明">?</button>
-            </div>
-            <div class="action-item">
-              <button type="button" id="applyEditBtn" class="primary hidden">套用修改</button>
-              <button type="button" class="help-trigger" data-help="apply-edit" aria-label="套用修改說明">?</button>
-            </div>
-            <div class="action-item">
-              <button type="button" id="discardEditBtn" class="hidden">丟棄草案</button>
-              <button type="button" class="help-trigger" data-help="discard-edit" aria-label="丟棄草案說明">?</button>
-            </div>
-            <div class="action-item">
               <button type="button" id="clearChatBtn">清空對話</button>
               <button type="button" class="help-trigger" data-help="clear-chat" aria-label="清空對話說明">?</button>
             </div>
           </div>
         </form>
-        <section id="editPlanPanel" class="edit-plan hidden">
-          <div class="panel-title-row compact">
-            <div class="title-with-help">
-              <strong>修改草案</strong>
-              <button type="button" class="help-trigger" data-help="edit-plan" aria-label="修改草案說明">?</button>
-            </div>
-            <div id="editPlanMeta" class="meta">尚未產生草案</div>
-          </div>
-          <div id="editPlanSummary" class="edit-plan-summary"></div>
-          <pre id="editPlanDiff" class="edit-plan-diff"></pre>
-        </section>
       </section>
 
       <section class="panel preview-panel">
@@ -178,9 +153,12 @@
             <h2>檔案預覽</h2>
             <button type="button" class="help-trigger" data-help="file-preview" aria-label="檔案預覽說明">?</button>
           </div>
-          <div id="previewPath" class="meta">未選擇檔案</div>
+          <div>
+            <div id="previewPath" class="meta">未選擇檔案</div>
+            <div class="meta">僅供預覽，不會自動加入模型上下文</div>
+          </div>
         </div>
-        <pre id="filePreview" class="code-preview">點左側檔案即可預覽內容，並可勾選釘選到對話上下文。</pre>
+        <pre id="filePreview" class="code-preview">點左側檔案即可預覽內容。檔案預覽僅供閱讀，不會自動加入模型上下文。</pre>
       </section>
       </div>
     </main>

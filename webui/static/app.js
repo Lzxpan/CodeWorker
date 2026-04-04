@@ -3,6 +3,7 @@ const state = {
   projectPath: "",
   modelKey: "qwen",
   pinnedFiles: new Set(),
+  currentPreviewPath: null,
   pendingEdit: null,
   history: [],
   currentTaskId: null,
@@ -15,8 +16,8 @@ const HELP_CONTENT = {
     title: "專案路徑",
     description: "這裡填要分析的專案資料夾。開啟專案時，CodeWorker 會以這個資料夾為根目錄建立 git 基線、掃描檔案並準備上下文。",
     usage: [
-      "可直接貼上完整資料夾路徑。",
-      "也可以按「選擇資料夾」用視窗點選。",
+      "直接點一下路徑框，就會開啟 Windows 原生資料夾選取視窗。",
+      "選完後，路徑會自動填回輸入框。",
       "建議選真正的程式碼專案根目錄，不要選整個下載資料夾或大量影音資源資料夾。",
     ],
   },
@@ -58,11 +59,11 @@ const HELP_CONTENT = {
   },
   "analyze-project": {
     title: "分析專案",
-    description: "請模型先對整個專案做總覽分析，通常會整理入口、核心模組、設定檔與測試位置。",
+    description: "請模型根據目前已套用的釘選檔案做總覽分析，通常會整理入口、核心模組、設定檔與測試位置。",
     usage: [
-      "適合第一次接觸專案時先按一次。",
+      "先在檔案樹勾選要分析的檔案，再按「套用釘選」。",
       "分析結果會出現在右側對話區。",
-      "若尚未開啟專案，這個按鈕會被停用。",
+      "若尚未開啟專案或尚未套用釘選檔案，系統會提示你先完成這一步。",
     ],
   },
   "error-panel": {
@@ -96,6 +97,7 @@ const HELP_CONTENT = {
     description: "用來快速看整個專案的大方向。它不是原始碼本身，而是系統掃描後整理出的重點資訊。",
     usage: [
       "可看到專案路徑、已掃描檔案數量、估計文字檔大小、主要語言、可能入口檔案與測試位置。",
+      "也會顯示目前已套用的釘選檔案清單，方便確認模型此刻會看哪些檔案。",
       "適合先用來判斷這個資料夾是不是你真正要分析的專案。",
       "若摘要內容不對，通常代表你選錯資料夾，或專案裡混入太多非程式碼內容。",
     ],
@@ -110,28 +112,29 @@ const HELP_CONTENT = {
   },
   "file-tree": {
     title: "檔案樹",
-    description: "顯示目前已掃描到的檔案清單。這裡是你選擇上下文檔案的地方。",
+    description: "顯示目前已掃描到的檔案清單。這裡是你選擇模型上下文檔案的唯一入口。",
     usage: [
       "點檔名可在上方「檔案預覽」查看內容。",
       "左邊勾選框可把檔案加入釘選清單。",
-      "按「套用釘選」後，這些檔案會優先放進之後的分析與對話上下文。",
+      "按「套用釘選」後，這些檔案才會真正加入之後的分析、對話與修改建議上下文。",
     ],
   },
   "apply-pins": {
     title: "套用釘選",
-    description: "把你在檔案樹中勾選的檔案設成優先上下文。",
+    description: "把你在檔案樹中勾選的檔案設成目前唯一的模型上下文。",
     usage: [
       "先在檔案樹勾選想關注的檔案。",
-      "按下後，模型之後分析與對話會優先引用這些檔案。",
+      "按下後，模型之後分析、對話與修改建議只會根據這些檔案回答。",
       "適合只想聚焦某幾個模組時使用。",
     ],
   },
   "file-preview": {
     title: "檔案預覽",
-    description: "顯示你在檔案樹點到的單一檔案內容節錄，讓你先快速確認內容再決定是否要納入對話上下文。",
+    description: "顯示你在檔案樹點到的單一檔案內容，讓你先快速閱讀與確認內容。",
     usage: [
-      "它是閱讀區，不是編輯器。",
+      "它是閱讀區，不是編輯器，也不是模型上下文來源。",
       "點檔案樹中的任一檔案，內容就會顯示在這裡。",
+      "若要讓模型真的讀取該檔案，仍需在檔案樹勾選並按「套用釘選」。",
       "若內容很長，這個區塊本身可以捲動，不會把整頁拉長。",
     ],
   },
@@ -139,18 +142,18 @@ const HELP_CONTENT = {
     title: "對話",
     description: "你和本地模型互動的主區域。分析結果與一般提問都會顯示在這裡。",
     usage: [
-      "先開啟專案，再開始提問。",
+      "先開啟專案，再套用至少一個釘選檔案後開始提問。",
       "對話內容過長時，這個區塊本身會出現捲動條，不會延伸整頁。",
-      "適合詢問架構、模組責任、bug 線索、修改建議等問題。",
+      "模型只會根據目前已套用的釘選檔案回答，不會自動讀取你正在預覽的檔案。",
     ],
   },
   "chat-input": {
     title: "對話輸入",
-    description: "輸入你要問模型的內容。它會結合目前的專案摘要、檔案樹與釘選檔案回答。",
+    description: "輸入你要問模型的內容。模型會根據目前已套用的釘選檔案回答。",
     usage: [
       "可直接問：『登入流程在哪些檔案？』",
       "也可下指令：『先不要改檔，先分析 bug 可能位置。』",
-      "若想聚焦特定模組，建議先在檔案樹勾選後再提問。",
+      "若尚未套用釘選檔案，系統會先要求你去檔案樹勾選並套用。",
     ],
   },
   "send-chat": {
@@ -159,6 +162,7 @@ const HELP_CONTENT = {
     usage: [
       "送出前請確認已開啟專案。",
       "送出後回答會顯示在對話區。",
+      "若你輸入的是修改需求，系統會直接在主對話框回覆修改建議與 diff。",
       "如果目前正在開專案或下載模型，這個按鈕會被停用。",
     ],
   },
@@ -167,42 +171,34 @@ const HELP_CONTENT = {
     description: "清掉目前頁面上的對話歷史，讓你重新開始一輪提問。",
     usage: [
       "只清除這次 web UI 的對話內容。",
+      "也會一併清掉目前暫存的修改建議狀態。",
       "不會刪除專案、模型、摘要或檔案樹。",
     ],
   },
   "generate-edit": {
-    title: "產生修改草案",
-    description: "根據你目前輸入的需求，讓模型先產生一份可套用的修改草案，不會立刻寫入檔案。",
+    title: "產生修改建議",
+    description: "根據你目前輸入的需求，讓模型先產生一份修改建議與 diff 預覽，不會直接寫入檔案。",
     usage: [
-      "建議先在檔案樹勾選相關檔案，再按這個按鈕。",
-      "系統會顯示修改摘要與 diff 預覽。",
-      "草案確認無誤後，再按「套用修改」。",
-    ],
-  },
-  "apply-edit": {
-    title: "套用修改",
-    description: "把目前的修改草案正式寫回專案檔案，並自動建立 git commit。",
-    usage: [
-      "只有在已產生草案時才可按。",
-      "套用後會寫入檔案並嘗試 commit。",
-      "目前版本只支援修改既有文字檔，不支援新增檔案。",
+      "必須先在檔案樹勾選相關檔案，並按「套用釘選」。",
+      "建議會直接出現在主對話框中，不會另外跳出視窗。",
+      "若內容有錯，可直接在同一個主對話框接著說明，例如「piece 不存在，請改用現有變數」。",
     ],
   },
   "discard-edit": {
-    title: "丟棄草案",
-    description: "把目前尚未套用的修改草案清掉，不會改動任何檔案。",
+    title: "清除建議",
+    description: "把目前尚未處理的修改建議清掉，不會改動任何檔案。",
     usage: [
-      "適合草案不滿意時重新生成。",
-      "只會移除預覽內容，不會寫入專案。",
+      "適合建議不滿意時重新生成。",
+      "只會移除目前的修改建議狀態，不會刪掉主對話框裡已顯示過的歷史訊息。",
     ],
   },
-  "edit-plan": {
-    title: "修改草案",
-    description: "顯示目前待套用的修改摘要與 unified diff 預覽，讓你先確認內容再決定是否寫回檔案。",
+  "edit-plan-status": {
+    title: "修改建議狀態",
+    description: "主畫面只保留一小塊狀態摘要，提醒你目前是否已有修改建議。",
     usage: [
-      "先按「產生修改草案」。",
-      "這裡會列出修改檔案、原因與 diff。",
-      "確認後按「套用修改」，不滿意就按「丟棄草案」。",
+      "尚未產生建議時，會顯示待命訊息。",
+      "已有建議時，會顯示模式與摘要。",
+      "如果你發現建議有錯，直接在主對話框接著描述問題即可，系統會把上一版建議當成修正對象。",
     ],
   },
 };
@@ -210,7 +206,6 @@ const HELP_CONTENT = {
 const elements = {
   projectPath: document.getElementById("projectPath"),
   modelKey: document.getElementById("modelKey"),
-  pickFolderBtn: document.getElementById("pickFolderBtn"),
   openProjectBtn: document.getElementById("openProjectBtn"),
   analyzeBtn: document.getElementById("analyzeBtn"),
   refreshStatusBtn: document.getElementById("refreshStatusBtn"),
@@ -223,14 +218,7 @@ const elements = {
   chatForm: document.getElementById("chatForm"),
   chatInput: document.getElementById("chatInput"),
   sendChatBtn: document.getElementById("sendChatBtn"),
-  generateEditBtn: document.getElementById("generateEditBtn"),
-  applyEditBtn: document.getElementById("applyEditBtn"),
-  discardEditBtn: document.getElementById("discardEditBtn"),
   clearChatBtn: document.getElementById("clearChatBtn"),
-  editPlanPanel: document.getElementById("editPlanPanel"),
-  editPlanMeta: document.getElementById("editPlanMeta"),
-  editPlanSummary: document.getElementById("editPlanSummary"),
-  editPlanDiff: document.getElementById("editPlanDiff"),
   statusBadge: document.getElementById("statusBadge"),
   treeItemTemplate: document.getElementById("treeItemTemplate"),
   progressPanel: document.getElementById("progressPanel"),
@@ -297,17 +285,13 @@ function setUiState(nextState) {
   const hasPendingEdit = !!state.pendingEdit;
 
   elements.openProjectBtn.disabled = opening;
-  elements.pickFolderBtn.disabled = opening;
   elements.modelKey.disabled = opening;
   elements.projectPath.disabled = opening;
   elements.analyzeBtn.disabled = !ready || busy;
   elements.applyPinsBtn.disabled = !ready || busy;
   elements.sendChatBtn.disabled = !ready || busy;
-  elements.generateEditBtn.disabled = !ready || busy;
   elements.chatInput.disabled = !ready || busy;
   elements.clearChatBtn.disabled = !ready;
-  elements.applyEditBtn.disabled = !ready || busy || !hasPendingEdit;
-  elements.discardEditBtn.disabled = !ready || busy || !hasPendingEdit;
 }
 
 function renderProgress(progress = 0, step = "", title = "背景作業執行中") {
@@ -383,28 +367,103 @@ function clearError() {
   elements.errorActionBtn.classList.add("hidden");
 }
 
+function requirePinnedFiles() {
+  if (state.pinnedFiles.size > 0) {
+    return true;
+  }
+  showError({
+    code: "PINNED_CONTEXT_REQUIRED",
+    message: "請先套用釘選檔案。",
+    details: "請先在檔案樹勾選並套用至少一個檔案，模型才會根據這些檔案分析。",
+  });
+  setStatus("請先套用釘選檔案");
+  return false;
+}
+
 function renderPendingEdit(plan) {
   state.pendingEdit = plan || null;
-  if (!plan || !plan.edits || !plan.edits.length) {
-    elements.editPlanPanel.classList.add("hidden");
-    elements.applyEditBtn.classList.add("hidden");
-    elements.discardEditBtn.classList.add("hidden");
-    elements.editPlanMeta.textContent = "尚未產生草案";
-    elements.editPlanSummary.textContent = "";
-    elements.editPlanDiff.textContent = "";
+  updateChatPlaceholder();
+}
+
+function buildPendingEditText(plan) {
+  const mode = plan?.mode || "precise";
+  const sections = [
+    `修改摘要：${plan?.summary || "未提供"}`,
+    `模式：${mode === "advisory" ? "文字模式" : "精準模式"}`,
+  ];
+  if (plan?.failureReason) {
+    sections.push(`精準模式未套用原因：${plan.failureReason}`);
+  }
+  if (plan?.needMoreContext?.length) {
+    sections.push(`需要補充：${plan.needMoreContext.join("、")}`);
+  }
+  sections.push("");
+  if (mode === "advisory") {
+    if (plan?.displayText) {
+      sections.push(String(plan.displayText).trim());
+    } else if (Array.isArray(plan?.suggestions)) {
+      sections.push(plan.suggestions.map((item) => {
+        const parts = [
+          `檔案：${item.path || "(未指定檔案)"}`,
+          `修改位置：${item.location || "未提供"}`,
+          `命中函式/區塊：${item.target || "未提供"}`,
+          `原因：${item.whyHere || item.reason || "模型未提供原因"}`,
+          "建議替換前片段：",
+          item.before || "模型未提供原始片段。",
+          "",
+          "建議替換後片段：",
+          item.after || "模型未提供建議片段。",
+          "",
+          "Diff 視窗：",
+          item.diffWindow || "模型未提供 diff window。",
+        ];
+        if (Array.isArray(item.notes) && item.notes.length) {
+          parts.push("", "補充說明：", item.notes.map((note) => `- ${note}`).join("\n"));
+        }
+        return parts.join("\n");
+      }).join("\n\n---\n\n"));
+    }
+  } else if (Array.isArray(plan?.edits)) {
+    sections.push(plan.edits.map((item) => {
+      const parts = [
+        `檔案：${item.path || "(未指定檔案)"}`,
+        `修改位置：${item.location || "未提供"}`,
+        `命中函式/區塊：${item.target || "未提供"}`,
+        `原因：${item.reason || "未提供"}`,
+        "建議替換前片段：",
+        item.beforeSnippet || "未提供",
+        "",
+        "建議替換後片段：",
+        item.afterSnippet || "未提供",
+        "",
+        "Diff 視窗：",
+        item.diffWindow || item.diff || "未提供",
+      ];
+      if (Array.isArray(item.notes) && item.notes.length) {
+        parts.push("", "補充說明：", item.notes.map((note) => `- ${note}`).join("\n"));
+      }
+      return parts.join("\n");
+    }).join("\n\n"));
+  }
+  return sections.join("\n");
+}
+
+function updateChatPlaceholder() {
+  if (state.pendingEdit) {
+    elements.chatInput.placeholder = "直接描述上一版建議哪裡錯了，例如：piece 不存在，請改用現有變數。";
     return;
   }
-  const diffs = plan.edits.map((item) => {
-    const reason = item.reason ? `# ${item.path} | ${item.reason}` : `# ${item.path}`;
-    return `${reason}\n${item.diff}`;
-  });
-  elements.editPlanPanel.classList.remove("hidden");
-  elements.applyEditBtn.classList.remove("hidden");
-  elements.discardEditBtn.classList.remove("hidden");
-  elements.editPlanMeta.textContent = `${plan.edits.length} 個檔案待修改`;
-  const needMore = plan.needMoreContext?.length ? `\n需要補充：${plan.needMoreContext.join("、")}` : "";
-  elements.editPlanSummary.textContent = `${plan.summary || "已產生修改草案"}${needMore}`;
-  elements.editPlanDiff.textContent = diffs.join("\n\n");
+  elements.chatInput.placeholder = "輸入你的問題或修改需求，例如：請分析登入流程涉及哪些檔案？";
+}
+
+function formatProjectSummary(summary, pinnedFiles = []) {
+  const base = summary || "尚未開啟專案。";
+  const pinned = Array.isArray(pinnedFiles) ? pinnedFiles.filter(Boolean) : [];
+  const previewList = pinned.slice(0, 6);
+  const pinnedBlock = pinned.length
+    ? `\n已套用釘選檔案 (${pinned.length}):\n- ${previewList.join("\n- ")}${pinned.length > previewList.length ? `\n- +${pinned.length - previewList.length} 個` : ""}`
+    : "\n已套用釘選檔案: (無)";
+  return `${base}${pinnedBlock}`;
 }
 
 function appendMessage(role, content) {
@@ -453,11 +512,13 @@ async function refreshStatus() {
   state.projectPath = data.projectPath || "";
   state.modelKey = data.modelKey || "qwen";
   state.pinnedFiles = new Set(data.pinnedFiles || []);
+  state.currentPreviewPath = data.currentPreviewPath || null;
   state.pendingEdit = data.pendingEdit || null;
   state.history = data.history || [];
   elements.projectPath.value = state.projectPath;
   elements.modelKey.value = state.modelKey;
-  elements.projectSummary.textContent = data.summary || "尚未開啟專案。";
+  elements.previewPath.textContent = state.currentPreviewPath || "未選擇檔案";
+  elements.projectSummary.textContent = formatProjectSummary(data.summary, data.pinnedFiles || []);
   renderTree(data.tree || []);
   renderHistory(state.history);
   renderPendingEdit(state.pendingEdit);
@@ -474,8 +535,9 @@ async function refreshStatus() {
 
 function resetProjectViews(message = "尚未開啟專案。") {
   elements.projectSummary.textContent = message;
+  state.currentPreviewPath = null;
   elements.previewPath.textContent = "未選擇檔案";
-  elements.filePreview.textContent = "點左側檔案即可預覽內容，並可勾選釘選到對話上下文。";
+  elements.filePreview.textContent = "點左側檔案即可預覽內容。檔案預覽僅供閱讀，不會自動加入模型上下文。";
   renderPendingEdit(null);
   renderTree([]);
 }
@@ -597,6 +659,9 @@ async function analyzeProject() {
     showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
     return;
   }
+  if (!requirePinnedFiles()) {
+    return;
+  }
   clearError();
   setStatus("正在分析", true);
   try {
@@ -622,46 +687,26 @@ async function generateEditPlan() {
     showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
     return;
   }
+  if (!requirePinnedFiles()) {
+    return;
+  }
   clearError();
-  setStatus("正在產生修改草案", true);
+  appendMessage("user", message);
+  elements.chatInput.value = "";
+  setStatus("正在產生修改建議", true);
   try {
     const data = await requestJson("/api/edit/plan", {
       method: "POST",
       body: JSON.stringify({ message }),
     });
     renderPendingEdit(data.plan);
-    appendMessage("assistant", `已產生修改草案：${data.plan.summary}`);
-    setStatus("修改草案已產生");
+    const modeLabel = data.plan.mode === "advisory" ? "文字模式" : "精準模式";
+    appendMessage("assistant", `已產生修改建議（${modeLabel}）\n\n${buildPendingEditText(data.plan)}`);
+    setStatus("修改建議已產生");
     setUiState("ready");
   } catch (error) {
-    setStatus("產生草案失敗");
-    showError(normalizeError(error, "EDIT_PLAN_FAILED", "產生修改草案失敗。"));
-  }
-}
-
-async function applyEditPlan() {
-  if (!state.pendingEdit) {
-    showError({ code: "NO_PENDING_EDIT", message: "目前沒有可套用的修改草案。", details: "" });
-    return;
-  }
-  clearError();
-  setStatus("正在套用修改", true);
-  try {
-    const data = await requestJson("/api/edit/apply", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    renderPendingEdit(null);
-    await refreshStatus();
-    if (elements.previewPath.textContent && elements.previewPath.textContent !== "未選擇檔案") {
-      await loadFilePreview(elements.previewPath.textContent);
-    }
-    appendMessage("assistant", `已套用修改${data.commitHash ? `，commit: ${data.commitHash}` : ""}`);
-    setStatus("修改已套用");
-    setUiState("ready");
-  } catch (error) {
-    setStatus("套用修改失敗");
-    showError(normalizeError(error, "APPLY_EDIT_FAILED", "套用修改失敗。"));
+    setStatus("產生建議失敗");
+    showError(normalizeError(error, "EDIT_PLAN_FAILED", "產生修改建議失敗。"));
   }
 }
 
@@ -673,10 +718,10 @@ async function discardEditPlan() {
       body: JSON.stringify({}),
     });
     renderPendingEdit(null);
-    setStatus("已丟棄草案");
+    setStatus("已清除修改建議");
     setUiState("ready");
   } catch (error) {
-    showError(normalizeError(error, "DISCARD_EDIT_FAILED", "丟棄草案失敗。"));
+    showError(normalizeError(error, "DISCARD_EDIT_FAILED", "清除修改建議失敗。"));
   }
 }
 
@@ -689,6 +734,8 @@ async function loadFilePreview(path) {
   elements.filePreview.textContent = "讀取中...";
   try {
     const data = await requestJson(`/api/file?path=${encodeURIComponent(path)}`);
+    state.currentPreviewPath = data.path || path;
+    elements.previewPath.textContent = state.currentPreviewPath;
     elements.filePreview.textContent = data.content;
   } catch (error) {
     elements.filePreview.textContent = "";
@@ -704,11 +751,13 @@ async function applyPins() {
   clearError();
   setStatus("更新上下文", true);
   try {
-    await requestJson("/api/pin-files", {
+    const data = await requestJson("/api/pin-files", {
       method: "POST",
       body: JSON.stringify({ files: [...state.pinnedFiles] }),
     });
-    setStatus("已更新上下文");
+    state.pinnedFiles = new Set(data.pinnedFiles || []);
+    await refreshStatus();
+    setStatus(`已套用 ${state.pinnedFiles.size} 個釘選檔案`);
   } catch (error) {
     setStatus("更新失敗");
     showError(normalizeError(error, "PIN_FILES_FAILED", "更新上下文失敗。"));
@@ -723,6 +772,9 @@ async function sendChat(event) {
     showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
     return;
   }
+  if (!requirePinnedFiles()) {
+    return;
+  }
   clearError();
   appendMessage("user", message);
   elements.chatInput.value = "";
@@ -732,6 +784,9 @@ async function sendChat(event) {
       method: "POST",
       body: JSON.stringify({ message }),
     });
+    if (data.plan) {
+      renderPendingEdit(data.plan);
+    }
     appendMessage("assistant", data.reply);
     setStatus("完成");
   } catch (error) {
@@ -749,6 +804,7 @@ function clearChat() {
   })
     .then(() => {
       elements.chatLog.innerHTML = "";
+      renderPendingEdit(null);
       setStatus(state.uiState === "ready" ? "專案已就緒" : "對話已清空");
     })
     .catch((error) => showError(normalizeError(error, "RESET_HISTORY_FAILED", "清空對話失敗。")));
@@ -758,15 +814,23 @@ document.querySelectorAll(".help-trigger").forEach((button) => {
   button.addEventListener("click", () => openHelp(button.dataset.help));
 });
 
-elements.pickFolderBtn.addEventListener("click", pickFolder);
+elements.projectPath.addEventListener("click", (event) => {
+  if (elements.projectPath.disabled) return;
+  event.preventDefault();
+  pickFolder();
+});
+elements.projectPath.addEventListener("keydown", (event) => {
+  if (elements.projectPath.disabled) return;
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    pickFolder();
+  }
+});
 elements.openProjectBtn.addEventListener("click", openProject);
 elements.analyzeBtn.addEventListener("click", analyzeProject);
 elements.refreshStatusBtn.addEventListener("click", refreshStatus);
 elements.applyPinsBtn.addEventListener("click", applyPins);
 elements.chatForm.addEventListener("submit", sendChat);
-elements.generateEditBtn.addEventListener("click", generateEditPlan);
-elements.applyEditBtn.addEventListener("click", applyEditPlan);
-elements.discardEditBtn.addEventListener("click", discardEditPlan);
 elements.clearChatBtn.addEventListener("click", clearChat);
 elements.errorActionBtn.addEventListener("click", redownloadModel);
 elements.dismissErrorBtn.addEventListener("click", clearError);
