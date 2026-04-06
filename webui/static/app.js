@@ -2,6 +2,7 @@ const state = {
   uiState: "idle",
   projectPath: "",
   modelKey: "qwen",
+  language: localStorage.getItem("codeworker.language") || "zh-Hant",
   pinnedFiles: new Set(),
   currentPreviewPath: null,
   pendingEdit: null,
@@ -9,214 +10,573 @@ const state = {
   currentTaskId: null,
   currentTaskKind: null,
   lastError: null,
+  lastStatusText: "待命",
+  lastStatusBusy: false,
+  lastProgress: { progress: 0, step: "", title: "背景作業執行中" },
+  summaryRaw: "",
+  tree: [],
+  openHelpKey: null,
+};
+
+const I18N = {
+  "zh-Hant": {
+    htmlLang: "zh-Hant",
+    pageTitle: "CodeWorker V0.95b Web UI",
+    brandTitle: "CodeWorker V0.95b",
+    brandSubtitle: "本地離線專案分析與對話",
+    languageSwitch: { zh: "繁中", en: "EN" },
+    labels: {
+      projectPath: "專案路徑",
+      model: "模型",
+      chatInput: "對話輸入",
+    },
+    headings: {
+      errorPanel: "錯誤訊息",
+      projectSummary: "專案摘要",
+      fileTree: "檔案樹",
+      chatPanel: "對話",
+      previewPanel: "檔案預覽",
+      helpModal: "功能說明",
+    },
+    buttons: {
+      openProject: "開啟專案",
+      analyzeProject: "分析專案",
+      redownloadModel: "重新下載模型",
+      dismiss: "關閉",
+      refresh: "重新整理",
+      applyPins: "套用釘選",
+      send: "送出",
+      clearChat: "清空對話",
+    },
+    hints: {
+      firstRun: "第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。",
+      previewOnly: "僅供預覽，不會自動加入模型上下文",
+      initialSummary: "尚未開啟專案。",
+      initialTree: "尚未載入檔案。",
+      initialPreviewPath: "未選擇檔案",
+      initialPreview: "點左側檔案即可預覽內容。檔案預覽僅供閱讀，不會自動加入模型上下文。",
+      projectOpened: "專案已開啟。",
+      projectOpenedReady: "專案已開啟。你可以先按「分析專案」，或直接開始提問。",
+    },
+    placeholders: {
+      projectPath: "點擊這裡選擇專案資料夾",
+      chatDefault: "輸入你的問題或修改需求，例如：請分析登入流程涉及哪些檔案？",
+      chatRefine: "直接描述上一版建議哪裡錯了，例如：piece 不存在，請改用現有變數。",
+    },
+    helpSections: {
+      usage: "使用方式",
+      notes: "補充說明",
+    },
+    roles: {
+      user: "你",
+      assistant: "Assistant",
+    },
+    summary: {
+      path: "專案路徑",
+      fileCount: "檔案數量(已掃描)",
+      totalBytes: "估計文字檔總大小",
+      languages: "主要語言",
+      entrypoints: "可能入口檔案",
+      tests: "測試相關檔案",
+      none: "無",
+      notFound: "未明確找到",
+      pinned: "已套用釘選檔案",
+      noPins: "(無)",
+      moreCount: (count) => `+${count} 個`,
+    },
+    statuses: {
+      idle: "待命",
+      ready: "專案已就緒",
+      opening: "正在開啟專案",
+      redownloading: "正在重新下載模型",
+      thinking: "正在思考",
+      done: "完成",
+      chatFailed: "對話失敗",
+      analyzing: "正在分析",
+      analyzeDone: "分析完成",
+      analyzeFailed: "分析失敗",
+      openingFolder: "開啟資料夾選取視窗",
+      pickFolderFailed: "選擇資料夾失敗",
+      openFailed: "開啟失敗",
+      updateContext: "更新上下文",
+      updateFailed: "更新失敗",
+      historyCleared: "對話已清空",
+      modelRedownloaded: "模型已重新下載",
+      modelRedownloadFailed: "模型重新下載失敗",
+      appliedPins: (count) => `已套用 ${count} 個釘選檔案`,
+    },
+    progress: {
+      defaultTitle: "背景作業執行中",
+      waiting: "等待中",
+      openTitle: "正在開啟專案",
+      redownloadTitle: "正在重新下載模型",
+    },
+    errors: {
+      unexpected: "發生未預期錯誤。",
+      requestFailed: "Request failed.",
+      pinnedRequiredMessage: "請先套用釘選檔案。",
+      pinnedRequiredDetails: "請先在檔案樹勾選並套用至少一個檔案，模型才會根據這些檔案分析。",
+      projectNotReady: "請先完成開啟專案。",
+      projectPathInvalid: "請先選擇專案資料夾。",
+      pickFolderFailed: "選擇資料夾失敗。",
+      openProjectFailed: "開啟專案失敗。",
+      modelDownloadFailed: "模型重新下載失敗。",
+      analyzeFailed: "分析失敗。",
+      filePreviewFailed: "檔案預覽失敗。",
+      pinFilesFailed: "更新上下文失敗。",
+      chatFailed: "對話失敗。",
+      resetHistoryFailed: "清空對話失敗。",
+      modelReady: "模型已重新下載完成。",
+      modelReadyDetails: "請再次按「開啟專案」重新啟動模型與索引流程。",
+      taskFailed: "Task failed.",
+    },
+  },
+  en: {
+    htmlLang: "en",
+    pageTitle: "CodeWorker V0.95b Web UI",
+    brandTitle: "CodeWorker V0.95b",
+    brandSubtitle: "Local offline project analysis and chat",
+    languageSwitch: { zh: "繁中", en: "EN" },
+    labels: {
+      projectPath: "Project path",
+      model: "Model",
+      chatInput: "Chat input",
+    },
+    headings: {
+      errorPanel: "Errors",
+      projectSummary: "Project summary",
+      fileTree: "File tree",
+      chatPanel: "Chat",
+      previewPanel: "File preview",
+      helpModal: "Help",
+    },
+    buttons: {
+      openProject: "Open project",
+      analyzeProject: "Analyze project",
+      redownloadModel: "Redownload model",
+      dismiss: "Close",
+      refresh: "Refresh",
+      applyPins: "Apply pins",
+      send: "Send",
+      clearChat: "Clear chat",
+    },
+    hints: {
+      firstRun: "On the first run, CodeWorker will automatically download missing runtime files or models.",
+      previewOnly: "Preview only. This file is not automatically added to model context.",
+      initialSummary: "No project opened yet.",
+      initialTree: "No files loaded yet.",
+      initialPreviewPath: "No file selected",
+      initialPreview: "Click a file on the left to preview it. File preview is read-only and does not automatically join model context.",
+      projectOpened: "Project opened.",
+      projectOpenedReady: "Project opened. You can analyze it first or start asking questions right away.",
+    },
+    placeholders: {
+      projectPath: "Click here to choose a project folder",
+      chatDefault: "Enter your question or change request, for example: Which files are involved in the login flow?",
+      chatRefine: "Describe what is wrong with the previous suggestion, for example: piece does not exist, please use an existing variable.",
+    },
+    helpSections: {
+      usage: "How to use",
+      notes: "Notes",
+    },
+    roles: {
+      user: "You",
+      assistant: "Assistant",
+    },
+    summary: {
+      path: "Project path",
+      fileCount: "Scanned files",
+      totalBytes: "Estimated text size",
+      languages: "Primary languages",
+      entrypoints: "Possible entry points",
+      tests: "Test-related files",
+      none: "None",
+      notFound: "Not clearly found",
+      pinned: "Applied pinned files",
+      noPins: "(none)",
+      moreCount: (count) => `+${count} more`,
+    },
+    statuses: {
+      idle: "Idle",
+      ready: "Project ready",
+      opening: "Opening project",
+      redownloading: "Redownloading model",
+      thinking: "Thinking",
+      done: "Done",
+      chatFailed: "Chat failed",
+      analyzing: "Analyzing",
+      analyzeDone: "Analysis complete",
+      analyzeFailed: "Analysis failed",
+      openingFolder: "Opening folder picker",
+      pickFolderFailed: "Folder selection failed",
+      openFailed: "Open failed",
+      updateContext: "Updating context",
+      updateFailed: "Context update failed",
+      historyCleared: "Chat cleared",
+      modelRedownloaded: "Model redownloaded",
+      modelRedownloadFailed: "Model redownload failed",
+      appliedPins: (count) => `Applied ${count} pinned files`,
+    },
+    progress: {
+      defaultTitle: "Background task running",
+      waiting: "Waiting",
+      openTitle: "Opening project",
+      redownloadTitle: "Redownloading model",
+    },
+    errors: {
+      unexpected: "An unexpected error occurred.",
+      requestFailed: "Request failed.",
+      pinnedRequiredMessage: "Please apply pinned files first.",
+      pinnedRequiredDetails: "Please check and apply at least one file in the file tree before asking the model to analyze or answer.",
+      projectNotReady: "Please finish opening the project first.",
+      projectPathInvalid: "Please choose a project folder first.",
+      pickFolderFailed: "Failed to choose a folder.",
+      openProjectFailed: "Failed to open project.",
+      modelDownloadFailed: "Failed to redownload model.",
+      analyzeFailed: "Analysis failed.",
+      filePreviewFailed: "File preview failed.",
+      pinFilesFailed: "Failed to update model context.",
+      chatFailed: "Chat failed.",
+      resetHistoryFailed: "Failed to clear chat.",
+      modelReady: "Model redownload completed.",
+      modelReadyDetails: "Click Open project again to restart the model and project indexing flow.",
+      taskFailed: "Task failed.",
+    },
+  },
 };
 
 const HELP_CONTENT = {
   "project-path": {
-    title: "專案路徑",
-    description: "這裡填要分析的專案資料夾。開啟專案時，CodeWorker 會以這個資料夾為根目錄建立 git 基線、掃描檔案並準備上下文。",
-    usage: [
-      "直接點一下路徑框，就會開啟 Windows 原生資料夾選取視窗。",
-      "選完後，路徑會自動填回輸入框。",
-      "建議選真正的程式碼專案根目錄，不要選整個下載資料夾或大量影音資源資料夾。",
-    ],
-  },
-  "pick-folder": {
-    title: "選擇資料夾",
-    description: "開啟 Windows 原生資料夾選取視窗，避免手動輸入路徑打錯。",
-    usage: [
-      "按下後選一個專案資料夾。",
-      "選完會自動把路徑填回上方輸入框。",
-      "若沒有跳出視窗，請確認沒有被其他視窗擋住。",
-    ],
+    "zh-Hant": {
+      title: "專案路徑",
+      description: "這裡填要分析的專案資料夾。開啟專案時，CodeWorker 會以這個資料夾為根目錄建立 git 基線、掃描檔案並準備上下文。",
+      usage: [
+        "直接點一下路徑框，就會開啟 Windows 原生資料夾選取視窗。",
+        "選完後，路徑會自動填回輸入框。",
+        "建議選真正的程式碼專案根目錄，不要選整個下載資料夾或大量影音資源資料夾。",
+      ],
+    },
+    en: {
+      title: "Project path",
+      description: "Choose the project folder you want to analyze. When you open a project, CodeWorker uses this folder as the root for git baseline setup, file scanning, and context preparation.",
+      usage: [
+        "Click the path field to open the native Windows folder picker.",
+        "After you choose a folder, the path is filled back into the input automatically.",
+        "Pick the real project root, not a generic download folder or a directory full of media assets.",
+      ],
+    },
   },
   "model-key": {
-    title: "模型",
-    description: "選擇本次要用的本地模型。預設是 Qwen；Gemma 4 E4B 是新增可選模型；Code Llama 是備援模型。",
-    usage: [
-      "一般建議使用 Qwen 2.5 Coder 7B。",
-      "若要評估真正 Gemma 4 的中文分析與 coding 表現，可切換到 Gemma 4 E4B。",
-      "若要比對備援模型行為，再切換到 Code Llama 7B。",
-      "切換模型後需重新開啟專案，系統才會改用新模型。",
-    ],
+    "zh-Hant": {
+      title: "模型",
+      description: "選擇本次要用的本地模型。預設是 Qwen；Gemma 4 E4B 是評估中可選模型；Code Llama 是備援模型。",
+      usage: [
+        "一般建議使用 Qwen 2.5 Coder 7B。",
+        "若要比較 Gemma 4 E4B 的分析與修改建議表現，可切換到 Gemma 4 E4B。",
+        "切換模型後需重新開啟專案，系統才會改用新模型。",
+      ],
+    },
+    en: {
+      title: "Model",
+      description: "Select the local model for this session. Qwen is the default; Gemma 4 E4B is an evaluation option; Code Llama is a fallback model.",
+      usage: [
+        "Qwen 2.5 Coder 7B is still the recommended default.",
+        "Switch to Gemma 4 E4B if you want to compare its analysis or edit-plan behavior.",
+        "After changing the model, reopen the project so the new model is actually used.",
+      ],
+    },
   },
   "progress-panel": {
-    title: "進度條",
-    description: "顯示目前背景任務進行到哪個步驟。開專案時會依序經過路徑檢查、Git 準備、模型啟動、專案索引。",
-    usage: [
-      "百分比是目前任務進度。",
-      "下面的文字會顯示當前步驟與補充訊息。",
-      "如果長時間停在同一步，通常代表該步驟真的卡住或正在做較重的工作。",
-    ],
+    "zh-Hant": {
+      title: "進度條",
+      description: "顯示目前背景任務進行到哪個步驟。開專案時會依序經過路徑檢查、Git 準備、模型啟動、專案索引。",
+      usage: [
+        "百分比是目前任務進度。",
+        "下面的文字會顯示當前步驟與補充訊息。",
+        "若長時間停在同一步，通常代表該步驟真的在進行較重的工作。",
+      ],
+    },
+    en: {
+      title: "Progress bar",
+      description: "Shows which background step is currently running. Opening a project usually goes through path validation, Git preparation, model startup, and project indexing.",
+      usage: [
+        "The percentage shows task progress.",
+        "The line below shows the current step and extra detail.",
+        "If it stays on one step for a long time, that step is usually doing genuinely heavy work.",
+      ],
+    },
   },
   "open-project": {
-    title: "開啟專案",
-    description: "把目前輸入的資料夾載入到 CodeWorker。這是使用其他功能前的必要步驟。",
-    usage: [
-      "第一次開專案時，系統會檢查 runtime、模型、git 狀態。",
-      "若資料夾不是 git repo，系統會自動建立 `.git` 與基線快照。",
-      "完成後，摘要、檔案樹、檔案預覽、分析與對話才會解鎖。",
-    ],
+    "zh-Hant": {
+      title: "開啟專案",
+      description: "把目前輸入的資料夾載入到 CodeWorker。這是使用其他功能前的必要步驟。",
+      usage: [
+        "第一次開專案時，系統會檢查 runtime、模型與 git 狀態。",
+        "若資料夾不是 git repo，系統會自動建立 `.git` 與基線快照。",
+        "完成後，摘要、檔案樹、檔案預覽、分析與對話才會解鎖。",
+      ],
+    },
+    en: {
+      title: "Open project",
+      description: "Load the current folder into CodeWorker. This is required before the rest of the features become available.",
+      usage: [
+        "On the first run, CodeWorker checks runtime files, models, and Git status.",
+        "If the folder is not already a git repository, CodeWorker will initialize one and create a baseline snapshot.",
+        "After completion, summary, file tree, preview, analysis, and chat become available.",
+      ],
+    },
   },
   "analyze-project": {
-    title: "分析專案",
-    description: "請模型根據目前已套用的釘選檔案做總覽分析，通常會整理入口、核心模組、設定檔與測試位置。",
-    usage: [
-      "先在檔案樹勾選要分析的檔案，再按「套用釘選」。",
-      "分析結果會出現在右側對話區。",
-      "若尚未開啟專案或尚未套用釘選檔案，系統會提示你先完成這一步。",
-    ],
+    "zh-Hant": {
+      title: "分析專案",
+      description: "請模型根據目前已套用的釘選檔案做總覽分析，通常會整理入口、核心模組、設定檔與測試位置。",
+      usage: [
+        "先在檔案樹勾選要分析的檔案，再按「套用釘選」。",
+        "分析結果會出現在中間對話區。",
+      ],
+    },
+    en: {
+      title: "Analyze project",
+      description: "Ask the model to summarize the currently pinned files. It usually points out entry points, core modules, config files, and test locations.",
+      usage: [
+        "Check the files you want in the file tree, then click Apply pins first.",
+        "The analysis result appears in the main chat panel.",
+      ],
+    },
   },
   "error-panel": {
-    title: "錯誤訊息",
-    description: "當下載、模型啟動、專案開啟或對話發生問題時，這裡會顯示錯誤碼、摘要與詳細內容。",
-    usage: [
-      "先看錯誤碼與摘要，再看詳細內容。",
-      "若有 log 路徑，可用來進一步除錯。",
-      "有些錯誤會附帶可執行動作，例如重新下載模型。",
-    ],
+    "zh-Hant": {
+      title: "錯誤訊息",
+      description: "當下載、模型啟動、專案開啟或對話發生問題時，這裡會顯示錯誤碼、摘要與詳細內容。",
+      usage: [
+        "先看錯誤碼與摘要，再看詳細內容。",
+        "若有 log 路徑，可用來進一步除錯。",
+      ],
+    },
+    en: {
+      title: "Error panel",
+      description: "When downloads, model startup, project loading, or chat fail, this panel shows the error code, summary, and details.",
+      usage: [
+        "Read the error code and summary first, then inspect the detailed message.",
+        "If a log path is shown, use it for deeper troubleshooting.",
+      ],
+    },
   },
   "redownload-model": {
-    title: "重新下載模型",
-    description: "當模型檔損壞、下載不完整或讀取失敗時，用這個功能重新抓指定模型。",
-    usage: [
-      "按下後會在背景重新下載模型。",
-      "下載進度會顯示在進度條中。",
-      "下載完成後，再按一次「開啟專案」。",
-    ],
+    "zh-Hant": {
+      title: "重新下載模型",
+      description: "當模型檔損壞、下載不完整或讀取失敗時，用這個功能重新抓指定模型。",
+      usage: [
+        "按下後會在背景重新下載模型。",
+        "下載完成後，再按一次「開啟專案」。",
+      ],
+    },
+    en: {
+      title: "Redownload model",
+      description: "Use this when a model file is corrupted, incomplete, or cannot be read.",
+      usage: [
+        "The selected model is downloaded again in the background.",
+        "After the download finishes, click Open project again.",
+      ],
+    },
   },
   "dismiss-error": {
-    title: "關閉錯誤",
-    description: "先把目前的錯誤卡收起來，不會刪除任何資料或修正問題。",
-    usage: [
-      "只會隱藏錯誤顯示。",
-      "若問題尚未解決，之後再次操作時仍可能重新出現。",
-    ],
+    "zh-Hant": {
+      title: "關閉錯誤",
+      description: "先把目前的錯誤卡收起來，不會刪除任何資料或修正問題。",
+      usage: ["只會隱藏錯誤顯示。"],
+    },
+    en: {
+      title: "Close error",
+      description: "Hide the current error card. This does not fix the issue or remove any data.",
+      usage: ["This only hides the error display."],
+    },
   },
   "project-summary": {
-    title: "專案摘要",
-    description: "用來快速看整個專案的大方向。它不是原始碼本身，而是系統掃描後整理出的重點資訊。",
-    usage: [
-      "可看到專案路徑、已掃描檔案數量、估計文字檔大小、主要語言、可能入口檔案與測試位置。",
-      "也會顯示目前已套用的釘選檔案清單，方便確認模型此刻會看哪些檔案。",
-      "適合先用來判斷這個資料夾是不是你真正要分析的專案。",
-      "若摘要內容不對，通常代表你選錯資料夾，或專案裡混入太多非程式碼內容。",
-    ],
+    "zh-Hant": {
+      title: "專案摘要",
+      description: "用來快速看整個專案的大方向。它不是原始碼本身，而是系統掃描後整理出的重點資訊。",
+      usage: [
+        "可看到專案路徑、已掃描檔案數量、估計文字檔大小、主要語言、可能入口檔案與測試位置。",
+        "也會顯示目前已套用的釘選檔案清單，方便確認模型此刻會看哪些檔案。",
+      ],
+    },
+    en: {
+      title: "Project summary",
+      description: "A quick project overview generated from the scanned workspace. It is not raw source code; it is a summary of key facts.",
+      usage: [
+        "You can see project path, scanned file count, estimated text size, major languages, likely entry points, and test locations.",
+        "It also shows the pinned files currently used as model context.",
+      ],
+    },
   },
   "refresh-status": {
-    title: "重新整理",
-    description: "重新抓一次目前載入中的專案狀態與畫面內容。",
-    usage: [
-      "適合在專案已開啟後，重新同步摘要、檔案樹與對話歷史。",
-      "不會重新下載模型，也不會自動重跑分析。",
-    ],
+    "zh-Hant": {
+      title: "重新整理",
+      description: "重新抓一次目前載入中的專案狀態與畫面內容。",
+      usage: ["適合在專案已開啟後，重新同步摘要、檔案樹與對話歷史。"],
+    },
+    en: {
+      title: "Refresh",
+      description: "Fetch the current project state and refresh the visible workspace data.",
+      usage: ["Useful after the project is already opened and you want to sync summary, file tree, and chat history again."],
+    },
   },
   "file-tree": {
-    title: "檔案樹",
-    description: "顯示目前已掃描到的檔案清單。這裡是你選擇模型上下文檔案的唯一入口。",
-    usage: [
-      "點檔名可在上方「檔案預覽」查看內容。",
-      "左邊勾選框可把檔案加入釘選清單。",
-      "按「套用釘選」後，這些檔案才會真正加入之後的分析、對話與修改建議上下文。",
-    ],
+    "zh-Hant": {
+      title: "檔案樹",
+      description: "顯示目前已掃描到的檔案清單。這裡是你選擇模型上下文檔案的唯一入口。",
+      usage: [
+        "點檔名可在右側「檔案預覽」查看內容。",
+        "左邊勾選框可把檔案加入釘選清單。",
+      ],
+    },
+    en: {
+      title: "File tree",
+      description: "Shows the scanned file list. This is the only place where you decide which files become model context.",
+      usage: [
+        "Click a filename to preview it on the right.",
+        "Use the checkbox to add a file to the pinned context list.",
+      ],
+    },
   },
   "apply-pins": {
-    title: "套用釘選",
-    description: "把你在檔案樹中勾選的檔案設成目前唯一的模型上下文。",
-    usage: [
-      "先在檔案樹勾選想關注的檔案。",
-      "按下後，模型之後分析、對話與修改建議只會根據這些檔案回答。",
-      "適合只想聚焦某幾個模組時使用。",
-    ],
+    "zh-Hant": {
+      title: "套用釘選",
+      description: "把你在檔案樹中勾選的檔案設成目前唯一的模型上下文。",
+      usage: [
+        "先在檔案樹勾選想關注的檔案。",
+        "按下後，模型之後分析、對話與修改建議只會根據這些檔案回答。",
+      ],
+    },
+    en: {
+      title: "Apply pins",
+      description: "Turn the checked files in the file tree into the active model context.",
+      usage: [
+        "Check the files you want to focus on in the file tree.",
+        "After clicking Apply pins, analysis, chat, and edit suggestions use only those files as context.",
+      ],
+    },
   },
   "file-preview": {
-    title: "檔案預覽",
-    description: "顯示你在檔案樹點到的單一檔案內容，讓你先快速閱讀與確認內容。",
-    usage: [
-      "它是閱讀區，不是編輯器，也不是模型上下文來源。",
-      "點檔案樹中的任一檔案，內容就會顯示在這裡。",
-      "若要讓模型真的讀取該檔案，仍需在檔案樹勾選並按「套用釘選」。",
-      "若內容很長，這個區塊本身可以捲動，不會把整頁拉長。",
-    ],
+    "zh-Hant": {
+      title: "檔案預覽",
+      description: "顯示你在檔案樹點到的單一檔案內容，讓你先快速閱讀與確認內容。",
+      usage: [
+        "它是閱讀區，不是編輯器，也不是模型上下文來源。",
+        "若要讓模型真的讀取該檔案，仍需在檔案樹勾選並按「套用釘選」。",
+      ],
+    },
+    en: {
+      title: "File preview",
+      description: "Shows the content of the single file you clicked in the file tree so you can read it quickly.",
+      usage: [
+        "This is a reading area, not an editor, and not a model-context source by itself.",
+        "If you want the model to use this file, you still have to check it in the file tree and click Apply pins.",
+      ],
+    },
   },
   "chat-panel": {
-    title: "對話",
-    description: "你和本地模型互動的主區域。分析結果與一般提問都會顯示在這裡。",
-    usage: [
-      "先開啟專案，再套用至少一個釘選檔案後開始提問。",
-      "對話內容過長時，這個區塊本身會出現捲動條，不會延伸整頁。",
-      "模型只會根據目前已套用的釘選檔案回答，不會自動讀取你正在預覽的檔案。",
-    ],
+    "zh-Hant": {
+      title: "對話",
+      description: "你和本地模型互動的主區域。分析結果與一般提問都會顯示在這裡。",
+      usage: [
+        "先開啟專案，再套用至少一個釘選檔案後開始提問。",
+        "模型只會根據目前已套用的釘選檔案回答，不會自動讀取你正在預覽的檔案。",
+      ],
+    },
+    en: {
+      title: "Chat",
+      description: "The main interaction area between you and the local model. Analysis results and general questions appear here.",
+      usage: [
+        "Open a project first, then apply at least one pinned file before asking questions.",
+        "The model only answers from the currently pinned files, not from whatever file you happen to preview.",
+      ],
+    },
   },
   "chat-input": {
-    title: "對話輸入",
-    description: "輸入你要問模型的內容。模型會根據目前已套用的釘選檔案回答。",
-    usage: [
-      "可直接問：『登入流程在哪些檔案？』",
-      "也可下指令：『先不要改檔，先分析 bug 可能位置。』",
-      "若尚未套用釘選檔案，系統會先要求你去檔案樹勾選並套用。",
-    ],
+    "zh-Hant": {
+      title: "對話輸入",
+      description: "輸入你要問模型的內容。模型會根據目前已套用的釘選檔案回答。",
+      usage: [
+        "可直接問：『登入流程在哪些檔案？』",
+        "也可下指令：『先不要改檔，先分析 bug 可能位置。』",
+      ],
+    },
+    en: {
+      title: "Chat input",
+      description: "Type what you want to ask or request. The model answers from the currently pinned files.",
+      usage: [
+        "Ask direct questions such as: Which files are involved in the login flow?",
+        "You can also give instructions such as: Do not change files yet, analyze where the bug might be first.",
+      ],
+    },
   },
   "send-chat": {
-    title: "送出",
-    description: "把目前輸入框的問題送到模型。",
-    usage: [
-      "送出前請確認已開啟專案。",
-      "送出後回答會顯示在對話區。",
-      "若你輸入的是修改需求，系統會直接在主對話框回覆修改建議與 diff。",
-      "如果目前正在開專案或下載模型，這個按鈕會被停用。",
-    ],
+    "zh-Hant": {
+      title: "送出",
+      description: "把目前輸入框的問題送到模型。",
+      usage: [
+        "送出前請確認已開啟專案。",
+        "若你輸入的是修改需求，系統會直接在主對話框回覆修改建議與 diff。",
+      ],
+    },
+    en: {
+      title: "Send",
+      description: "Send the current input to the model.",
+      usage: [
+        "Make sure the project is opened before sending.",
+        "If the input is a change request, the model replies with a structured code suggestion directly in the main chat.",
+      ],
+    },
   },
   "clear-chat": {
-    title: "清空對話",
-    description: "清掉目前頁面上的對話歷史，讓你重新開始一輪提問。",
-    usage: [
-      "只清除這次 web UI 的對話內容。",
-      "也會一併清掉目前暫存的修改建議狀態。",
-      "不會刪除專案、模型、摘要或檔案樹。",
-    ],
-  },
-  "generate-edit": {
-    title: "產生修改建議",
-    description: "根據你目前輸入的需求，讓模型先產生一份修改建議與 diff 預覽，不會直接寫入檔案。",
-    usage: [
-      "必須先在檔案樹勾選相關檔案，並按「套用釘選」。",
-      "建議會直接出現在主對話框中，不會另外跳出視窗。",
-      "若內容有錯，可直接在同一個主對話框接著說明，例如「piece 不存在，請改用現有變數」。",
-    ],
-  },
-  "discard-edit": {
-    title: "清除建議",
-    description: "把目前尚未處理的修改建議清掉，不會改動任何檔案。",
-    usage: [
-      "適合建議不滿意時重新生成。",
-      "只會移除目前的修改建議狀態，不會刪掉主對話框裡已顯示過的歷史訊息。",
-    ],
-  },
-  "edit-plan-status": {
-    title: "修改建議狀態",
-    description: "主畫面只保留一小塊狀態摘要，提醒你目前是否已有修改建議。",
-    usage: [
-      "尚未產生建議時，會顯示待命訊息。",
-      "已有建議時，會顯示模式與摘要。",
-      "如果你發現建議有錯，直接在主對話框接著描述問題即可，系統會把上一版建議當成修正對象。",
-    ],
+    "zh-Hant": {
+      title: "清空對話",
+      description: "清掉目前頁面上的對話歷史，讓你重新開始一輪提問。",
+      usage: [
+        "只清除這次 web UI 的對話內容。",
+        "也會一併清掉目前暫存的修改建議狀態。",
+      ],
+    },
+    en: {
+      title: "Clear chat",
+      description: "Clear the current chat history in this page so you can start over.",
+      usage: [
+        "This only clears the current Web UI conversation history.",
+        "It also clears the current pending edit suggestion state.",
+      ],
+    },
   },
 };
 
 const elements = {
+  brandTitle: document.getElementById("brandTitle"),
+  brandSubtitle: document.getElementById("brandSubtitle"),
+  langZhBtn: document.getElementById("langZhBtn"),
+  langEnBtn: document.getElementById("langEnBtn"),
+  projectPathLabel: document.getElementById("projectPathLabel"),
   projectPath: document.getElementById("projectPath"),
+  modelKeyLabel: document.getElementById("modelKeyLabel"),
   modelKey: document.getElementById("modelKey"),
   openProjectBtn: document.getElementById("openProjectBtn"),
   analyzeBtn: document.getElementById("analyzeBtn"),
+  firstRunHint: document.getElementById("firstRunHint"),
+  errorPanelTitle: document.getElementById("errorPanelTitle"),
   refreshStatusBtn: document.getElementById("refreshStatusBtn"),
   applyPinsBtn: document.getElementById("applyPinsBtn"),
+  projectSummaryTitle: document.getElementById("projectSummaryTitle"),
   projectSummary: document.getElementById("projectSummary"),
+  fileTreeTitle: document.getElementById("fileTreeTitle"),
   fileTree: document.getElementById("fileTree"),
+  previewPanelTitle: document.getElementById("previewPanelTitle"),
   previewPath: document.getElementById("previewPath"),
+  previewNote: document.getElementById("previewNote"),
   filePreview: document.getElementById("filePreview"),
+  chatPanelTitle: document.getElementById("chatPanelTitle"),
   chatLog: document.getElementById("chatLog"),
   chatForm: document.getElementById("chatForm"),
+  chatInputLabel: document.getElementById("chatInputLabel"),
   chatInput: document.getElementById("chatInput"),
   sendChatBtn: document.getElementById("sendChatBtn"),
   clearChatBtn: document.getElementById("clearChatBtn"),
@@ -239,6 +599,142 @@ const elements = {
   helpBody: document.getElementById("helpBody"),
   closeHelpBtn: document.getElementById("closeHelpBtn"),
 };
+
+function getLocale() {
+  return I18N[state.language] || I18N["zh-Hant"];
+}
+
+function getNested(source, path) {
+  return path.split(".").reduce((current, key) => (current && key in current ? current[key] : undefined), source);
+}
+
+function t(path, ...args) {
+  const value = getNested(getLocale(), path);
+  if (typeof value === "function") {
+    return value(...args);
+  }
+  return value ?? path;
+}
+
+function localizeHelpEntry(helpKey) {
+  return HELP_CONTENT[helpKey]?.[state.language] || HELP_CONTENT[helpKey]?.["zh-Hant"] || null;
+}
+
+function translateRuntimeText(text) {
+  const input = String(text || "");
+  if (!input || state.language === "zh-Hant") return input;
+  const replacements = [
+    [/待命/g, "Idle"],
+    [/等待中/g, "Waiting"],
+    [/專案已就緒/g, "Project ready"],
+    [/建立背景任務/g, "Creating background task"],
+    [/開啟資料夾選取視窗/g, "Opening folder picker"],
+    [/選擇資料夾失敗/g, "Folder selection failed"],
+    [/正在開啟專案/g, "Opening project"],
+    [/開啟失敗/g, "Open failed"],
+    [/正在重新下載模型/g, "Redownloading model"],
+    [/模型已重新下載/g, "Model redownloaded"],
+    [/模型重新下載失敗/g, "Model redownload failed"],
+    [/正在分析/g, "Analyzing"],
+    [/分析完成/g, "Analysis complete"],
+    [/分析失敗/g, "Analysis failed"],
+    [/更新上下文/g, "Updating context"],
+    [/更新失敗/g, "Context update failed"],
+    [/正在思考/g, "Thinking"],
+    [/對話失敗/g, "Chat failed"],
+    [/讀取中\.\.\./g, "Loading..."],
+    [/驗證專案路徑/g, "Validating project path"],
+    [/正在檢查專案路徑/g, "Checking project path"],
+    [/準備 Git 工作區/g, "Preparing Git workspace"],
+    [/正在初始化或檢查 git repository/g, "Initializing or checking git repository"],
+    [/Git 工作區完成/g, "Git workspace ready"],
+    [/已完成 git 初始化與基線快照/g, "Git initialization and baseline snapshot completed"],
+    [/啟動本地模型/g, "Starting local model"],
+    [/正在驗證模型並啟動 llama-server/g, "Validating model and starting llama-server"],
+    [/索引專案/g, "Indexing project"],
+    [/正在掃描檔案、入口與測試位置/g, "Scanning files, entry points, and test locations"],
+    [/完成/g, "Done"],
+    [/專案已開啟/g, "Project opened"],
+    [/失敗/g, "Failed"],
+    [/重新下載模型/g, "Redownload model"],
+    [/驗證模型/g, "Validating model"],
+    [/正在確認模型設定/g, "Checking model configuration"],
+    [/模型重新下載完成/g, "Model redownload completed"],
+    [/已下載/g, "Downloaded"],
+    [/即將下載/g, "Preparing to download"],
+    [/解析模型來源/g, "Resolving model source"],
+    [/準備下載/g, "Preparing download"],
+    [/開啟專案失敗/g, "Open project failed"],
+  ];
+  return replacements.reduce((result, [pattern, replacement]) => result.replace(pattern, replacement), input);
+}
+
+function localizeError(error) {
+  if (!error) return error;
+  if (state.language === "zh-Hant") return error;
+  const codeMap = {
+    PINNED_CONTEXT_REQUIRED: {
+      message: t("errors.pinnedRequiredMessage"),
+      details: t("errors.pinnedRequiredDetails"),
+    },
+    PROJECT_NOT_READY: {
+      message: t("errors.projectNotReady"),
+      details: "",
+    },
+    PROJECT_PATH_INVALID: {
+      message: t("errors.projectPathInvalid"),
+      details: "",
+    },
+    PICK_FOLDER_FAILED: {
+      message: t("errors.pickFolderFailed"),
+    },
+    OPEN_PROJECT_FAILED: {
+      message: t("errors.openProjectFailed"),
+    },
+    MODEL_DOWNLOAD_FAILED: {
+      message: t("errors.modelDownloadFailed"),
+    },
+    ANALYZE_FAILED: {
+      message: t("errors.analyzeFailed"),
+    },
+    FILE_PREVIEW_FAILED: {
+      message: t("errors.filePreviewFailed"),
+    },
+    PIN_FILES_FAILED: {
+      message: t("errors.pinFilesFailed"),
+    },
+    CHAT_FAILED: {
+      message: t("errors.chatFailed"),
+    },
+    RESET_HISTORY_FAILED: {
+      message: t("errors.resetHistoryFailed"),
+    },
+    MODEL_READY: {
+      message: t("errors.modelReady"),
+      details: t("errors.modelReadyDetails"),
+    },
+  };
+  const localized = codeMap[error.code] || {};
+  return {
+    ...error,
+    message: localized.message || translateRuntimeText(error.message),
+    details: localized.details || translateRuntimeText(error.details),
+  };
+}
+
+function translateSummaryBase(summary) {
+  const input = String(summary || "");
+  if (!input || state.language === "zh-Hant") return input;
+  return input
+    .replace(/^專案路徑:/gm, "Project path:")
+    .replace(/^檔案數量\(已掃描\):/gm, "Scanned files:")
+    .replace(/^估計文字檔總大小:/gm, "Estimated text size:")
+    .replace(/^主要語言:/gm, "Primary languages:")
+    .replace(/^可能入口檔案:/gm, "Possible entry points:")
+    .replace(/^測試相關檔案:/gm, "Test-related files:")
+    .replace(/未明確找到/g, t("summary.notFound"))
+    .replace(/\b無\b/g, t("summary.none"));
+}
 
 function escapeHtml(text) {
   return String(text)
@@ -274,7 +770,9 @@ function normalizeError(error, fallbackCode = "REQUEST_FAILED", fallbackMessage 
 }
 
 function setStatus(text, busy = false) {
-  elements.statusBadge.textContent = text;
+  state.lastStatusText = text;
+  state.lastStatusBusy = busy;
+  elements.statusBadge.textContent = translateRuntimeText(text);
   elements.statusBadge.dataset.busy = busy ? "1" : "0";
 }
 
@@ -295,33 +793,35 @@ function setUiState(nextState) {
   elements.clearChatBtn.disabled = !ready;
 }
 
-function renderProgress(progress = 0, step = "", title = "背景作業執行中") {
+function renderProgress(progress = 0, step = "", title = t("progress.defaultTitle")) {
+  state.lastProgress = { progress, step, title };
   if (state.uiState === "opening" || state.currentTaskKind === "redownload-model") {
     elements.progressPanel.classList.remove("hidden");
   } else {
     elements.progressPanel.classList.add("hidden");
   }
-  elements.progressTitle.textContent = title;
+  elements.progressTitle.textContent = translateRuntimeText(title);
   elements.progressPercent.textContent = `${progress}%`;
   elements.progressBar.style.width = `${progress}%`;
-  elements.progressStep.textContent = step || "等待中";
+  elements.progressStep.textContent = translateRuntimeText(step || t("progress.waiting"));
 }
 
 function renderHelpContent(entry) {
   const sections = [`<p>${escapeHtml(entry.description || "")}</p>`];
   if (entry.usage?.length) {
-    sections.push("<h3>使用方式</h3>");
+    sections.push(`<h3>${escapeHtml(t("helpSections.usage"))}</h3>`);
     sections.push(`<ul>${entry.usage.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`);
   }
   if (entry.notes?.length) {
-    sections.push("<h3>補充說明</h3>");
+    sections.push(`<h3>${escapeHtml(t("helpSections.notes"))}</h3>`);
     sections.push(`<ul>${entry.notes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`);
   }
   return sections.join("");
 }
 
 function openHelp(helpKey) {
-  const entry = HELP_CONTENT[helpKey];
+  state.openHelpKey = helpKey;
+  const entry = localizeHelpEntry(helpKey);
   if (!entry) return;
   elements.helpTitle.textContent = entry.title;
   elements.helpBody.innerHTML = renderHelpContent(entry);
@@ -330,6 +830,7 @@ function openHelp(helpKey) {
 }
 
 function closeHelp() {
+  state.openHelpKey = null;
   elements.helpModal.classList.add("hidden");
   elements.helpModal.setAttribute("aria-hidden", "true");
 }
@@ -343,15 +844,16 @@ function buildProgressLabel(task) {
 
 function showError(error) {
   state.lastError = error;
+  const localized = localizeError(error);
   elements.errorPanel.classList.remove("hidden");
-  elements.errorCode.textContent = error.code || "";
-  elements.errorMessage.textContent = error.message || "發生未預期錯誤。";
-  elements.errorDetails.textContent = error.details || "";
+  elements.errorCode.textContent = localized.code || "";
+  elements.errorMessage.textContent = localized.message || t("errors.unexpected");
+  elements.errorDetails.textContent = localized.details || "";
   const meta = [];
-  if (error.logPath) meta.push(`Log: ${error.logPath}`);
-  if (error.modelKey) meta.push(`Model: ${error.modelKey}`);
+  if (localized.logPath) meta.push(`Log: ${localized.logPath}`);
+  if (localized.modelKey) meta.push(`Model: ${localized.modelKey}`);
   elements.errorMeta.textContent = meta.join(" | ");
-  if (error.action === "redownload-model") {
+  if (localized.action === "redownload-model") {
     elements.errorActionBtn.classList.remove("hidden");
   } else {
     elements.errorActionBtn.classList.add("hidden");
@@ -374,10 +876,10 @@ function requirePinnedFiles() {
   }
   showError({
     code: "PINNED_CONTEXT_REQUIRED",
-    message: "請先套用釘選檔案。",
-    details: "請先在檔案樹勾選並套用至少一個檔案，模型才會根據這些檔案分析。",
+    message: t("errors.pinnedRequiredMessage"),
+    details: t("errors.pinnedRequiredDetails"),
   });
-  setStatus("請先套用釘選檔案");
+  setStatus(t("errors.pinnedRequiredMessage"));
   return false;
 }
 
@@ -451,19 +953,19 @@ function buildPendingEditText(plan) {
 
 function updateChatPlaceholder() {
   if (state.pendingEdit) {
-    elements.chatInput.placeholder = "直接描述上一版建議哪裡錯了，例如：piece 不存在，請改用現有變數。";
+    elements.chatInput.placeholder = t("placeholders.chatRefine");
     return;
   }
-  elements.chatInput.placeholder = "輸入你的問題或修改需求，例如：請分析登入流程涉及哪些檔案？";
+  elements.chatInput.placeholder = t("placeholders.chatDefault");
 }
 
 function formatProjectSummary(summary, pinnedFiles = []) {
-  const base = summary || "尚未開啟專案。";
+  const base = translateSummaryBase(summary || t("hints.initialSummary"));
   const pinned = Array.isArray(pinnedFiles) ? pinnedFiles.filter(Boolean) : [];
   const previewList = pinned.slice(0, 6);
   const pinnedBlock = pinned.length
-    ? `\n已套用釘選檔案 (${pinned.length}):\n- ${previewList.join("\n- ")}${pinned.length > previewList.length ? `\n- +${pinned.length - previewList.length} 個` : ""}`
-    : "\n已套用釘選檔案: (無)";
+    ? `\n${t("summary.pinned")} (${pinned.length}):\n- ${previewList.join("\n- ")}${pinned.length > previewList.length ? `\n- ${t("summary.moreCount", pinned.length - previewList.length)}` : ""}`
+    : `\n${t("summary.pinned")}: ${t("summary.noPins")}`;
   return `${base}${pinnedBlock}`;
 }
 
@@ -471,7 +973,7 @@ function appendMessage(role, content) {
   const item = document.createElement("div");
   item.className = `chat-item ${role}`;
   item.innerHTML = `
-    <div class="chat-role">${role === "user" ? "你" : "Assistant"}</div>
+    <div class="chat-role">${role === "user" ? t("roles.user") : t("roles.assistant")}</div>
     <div class="chat-content">${escapeHtml(content)}</div>
   `;
   elements.chatLog.appendChild(item);
@@ -483,11 +985,70 @@ function renderHistory(history) {
   history.forEach((item) => appendMessage(item.role, item.content));
 }
 
+function applyTranslations() {
+  document.documentElement.lang = t("htmlLang");
+  document.title = t("pageTitle");
+  elements.brandTitle.textContent = t("brandTitle");
+  elements.brandSubtitle.textContent = t("brandSubtitle");
+  elements.langZhBtn.textContent = t("languageSwitch.zh");
+  elements.langEnBtn.textContent = t("languageSwitch.en");
+  elements.langZhBtn.classList.toggle("is-active", state.language === "zh-Hant");
+  elements.langEnBtn.classList.toggle("is-active", state.language === "en");
+  elements.projectPathLabel.textContent = t("labels.projectPath");
+  elements.projectPath.placeholder = t("placeholders.projectPath");
+  elements.modelKeyLabel.textContent = t("labels.model");
+  elements.openProjectBtn.textContent = t("buttons.openProject");
+  elements.analyzeBtn.textContent = t("buttons.analyzeProject");
+  elements.firstRunHint.textContent = t("hints.firstRun");
+  elements.errorPanelTitle.textContent = t("headings.errorPanel");
+  elements.errorActionBtn.textContent = t("buttons.redownloadModel");
+  elements.dismissErrorBtn.textContent = t("buttons.dismiss");
+  elements.projectSummaryTitle.textContent = t("headings.projectSummary");
+  elements.refreshStatusBtn.textContent = t("buttons.refresh");
+  elements.fileTreeTitle.textContent = t("headings.fileTree");
+  elements.applyPinsBtn.textContent = t("buttons.applyPins");
+  elements.chatPanelTitle.textContent = t("headings.chatPanel");
+  elements.chatInputLabel.textContent = t("labels.chatInput");
+  elements.sendChatBtn.textContent = t("buttons.send");
+  elements.clearChatBtn.textContent = t("buttons.clearChat");
+  elements.previewPanelTitle.textContent = t("headings.previewPanel");
+  elements.previewNote.textContent = t("hints.previewOnly");
+  elements.helpTitle.textContent = state.openHelpKey ? (localizeHelpEntry(state.openHelpKey)?.title || t("headings.helpModal")) : t("headings.helpModal");
+  elements.closeHelpBtn.textContent = t("buttons.dismiss");
+  updateChatPlaceholder();
+  elements.projectSummary.textContent = formatProjectSummary(state.summaryRaw, [...state.pinnedFiles]);
+  renderTree(state.tree);
+  renderHistory(state.history);
+  if (!state.currentPreviewPath) {
+    elements.previewPath.textContent = t("hints.initialPreviewPath");
+    elements.filePreview.textContent = state.projectPath ? t("hints.projectOpenedReady") : t("hints.initialPreview");
+  }
+  setStatus(state.lastStatusText, state.lastStatusBusy);
+  renderProgress(state.lastProgress.progress, state.lastProgress.step, state.lastProgress.title);
+  if (state.lastError) {
+    showError(state.lastError);
+  }
+  if (state.openHelpKey) {
+    const entry = localizeHelpEntry(state.openHelpKey);
+    if (entry) {
+      elements.helpTitle.textContent = entry.title;
+      elements.helpBody.innerHTML = renderHelpContent(entry);
+    }
+  }
+}
+
+function setLanguage(language) {
+  state.language = language === "en" ? "en" : "zh-Hant";
+  localStorage.setItem("codeworker.language", state.language);
+  applyTranslations();
+}
+
 function renderTree(tree) {
+  state.tree = tree;
   elements.fileTree.innerHTML = "";
   if (!tree.length) {
     elements.fileTree.classList.add("empty");
-    elements.fileTree.textContent = "尚未載入檔案。";
+    elements.fileTree.textContent = t("hints.initialTree");
     return;
   }
   elements.fileTree.classList.remove("empty");
@@ -516,9 +1077,10 @@ async function refreshStatus() {
   state.currentPreviewPath = data.currentPreviewPath || null;
   state.pendingEdit = data.pendingEdit || null;
   state.history = data.history || [];
+  state.summaryRaw = data.summary || "";
   elements.projectPath.value = state.projectPath;
   elements.modelKey.value = state.modelKey;
-  elements.previewPath.textContent = state.currentPreviewPath || "未選擇檔案";
+  elements.previewPath.textContent = state.currentPreviewPath || t("hints.initialPreviewPath");
   elements.projectSummary.textContent = formatProjectSummary(data.summary, data.pinnedFiles || []);
   renderTree(data.tree || []);
   renderHistory(state.history);
@@ -526,26 +1088,27 @@ async function refreshStatus() {
   if (state.uiState !== "opening" && state.currentTaskKind !== "redownload-model") {
     setUiState(data.uiState || (data.projectPath ? "ready" : "idle"));
     if (data.projectPath) {
-      setStatus("專案已就緒");
-      elements.filePreview.textContent = elements.filePreview.textContent || "專案已開啟。";
+      setStatus(t("statuses.ready"));
+      elements.filePreview.textContent = elements.filePreview.textContent || t("hints.projectOpened");
     } else {
-      setStatus("待命");
+      setStatus(t("statuses.idle"));
     }
   }
 }
 
-function resetProjectViews(message = "尚未開啟專案。") {
+function resetProjectViews(message = t("hints.initialSummary")) {
+  state.summaryRaw = message;
   elements.projectSummary.textContent = message;
   state.currentPreviewPath = null;
-  elements.previewPath.textContent = "未選擇檔案";
-  elements.filePreview.textContent = "點左側檔案即可預覽內容。檔案預覽僅供閱讀，不會自動加入模型上下文。";
+  elements.previewPath.textContent = t("hints.initialPreviewPath");
+  elements.filePreview.textContent = t("hints.initialPreview");
   renderPendingEdit(null);
   renderTree([]);
 }
 
 async function pickFolder() {
   clearError();
-  setStatus("開啟資料夾選取視窗", true);
+  setStatus(t("statuses.openingFolder"), true);
   try {
     const data = await requestJson("/api/pick-folder", {
       method: "POST",
@@ -554,10 +1117,10 @@ async function pickFolder() {
     if (!data.canceled && data.path) {
       elements.projectPath.value = data.path;
     }
-    setStatus(state.uiState === "ready" ? "專案已就緒" : "待命");
+    setStatus(state.uiState === "ready" ? t("statuses.ready") : t("statuses.idle"));
   } catch (error) {
-    setStatus("選擇資料夾失敗");
-    showError(normalizeError(error, "PICK_FOLDER_FAILED", "選擇資料夾失敗。"));
+    setStatus(t("statuses.pickFolderFailed"));
+    showError(normalizeError(error, "PICK_FOLDER_FAILED", t("errors.pickFolderFailed")));
   }
 }
 
@@ -611,16 +1174,16 @@ async function openProject() {
   const projectPath = elements.projectPath.value.trim();
   const modelKey = elements.modelKey.value;
   if (!projectPath) {
-    showError({ code: "PROJECT_PATH_INVALID", message: "請先選擇專案資料夾。", details: "" });
+    showError({ code: "PROJECT_PATH_INVALID", message: t("errors.projectPathInvalid"), details: "" });
     return;
   }
 
   clearError();
-  resetProjectViews("正在開啟專案，請稍候...");
+  resetProjectViews(t("statuses.opening"));
   elements.chatLog.innerHTML = "";
   setUiState("opening");
-  setStatus("正在開啟專案", true);
-  renderProgress(0, "建立背景任務", "正在開啟專案");
+  setStatus(t("statuses.opening"), true);
+  renderProgress(0, "建立背景任務", t("progress.openTitle"));
 
   try {
     const data = await requestJson("/api/tasks/open-project", {
@@ -632,8 +1195,8 @@ async function openProject() {
     await pollTask(data.taskId, "open-project");
   } catch (error) {
     setUiState("error");
-    setStatus("開啟失敗");
-    showError(normalizeError(error, "OPEN_PROJECT_FAILED", "開啟專案失敗。"));
+    setStatus(t("statuses.openFailed"));
+    showError(normalizeError(error, "OPEN_PROJECT_FAILED", t("errors.openProjectFailed")));
   }
 }
 
@@ -641,8 +1204,8 @@ async function redownloadModel() {
   const modelKey = state.lastError?.modelKey || elements.modelKey.value || "qwen";
   clearError();
   setUiState("error");
-  setStatus("正在重新下載模型", true);
-  renderProgress(0, "建立背景任務", "正在重新下載模型");
+  setStatus(t("statuses.redownloading"), true);
+  renderProgress(0, "建立背景任務", t("progress.redownloadTitle"));
   try {
     const data = await requestJson("/api/models/redownload", {
       method: "POST",
@@ -650,42 +1213,42 @@ async function redownloadModel() {
     });
     await pollTask(data.taskId, "redownload-model");
   } catch (error) {
-    setStatus("模型重新下載失敗");
-    showError(normalizeError(error, "MODEL_DOWNLOAD_FAILED", "模型重新下載失敗。"));
+    setStatus(t("statuses.modelRedownloadFailed"));
+    showError(normalizeError(error, "MODEL_DOWNLOAD_FAILED", t("errors.modelDownloadFailed")));
   }
 }
 
 async function analyzeProject() {
   if (state.uiState !== "ready") {
-    showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
     return;
   }
   if (!requirePinnedFiles()) {
     return;
   }
   clearError();
-  setStatus("正在分析", true);
+  setStatus(t("statuses.analyzing"), true);
   try {
     const data = await requestJson("/api/analyze", {
       method: "POST",
       body: JSON.stringify({}),
     });
     appendMessage("assistant", data.reply);
-    setStatus("分析完成");
+    setStatus(t("statuses.analyzeDone"));
   } catch (error) {
-    setStatus("分析失敗");
-    showError(normalizeError(error, "ANALYZE_FAILED", "分析失敗。"));
+    setStatus(t("statuses.analyzeFailed"));
+    showError(normalizeError(error, "ANALYZE_FAILED", t("errors.analyzeFailed")));
   }
 }
 
 async function generateEditPlan() {
   const message = elements.chatInput.value.trim();
   if (!message) {
-    showError({ code: "EDIT_PLAN_FAILED", message: "請先輸入修改需求。", details: "" });
+    showError({ code: "EDIT_PLAN_FAILED", message: state.language === "en" ? "Please enter a change request first." : "請先輸入修改需求。", details: "" });
     return;
   }
   if (state.uiState !== "ready") {
-    showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
     return;
   }
   if (!requirePinnedFiles()) {
@@ -694,20 +1257,20 @@ async function generateEditPlan() {
   clearError();
   appendMessage("user", message);
   elements.chatInput.value = "";
-  setStatus("正在產生修改建議", true);
+  setStatus(state.language === "en" ? "Generating edit suggestion" : "正在產生修改建議", true);
   try {
     const data = await requestJson("/api/edit/plan", {
       method: "POST",
       body: JSON.stringify({ message }),
     });
     renderPendingEdit(data.plan);
-    const modeLabel = data.plan.mode === "advisory" ? "文字模式" : "精準模式";
-    appendMessage("assistant", `已產生修改建議（${modeLabel}）\n\n${buildPendingEditText(data.plan)}`);
-    setStatus("修改建議已產生");
+    const modeLabel = data.plan.mode === "advisory" ? (state.language === "en" ? "advisory" : "文字模式") : (state.language === "en" ? "precise" : "精準模式");
+    appendMessage("assistant", `${state.language === "en" ? "Edit suggestion generated" : "已產生修改建議"} (${modeLabel})\n\n${buildPendingEditText(data.plan)}`);
+    setStatus(state.language === "en" ? "Edit suggestion ready" : "修改建議已產生");
     setUiState("ready");
   } catch (error) {
-    setStatus("產生建議失敗");
-    showError(normalizeError(error, "EDIT_PLAN_FAILED", "產生修改建議失敗。"));
+    setStatus(state.language === "en" ? "Edit suggestion failed" : "產生建議失敗");
+    showError(normalizeError(error, "EDIT_PLAN_FAILED", state.language === "en" ? "Failed to generate edit suggestion." : "產生修改建議失敗。"));
   }
 }
 
@@ -719,20 +1282,20 @@ async function discardEditPlan() {
       body: JSON.stringify({}),
     });
     renderPendingEdit(null);
-    setStatus("已清除修改建議");
+    setStatus(state.language === "en" ? "Cleared edit suggestion" : "已清除修改建議");
     setUiState("ready");
   } catch (error) {
-    showError(normalizeError(error, "DISCARD_EDIT_FAILED", "清除修改建議失敗。"));
+    showError(normalizeError(error, "DISCARD_EDIT_FAILED", state.language === "en" ? "Failed to clear edit suggestion." : "清除修改建議失敗。"));
   }
 }
 
 async function loadFilePreview(path) {
   if (state.uiState !== "ready") {
-    showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
     return;
   }
   elements.previewPath.textContent = path;
-  elements.filePreview.textContent = "讀取中...";
+  elements.filePreview.textContent = state.language === "en" ? "Loading..." : "讀取中...";
   try {
     const data = await requestJson(`/api/file?path=${encodeURIComponent(path)}`);
     state.currentPreviewPath = data.path || path;
@@ -740,17 +1303,17 @@ async function loadFilePreview(path) {
     elements.filePreview.textContent = data.content;
   } catch (error) {
     elements.filePreview.textContent = "";
-    showError(normalizeError(error, "FILE_PREVIEW_FAILED", "檔案預覽失敗。"));
+    showError(normalizeError(error, "FILE_PREVIEW_FAILED", t("errors.filePreviewFailed")));
   }
 }
 
 async function applyPins() {
   if (state.uiState !== "ready") {
-    showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
     return;
   }
   clearError();
-  setStatus("更新上下文", true);
+  setStatus(t("statuses.updateContext"), true);
   try {
     const data = await requestJson("/api/pin-files", {
       method: "POST",
@@ -758,10 +1321,10 @@ async function applyPins() {
     });
     state.pinnedFiles = new Set(data.pinnedFiles || []);
     await refreshStatus();
-    setStatus(`已套用 ${state.pinnedFiles.size} 個釘選檔案`);
+    setStatus(t("statuses.appliedPins", state.pinnedFiles.size));
   } catch (error) {
-    setStatus("更新失敗");
-    showError(normalizeError(error, "PIN_FILES_FAILED", "更新上下文失敗。"));
+    setStatus(t("statuses.updateFailed"));
+    showError(normalizeError(error, "PIN_FILES_FAILED", t("errors.pinFilesFailed")));
   }
 }
 
@@ -770,7 +1333,7 @@ async function sendChat(event) {
   const message = elements.chatInput.value.trim();
   if (!message) return;
   if (state.uiState !== "ready") {
-    showError({ code: "PROJECT_NOT_READY", message: "請先完成開啟專案。", details: "" });
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
     return;
   }
   if (!requirePinnedFiles()) {
@@ -779,7 +1342,7 @@ async function sendChat(event) {
   clearError();
   appendMessage("user", message);
   elements.chatInput.value = "";
-  setStatus("正在思考", true);
+  setStatus(t("statuses.thinking"), true);
   try {
     const data = await requestJson("/api/chat", {
       method: "POST",
@@ -789,12 +1352,12 @@ async function sendChat(event) {
       renderPendingEdit(data.plan);
     }
     appendMessage("assistant", data.reply);
-    setStatus("完成");
+    setStatus(t("statuses.done"));
   } catch (error) {
-    setStatus("對話失敗");
-    const normalized = normalizeError(error, "CHAT_FAILED", "對話失敗。");
+    setStatus(t("statuses.chatFailed"));
+    const normalized = normalizeError(error, "CHAT_FAILED", t("errors.chatFailed"));
     showError(normalized);
-    appendMessage("assistant", `發生錯誤：${normalized.message}`);
+    appendMessage("assistant", `${state.language === "en" ? "Error:" : "發生錯誤："} ${localizeError(normalized).message}`);
   }
 }
 
@@ -806,15 +1369,17 @@ function clearChat() {
     .then(() => {
       elements.chatLog.innerHTML = "";
       renderPendingEdit(null);
-      setStatus(state.uiState === "ready" ? "專案已就緒" : "對話已清空");
+      setStatus(state.uiState === "ready" ? t("statuses.ready") : t("statuses.historyCleared"));
     })
-    .catch((error) => showError(normalizeError(error, "RESET_HISTORY_FAILED", "清空對話失敗。")));
+    .catch((error) => showError(normalizeError(error, "RESET_HISTORY_FAILED", t("errors.resetHistoryFailed"))));
 }
 
 document.querySelectorAll(".help-trigger").forEach((button) => {
   button.addEventListener("click", () => openHelp(button.dataset.help));
 });
 
+elements.langZhBtn.addEventListener("click", () => setLanguage("zh-Hant"));
+elements.langEnBtn.addEventListener("click", () => setLanguage("en"));
 elements.projectPath.addEventListener("click", (event) => {
   if (elements.projectPath.disabled) return;
   event.preventDefault();
@@ -846,9 +1411,10 @@ document.addEventListener("keydown", (event) => {
 });
 
 setUiState("idle");
+applyTranslations();
 refreshStatus()
   .then(() => setUiState(state.projectPath ? "ready" : "idle"))
   .catch(() => {
     setUiState("idle");
-    setStatus("待命");
+    setStatus(t("statuses.idle"));
   });

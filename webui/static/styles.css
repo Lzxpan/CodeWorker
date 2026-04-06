@@ -72,8 +72,21 @@ body {
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 14px;
   padding: 14px 16px;
+}
+
+.brand-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+
+.brand-copy {
+  min-width: 0;
 }
 
 .brand h1, .panel h2 { margin: 0; }
@@ -90,6 +103,28 @@ body {
   color: #fff;
   font-weight: 700;
   letter-spacing: 0.08em;
+}
+
+.lang-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.lang-btn {
+  min-width: 54px;
+  padding: 8px 12px;
+  font-size: 0.84rem;
+  border: 1px solid rgba(13, 92, 99, 0.12);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--muted);
+}
+
+.lang-btn.is-active {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  color: #fff;
+  border-color: transparent;
 }
 
 .panel { padding: 14px; }
@@ -499,6 +534,16 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
   .compact-field {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+  .brand {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .brand-main {
+    width: 100%;
+  }
+  .lang-switch {
+    align-self: flex-end;
   }
   .edit-plan-status {
     gap: 8px;

@@ -10,17 +10,23 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">CW</div>
-        <div>
-          <h1>CodeWorker V0.95b</h1>
-          <p>本地離線專案分析與對話</p>
+        <div class="brand-main">
+          <div class="brand-mark">CW</div>
+          <div class="brand-copy">
+            <h1 id="brandTitle">CodeWorker V0.95b</h1>
+            <p id="brandSubtitle">本地離線專案分析與對話</p>
+          </div>
+        </div>
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button id="langZhBtn" type="button" class="lang-btn is-active">繁中</button>
+          <button id="langEnBtn" type="button" class="lang-btn">EN</button>
         </div>
       </div>
 
       <section class="panel control-panel">
         <div class="compact-field">
           <div class="inline-label">
-            <label for="projectPath">專案路徑</label>
+            <label id="projectPathLabel" for="projectPath">專案路徑</label>
             <button type="button" class="help-trigger" data-help="project-path" aria-label="專案路徑說明">?</button>
           </div>
           <input id="projectPath" class="picker-input" type="text" readonly placeholder="點擊這裡選擇專案資料夾">
@@ -28,7 +34,7 @@
 
         <div class="compact-field compact-field-tight">
           <div class="inline-label">
-            <label for="modelKey">模型</label>
+            <label id="modelKeyLabel" for="modelKey">模型</label>
             <button type="button" class="help-trigger" data-help="model-key" aria-label="模型說明">?</button>
           </div>
           <select id="modelKey">
@@ -63,13 +69,13 @@
           </div>
         </div>
 
-        <p class="hint">第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。</p>
+        <p id="firstRunHint" class="hint">第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。</p>
       </section>
 
       <section id="errorPanel" class="panel error-panel hidden">
         <div class="panel-title-row compact">
           <div class="title-with-help">
-            <h2>錯誤訊息</h2>
+            <h2 id="errorPanelTitle">錯誤訊息</h2>
             <button type="button" class="help-trigger" data-help="error-panel" aria-label="錯誤訊息說明">?</button>
           </div>
           <span id="errorCode" class="badge"></span>
@@ -92,7 +98,7 @@
       <section class="panel summary-panel">
         <div class="panel-title-row">
           <div class="title-with-help">
-            <h2>專案摘要</h2>
+            <h2 id="projectSummaryTitle">專案摘要</h2>
             <button type="button" class="help-trigger" data-help="project-summary" aria-label="專案摘要說明">?</button>
           </div>
           <div class="action-item">
@@ -106,7 +112,7 @@
       <section class="panel grow">
         <div class="panel-title-row">
           <div class="title-with-help">
-            <h2>檔案樹</h2>
+            <h2 id="fileTreeTitle">檔案樹</h2>
             <button type="button" class="help-trigger" data-help="file-tree" aria-label="檔案樹說明">?</button>
           </div>
           <div class="action-item">
@@ -123,7 +129,7 @@
       <section class="panel chat-panel">
         <div class="panel-title-row">
           <div class="title-with-help">
-            <h2>對話</h2>
+            <h2 id="chatPanelTitle">對話</h2>
             <button type="button" class="help-trigger" data-help="chat-panel" aria-label="對話說明">?</button>
           </div>
           <div id="statusBadge" class="status">待命</div>
@@ -131,7 +137,7 @@
         <div id="chatLog" class="chat-log"></div>
         <form id="chatForm" class="chat-form">
           <div class="field-label-row">
-            <label for="chatInput" class="meta">對話輸入</label>
+            <label id="chatInputLabel" for="chatInput" class="meta">對話輸入</label>
             <button type="button" class="help-trigger" data-help="chat-input" aria-label="對話輸入說明">?</button>
           </div>
           <textarea id="chatInput" rows="4" placeholder="輸入你的問題，例如：請分析登入流程涉及哪些檔案？"></textarea>
@@ -151,12 +157,12 @@
       <section class="panel preview-panel">
         <div class="panel-title-row">
           <div class="title-with-help">
-            <h2>檔案預覽</h2>
+            <h2 id="previewPanelTitle">檔案預覽</h2>
             <button type="button" class="help-trigger" data-help="file-preview" aria-label="檔案預覽說明">?</button>
           </div>
           <div>
             <div id="previewPath" class="meta">未選擇檔案</div>
-            <div class="meta">僅供預覽，不會自動加入模型上下文</div>
+            <div id="previewNote" class="meta">僅供預覽，不會自動加入模型上下文</div>
           </div>
         </div>
         <pre id="filePreview" class="code-preview">點左側檔案即可預覽內容。檔案預覽僅供閱讀，不會自動加入模型上下文。</pre>
