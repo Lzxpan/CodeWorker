@@ -53,11 +53,11 @@ Current model positioning:
 
 ### Overview
 
-![CodeWorker Web UI overview](docs/screenshots/webui-overview-v096b.png)
+![CodeWorker Web UI overview](docs/screenshots/webui-overview-en-v096b.png)
 
 ### Pinned Workspace Example
 
-![CodeWorker pinned workspace](docs/screenshots/webui-pinned-workspace-v096b.png)
+![CodeWorker pinned workspace](docs/screenshots/webui-pinned-workspace-en-v096b.png)
 
 ---
 
