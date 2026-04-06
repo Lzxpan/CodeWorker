@@ -1,0 +1,193 @@
+[
+  {
+    "startup_ok": true,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174257.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\qwen2.5-coder-7b-instruct-q4\\qwen2.5-coder-7b-instruct-q4_k_m.gguf\"\n[OK] Server is ready on http://127.0.0.1:18080/v1\n[INFO] Model alias: qwen-local\n[INFO] Log file: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174257.log\"\n[INFO] Error log: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174257.err.log\"\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18080,
+    "context": 4096,
+    "tests": {
+      "entry": {
+        "ok": true,
+        "reply": "Program.cs - 這是C#應用程序的入口點。",
+        "finish_reason": "stop",
+        "length": 26
+      },
+      "analysis": {
+        "ok": true,
+        "reply": "這是一個俄羅斯方塊遊戲的程式。玩家需要操作方塊在遊戲板上移動和旋轉，以填滿水平行，從而消除行並得分。遊戲會隨著玩家的進展而增加難度。\n\n1. 遊戲板由多個方塊組成，玩家可以控制方塊在垂直方向上移動。\n2. 方塊可以旋轉以适应遊戲板的空位。\n3. 消除水平行會增加玩家的得分。\n4. 隨著玩家的進展，遊戲速度會加快，增加遊戲的挑戰性。",
+        "finish_reason": "stop",
+        "length": 166
+      },
+      "structured": {
+        "ok": true,
+        "reply": "```json\n{\n  \"summary\": \"在 Form1.cs 中添加按 M 鍵切換背景音樂靜音的功能。\",\n  \"path\": \"Form1.cs\",\n  \"target\": \"Form1_KeyDown 方法\",\n  \"reason\": \"需要在按下 M 鍵時切換背景音樂的靜音狀態。\",\n  \"before\": \"private void Form1_KeyDown(object sender, KeyEventArgs e)\",\n  \"after\": \"private void Form1_KeyDown(object sender, KeyEventArgs e)\\n{\\n    if (e.KeyCode == Keys.M)\\n    {\\n        audioManager.ToggleBackgroundMusicMute();\\n    }\\n\\n    // 其他 KeyDown 事件處理\\n}\",\n  \"notes\": \"在 AudioManager.cs 中添加 ToggleBackgroundMusicMute 方法。\"\n}\n```",
+        "finish_reason": "stop",
+        "length": 492
+      }
+    },
+    "model": "qwen"
+  },
+  {
+    "startup_ok": true,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174518.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\qwen2.5-coder-7b-instruct-q4\\qwen2.5-coder-7b-instruct-q4_k_m.gguf\"\n[OK] Server is ready on http://127.0.0.1:18081/v1\n[INFO] Model alias: qwen-local\n[INFO] Log file: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174518.log\"\n[INFO] Error log: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174518.err.log\"\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18081,
+    "context": 8192,
+    "tests": {
+      "entry": {
+        "ok": true,
+        "reply": "Program.cs - 這是C#應用程序的入口點，包含Main方法。",
+        "finish_reason": "stop",
+        "length": 35
+      },
+      "analysis": {
+        "ok": true,
+        "reply": "這是一個俄羅斯方塊遊戲的程式，玩家可以通过控制方塊的移動和旋轉來消除水平的方塊行，从而得分和提高遊戲級別。遊戲的操作方式包括使用方向鍵來移動方塊，使用旋轉鍵來旋轉方塊，以及使用空格鍵來快速降落方塊。\n\n1. **遊戲目標**：消除水平的方塊行，得分越高，遊戲級別越高。\n2. **操作方式**：使用方向鍵控制方塊左右移動，使用旋轉鍵控制方塊旋轉，使用空格鍵快速降落方塊。\n3. **遊戲狀態**：遊戲開始時，玩家需要控制方塊避免堆積到頂部，消除水平行以得分。\n4. **音效**：遊戲中有落地音效和消除行音效，增加遊戲的趣味性。",
+        "finish_reason": "stop",
+        "length": 264
+      },
+      "structured": {
+        "ok": true,
+        "reply": "```json\n{\n  \"summary\": \"在 Form1.cs 中添加按 M 鍵切換背景音樂靜音的功能。\",\n  \"path\": \"Form1.cs\",\n  \"target\": \"Form1_KeyDown\",\n  \"reason\": \"需要在按下 M 鍵時切換背景音樂的靜音狀態。\",\n  \"before\": \"private void Form1_KeyDown(object sender, KeyEventArgs e)\",\n  \"after\": \"private void Form1_KeyDown(object sender, KeyEventArgs e)\\n{\\n    if (e.KeyCode == Keys.M)\\n    {\\n        audioManager.ToggleBackgroundMusicMute();\\n    }\\n\\n    // 其他 KeyDown 事件處理\\n}\",\n  \"notes\": \"在 AudioManager.cs 中添加 ToggleBackgroundMusicMute 方法。\"\n}\n```",
+        "finish_reason": "stop",
+        "length": 489
+      }
+    },
+    "model": "qwen"
+  },
+  {
+    "startup_ok": true,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174753.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\qwen2.5-coder-7b-instruct-q4\\qwen2.5-coder-7b-instruct-q4_k_m.gguf\"\n[OK] Server is ready on http://127.0.0.1:18082/v1\n[INFO] Model alias: qwen-local\n[INFO] Log file: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174753.log\"\n[INFO] Error log: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-174753.err.log\"\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18082,
+    "context": 12288,
+    "tests": {
+      "entry": {
+        "ok": true,
+        "reply": "Program.cs - 這是C#應用程序的入口點。",
+        "finish_reason": "stop",
+        "length": 26
+      },
+      "analysis": {
+        "ok": true,
+        "reply": "結論：這個程式是一個俄羅斯方塊遊戲，玩家可以通过控制方塊的移動和旋轉來消除水平的方塊行，从而得分和升級。\n\n操作方式：\n1. 使用方向鍵（上、下、左、右）來移動方塊。\n2. 使用 Z 鍵旋轉方塊逆時針方向。\n3. 使用 X 鍵旋轉方塊時針方向。\n4. 使用空格鍵快速下降方塊。",
+        "finish_reason": "stop",
+        "length": 138
+      },
+      "structured": {
+        "ok": true,
+        "reply": "```json\n{\n  \"summary\": \"在 Form1.cs 中添加按 M 鍵切換背景音樂靜音的功能。\",\n  \"path\": \"Form1.cs\",\n  \"target\": \"Form1_KeyDown 方法\",\n  \"reason\": \"需要在按下 M 鍵時切換背景音樂的靜音狀態。\",\n  \"before\": \"private void Form1_KeyDown(object sender, KeyEventArgs e) { ... }\",\n  \"after\": \"private void Form1_KeyDown(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.M) { audioManager.ToggleBackgroundMusicMute(); } ... }\",\n  \"notes\": \"在 AudioManager.cs 中添加 ToggleBackgroundMusicMute 方法。\"\n}\n```",
+        "finish_reason": "stop",
+        "length": 452
+      }
+    },
+    "model": "qwen"
+  },
+  {
+    "startup_ok": true,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-175021.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\qwen2.5-coder-7b-instruct-q4\\qwen2.5-coder-7b-instruct-q4_k_m.gguf\"\n[OK] Server is ready on http://127.0.0.1:18083/v1\n[INFO] Model alias: qwen-local\n[INFO] Log file: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-175021.log\"\n[INFO] Error log: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-qwen-20260406-175021.err.log\"\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18083,
+    "context": 16384,
+    "tests": {
+      "entry": {
+        "ok": true,
+        "reply": "Program.cs - 這是C#應用程序的入口點。",
+        "finish_reason": "stop",
+        "length": 26
+      },
+      "analysis": {
+        "ok": true,
+        "reply": "這是一個俄羅斯方塊遊戲的程式，玩家可以通过控制方塊的移動和旋轉來消除水平的方塊行，从而得分和進級。遊戲的控制方式包括使用方向鍵來移動方塊，使用旋轉鍵來旋轉方塊，以及使用空格鍵來快速降落方塊。\n\n1. **遊戲界面**：遊戲的主界面是一個方塊板，玩家可以在上面放置和移動方塊。\n2. **方塊控制**：玩家可以通过方向鍵（上、下、左、右）來控制方塊的移動，通过旋轉鍵（通常是 Z 和 C）來旋轉方塊，空格鍵可以快速降落方塊。\n3. **得分和進級**：每消除一行方塊，玩家可以得分，並且每消除一定行數，遊戲的難度會增加，方塊降落的速度會加快。\n4. **遊戲結束**：如果玩家的方塊堆積到頂部，遊戲將結束。",
+        "finish_reason": "stop",
+        "length": 302
+      },
+      "structured": {
+        "ok": true,
+        "reply": "```json\n{\n  \"summary\": \"在 Form1.cs 中添加按 M 鍵切換背景音樂靜音的功能。\",\n  \"path\": \"Form1.cs\",\n  \"target\": \"Form1_KeyDown 方法\",\n  \"reason\": \"需要在按下 M 鍵時切換背景音樂的靜音狀態。\",\n  \"before\": \"private void Form1_KeyDown(object sender, KeyEventArgs e) { ... }\",\n  \"after\": \"private void Form1_KeyDown(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.M) { audioManager.ToggleBackgroundMusicMute(); } ... }\",\n  \"notes\": \"在 AudioManager.cs 中添加 ToggleBackgroundMusicMute 方法。\"\n}\n```",
+        "finish_reason": "stop",
+        "length": 452
+      }
+    },
+    "model": "qwen"
+  },
+  {
+    "startup_ok": true,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-175301.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\gemma4-e4b-it-q4\\gemma-4-e4b-it-Q4_K_M.gguf\"\n[OK] Server is ready on http://127.0.0.1:18180/v1\n[INFO] Model alias: gemma4-local\n[INFO] Log file: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-175301.log\"\n[INFO] Error log: \"C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-175301.err.log\"\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18180,
+    "context": 4096,
+    "tests": {
+      "entry": {
+        "ok": true,
+        "reply": "",
+        "finish_reason": "length",
+        "length": 0
+      },
+      "analysis": {
+        "ok": true,
+        "reply": "本程式是一個使用 Windows Forms 框架所建構的「俄羅斯方塊」（Tetris）遊戲。它具備完整的遊戲循環、積木生成與移動機制，並整合了音效管理系統，提供完整的遊戲體驗。\n\n1.  **遊戲核心循環與物理模擬：** 遊戲透過 `gameTimer` 定時器驅動主遊戲循環。每當計時器觸發，程式會模擬積木的重力下落（`MovePiece(0, 1)`），若無法繼續下移，則會將當前積木鎖定到遊戲畫板上，進而觸發行清除與分數計算。\n2.  **積木生成與碰撞檢測：** 遊戲定義了多種標準的七塊積木（如 L、O、S、T、Z），並使用 `CreateRandomPiece` 方法隨機生成新的積木。在每次生成新積木時，系統會立即檢查其是否能放置在畫板的有效區域，若無法放置則判定遊戲結束。\n3.  **遊戲狀態與進度管理：** 程式維護了遊戲的關鍵狀態，包括分數 (`score`)、已清除的行數 (`linesCleared`)、當前等級 (`level`)，以及遊戲是否結束 (`isGameOver`)。當玩家清除完整行時，會觸發相關的計分和狀態更新邏輯。\n4.  **音效與背景音樂管理：** 專門的 `AudioManager` 類別負責所有音訊輸出。它使用 `NAudio` 庫來管理背景音樂的播放、積木落地時的音效（`PlayLandingImpact`）以及清除行時的音效（`PlayLineClear`），確保遊戲事件與聲音效果的同步。",
+        "finish_reason": "stop",
+        "length": 628
+      },
+      "structured": {
+        "ok": true,
+        "reply": "",
+        "finish_reason": "length",
+        "length": 0
+      }
+    },
+    "model": "gemma4"
+  },
+  {
+    "startup_ok": false,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-175818.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\gemma4-e4b-it-q4\\gemma-4-e4b-it-Q4_K_M.gguf\"\n[ERROR_CODE] MODEL_START_FAILED\n[ERROR_MESSAGE] Server failed to become ready.\n[ERROR_DETAILS] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-175818.log\n[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-175818.log\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18181,
+    "context": 8192,
+    "tests": {},
+    "model": "gemma4"
+  },
+  {
+    "startup_ok": false,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-180047.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\gemma4-e4b-it-q4\\gemma-4-e4b-it-Q4_K_M.gguf\"\n[ERROR_CODE] MODEL_START_FAILED\n[ERROR_MESSAGE] Server failed to become ready.\n[ERROR_DETAILS] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-180047.log\n[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-180047.log\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18182,
+    "context": 12288,
+    "tests": {},
+    "model": "gemma4"
+  },
+  {
+    "startup_ok": false,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-180312.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\gemma4-e4b-it-q4\\gemma-4-e4b-it-Q4_K_M.gguf\"\n[ERROR_CODE] MODEL_START_FAILED\n[ERROR_MESSAGE] Server failed to become ready.\n[ERROR_DETAILS] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-180312.log\n[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-gemma4-20260406-180312.log\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18183,
+    "context": 16384,
+    "tests": {},
+    "model": "gemma4"
+  },
+  {
+    "startup_ok": false,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-180541.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\codellama-7b-instruct-q4\\codellama-7b-instruct.Q4_K_M.gguf\"\n[ERROR_CODE] MODEL_START_FAILED\n[ERROR_MESSAGE] Server failed to become ready.\n[ERROR_DETAILS] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-180541.log\n[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-180541.log\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18280,
+    "context": 4096,
+    "tests": {},
+    "model": "codellama"
+  },
+  {
+    "startup_ok": false,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-180814.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\codellama-7b-instruct-q4\\codellama-7b-instruct.Q4_K_M.gguf\"\n[ERROR_CODE] MODEL_START_FAILED\n[ERROR_MESSAGE] Server failed to become ready.\n[ERROR_DETAILS] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-180814.log\n[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-180814.log\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18281,
+    "context": 8192,
+    "tests": {},
+    "model": "codellama"
+  },
+  {
+    "startup_ok": false,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-181043.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\codellama-7b-instruct-q4\\codellama-7b-instruct.Q4_K_M.gguf\"\n[ERROR_CODE] MODEL_START_FAILED\n[ERROR_MESSAGE] Server failed to become ready.\n[ERROR_DETAILS] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-181043.log\n[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-181043.log\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18282,
+    "context": 12288,
+    "tests": {},
+    "model": "codellama"
+  },
+  {
+    "startup_ok": false,
+    "startup_output": "[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-181315.log\n[WARN] Unable to determine total physical memory; skipping RAM check.\n[INFO] Validating llama-server runtime...\n[INFO] Starting llama-server with \"C:\\Users\\Admin\\Desktop\\CodeWorker\\models\\codellama-7b-instruct-q4\\codellama-7b-instruct.Q4_K_M.gguf\"\n[ERROR_CODE] MODEL_START_FAILED\n[ERROR_MESSAGE] Server failed to become ready.\n[ERROR_DETAILS] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-181315.log\n[LOG_FILE] C:\\Users\\Admin\\Desktop\\CodeWorker\\logs\\llama-server-codellama-20260406-181315.log\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.\nERROR: Input redirection is not supported, exiting the process immediately.",
+    "port": 18283,
+    "context": 16384,
+    "tests": {},
+    "model": "codellama"
+  }
+]

@@ -187,9 +187,15 @@ scripts\code-chat.cmd C:\path\to\project gemma4
 
 ## 9. Version History
 
+### V0.96b
+
+- updated the Web UI and README version strings to `V0.96b`
+- aligned main chat and `Analyze project` with a response flow closer to the models' original output
+- synchronized the landing page and bilingual docs with the current model positioning and response behavior
+
 ### V0.95b
 
-- promoted the current repo state to a formal `V0.95b` baseline
+- promoted the repo state at that time to a formal `V0.95b` baseline
 - added the README landing page plus split `README.zh-TW.md` and `README.en.md`
 - added a full `繁中 / EN` language switch to the Web UI
 

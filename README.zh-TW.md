@@ -188,9 +188,15 @@ scripts\code-chat.cmd C:\path\to\project gemma4
 
 ## 9. 版本歷程
 
+### V0.96b
+
+- Web UI 與 README 版號同步更新為 `V0.96b`
+- 主對話框與 `分析專案` 收斂為較接近模型原始輸出的回應方式
+- README 首頁與中英文說明同步更新目前模型定位與回應方式
+
 ### V0.95b
 
-- 將目前 repo 內已完成但尚未發布的 `Gemma 4 E4B` 支援與穩定化調整收斂成正式版本
+- 將當時 repo 內已完成的 `Gemma 4 E4B` 支援與穩定化調整收斂成正式版本
 - 同步更新專案版號，作為後續雙語 README 與 UI 語言切換的基線版本
 - 新增 README landing page 與中英文文件拆分
 - Web UI 新增 `繁中 / EN` 完整語言切換
