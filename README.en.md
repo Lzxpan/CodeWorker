@@ -81,8 +81,6 @@ http://127.0.0.1:8764
 
 ![CodeWorker Web UI overview](docs/screenshots/webui-overview-en-v096b.png)
 
-![CodeWorker pinned workspace](docs/screenshots/webui-pinned-workspace-en-v096b.png)
-
 ---
 
 ## 5. Web UI Workflow
