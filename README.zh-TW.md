@@ -78,9 +78,9 @@ http://127.0.0.1:8764
 
 ### Web UI 畫面範例
 
-![CodeWorker Web UI overview](docs/screenshots/webui-overview.png)
+![CodeWorker Web UI overview](docs/screenshots/webui-overview-v096b.png)
 
-![CodeWorker pinned workspace](docs/screenshots/webui-pinned-workspace.png)
+![CodeWorker pinned workspace](docs/screenshots/webui-pinned-workspace-v096b.png)
 
 ---
 
