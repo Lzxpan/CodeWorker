@@ -68,6 +68,10 @@ MAX_EDIT_TOTAL_CHARS = 14000
 MAX_EDIT_SINGLE_FILE_CHARS = 22000
 MAX_ADVISORY_FILE_CHARS = 18000
 EDIT_PLAN_TIMEOUT_SECONDS = 300
+GEMMA4_LOCATOR_MAX_TOKENS = 320
+GEMMA4_PATCH_MAX_TOKENS = 700
+GEMMA4_PRECISE_MAX_TOKENS = 720
+GEMMA4_ADVISORY_MAX_TOKENS = 820
 CSHARP_RESERVED_IDENTIFIERS = {
     "if", "else", "switch", "case", "break", "return", "true", "false", "null",
     "new", "var", "int", "long", "short", "byte", "float", "double", "decimal",
@@ -128,6 +132,9 @@ HF_API_HEADERS = {
     "Accept": "application/json",
 }
 DETACHED_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+PROCESS_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+MODEL_SERVER_PROCESSES: Dict[Tuple[str, int], subprocess.Popen] = {}
+MODEL_SERVER_LOG_HANDLES: Dict[Tuple[str, int], Tuple[object, object]] = {}
 
 
 def make_error(
@@ -350,9 +357,13 @@ def check_minimum_memory() -> None:
         check=False,
         timeout=15,
     )
+    if result.returncode != 0:
+        return
     try:
         total = int(result.stdout.strip())
     except ValueError:
+        return
+    if total <= 0:
         return
     if total < 16 * 1024 * 1024 * 1024:
         raise RuntimeError(
@@ -367,6 +378,8 @@ def check_minimum_memory() -> None:
 
 
 def resolve_model_details(model_key: str) -> Tuple[Path, str]:
+    if model_key == "gemma4":
+        return ROOT_DIR / "models" / "gemma4-e4b-it-q4", "gemma4-local"
     if model_key == "codellama":
         return ROOT_DIR / "models" / "codellama-7b-instruct-q4", "codellama-local"
     return ROOT_DIR / "models" / "qwen2.5-coder-7b-instruct-q4", "qwen-local"
@@ -447,7 +460,7 @@ def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str]:
 
 
 def ensure_local_model_server(model_key: str, port: int = 8080) -> Dict[str, object]:
-    if model_key not in {"qwen", "codellama"}:
+    if model_key not in {"qwen", "gemma4", "codellama"}:
         raise RuntimeError(json.dumps(make_error("MODEL_START_FAILED", "Unknown model.", model_key)))
 
     check_minimum_memory()
@@ -479,30 +492,52 @@ def ensure_local_model_server(model_key: str, port: int = 8080) -> Dict[str, obj
         timeout=10,
     ).stdout.strip() or "unknown"
     log_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.log"
-
-    with open(log_path, "ab") as log_handle:
-        subprocess.Popen(
-            [
-                str(llama_server),
-                "--host", "127.0.0.1",
-                "--port", str(port),
-                "--alias", model_alias,
-                "-m", str(model_file),
-                "-c", "8192",
-                "--threads", str(os.cpu_count() or 4),
-                "--n-gpu-layers", "0",
-            ],
-            cwd=str(ROOT_DIR),
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            creationflags=DETACHED_FLAGS,
-            close_fds=True,
-        )
+    err_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.err.log"
+    stdout_handle = open(log_path, "ab")
+    stderr_handle = open(err_path, "ab")
+    process = subprocess.Popen(
+        [
+            str(llama_server),
+            "--host", "127.0.0.1",
+            "--port", str(port),
+            "--alias", model_alias,
+            "-m", str(model_file),
+            "-c", "8192",
+            "--threads", str(os.cpu_count() or 4),
+            "--n-gpu-layers", "0",
+        ],
+        cwd=str(ROOT_DIR),
+        stdin=subprocess.DEVNULL,
+        stdout=stdout_handle,
+        stderr=stderr_handle,
+        creationflags=PROCESS_FLAGS,
+        close_fds=True,
+    )
+    MODEL_SERVER_PROCESSES[(model_alias, port)] = process
+    MODEL_SERVER_LOG_HANDLES[(model_alias, port)] = (stdout_handle, stderr_handle)
 
     for _ in range(60):
         if is_model_ready(model_alias, port):
             return {"modelAlias": model_alias, "logPath": str(log_path), "alreadyRunning": False}
+        if process.poll() is not None:
+            details = ""
+            if log_path.exists():
+                details += log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            if err_path.exists():
+                stderr_text = err_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                if stderr_text:
+                    details += ("\n" if details else "") + stderr_text
+            raise RuntimeError(
+                json.dumps(
+                    make_error(
+                        "MODEL_START_FAILED",
+                        "llama-server process exited before becoming ready.",
+                        details or f"Exit code: {process.returncode}",
+                        log_path=str(log_path),
+                        extra={"modelKey": model_key},
+                    )
+                )
+            )
         threading.Event().wait(2)
 
     details = ""
@@ -824,10 +859,16 @@ def build_query_terms(message: str) -> List[str]:
 
     lowered = message.lower()
     if "ctrl" in lowered or "control" in lowered or "鍵盤" in message or "按鍵" in message:
-        for term in ("KeyDown", "Form1_KeyDown", "KeyPreview", "Control", "Ctrl"):
+        for term in ("KeyDown", "Form1_KeyDown", "KeyPreview", "Control", "Ctrl", "Keys.M"):
+            add(term)
+    if "按下 m" in lowered or "keys.m" in lowered or " m 鍵" in message.lower():
+        for term in ("Keys.M", "Form1_KeyDown", "KeyDown"):
             add(term)
     if "落到底" in message or "落到底部" in message or "直接落下" in message or "快速落下" in message:
         for term in ("HardDrop", "LockPiece", "MovePiece", "GameTick"):
+            add(term)
+    if "背景音樂" in message or "音樂" in message or "靜音" in message or "mute" in lowered:
+        for term in ("audioManager", "StartBackgroundMusic", "StopBackgroundMusic", "TogglePause", "Form1_KeyDown", "Keys.M"):
             add(term)
     if "旋轉" in message:
         for term in ("RotatePiece", "kicks"):
@@ -981,6 +1022,18 @@ def score_file_relevance(content: str, relative_path: str, message: str) -> int:
     for term in terms:
         term_lower = term.lower()
         score += min(lowered_content.count(term_lower), 6) * 4
+    lowered_message = message.lower()
+    if Path(relative_path).suffix.lower() == ".cs":
+        if any(token in lowered_message for token in ("ctrl", "control", "keydown", "keys.", " m 鍵", "按鍵")):
+            if "keydown" in lowered_content or "form1_keydown" in lowered_content:
+                score += 28
+            if "case keys." in lowered_content:
+                score += 18
+        if any(token in lowered_message for token in ("背景音樂", "音樂", "mute", "靜音")):
+            if "audiomanager" in lowered_content:
+                score += 16
+            if "startbackgroundmusic" in lowered_content or "stopbackgroundmusic" in lowered_content:
+                score += 18
     if Path(relative_path).suffix.lower() == ".cs":
         for region in detect_csharp_regions(content):
             region_name = str(region["name"]).lower()
@@ -1042,6 +1095,26 @@ def locate_change_region(content: str, match_index: int) -> Dict[str, object]:
         if int(region["start"]) <= match_index < int(region["end"]):
             return region
     return build_line_window_from_index(content, match_index)
+
+
+def derive_local_target_hint(project_root: Path, relative_path: str, message: str) -> Dict[str, str]:
+    content = read_file_full(project_root, relative_path)
+    sections = select_relevant_sections(content, relative_path, message, max_sections=1)
+    if sections:
+        section = sections[0]
+        return {
+            "path": relative_path,
+            "target": str(section["name"]),
+            "location": f"約第 {section['start_line']}-{section['end_line']} 行",
+            "before": truncate_middle(str(section["text"]).strip(), 2200),
+        }
+    excerpt = read_file_excerpt(project_root, relative_path, max_chars=1600)
+    return {
+        "path": relative_path,
+        "target": "未提供",
+        "location": "未提供",
+        "before": excerpt,
+    }
 
 
 def choose_context_files(
@@ -1158,6 +1231,131 @@ def build_pending_edit_prompt_block(pending_edit: Optional[Dict[str, object]]) -
         if visible:
             lines.extend(["", "上一版需要補充：", *[f"- {item}" for item in visible]])
     return "\n".join(lines).strip()
+
+
+def normalize_message_roles(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    for message in messages:
+        role = str(message.get("role", "")).strip()
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def build_gemma_locator_messages(
+    message: str,
+    context: str,
+    allowed_files: List[str],
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+) -> List[Dict[str, str]]:
+    allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無候選檔案)"
+    forbidden_identifiers = parse_forbidden_identifiers(message)
+    forbidden_block = (
+        "\n不得使用以下 identifier:\n" + "\n".join(f"- {item}" for item in forbidden_identifiers)
+        if forbidden_identifiers else ""
+    )
+    pending_edit_block = build_pending_edit_prompt_block(pending_edit)
+    refine_block = (
+        "這一輪是在修正上一版建議。你只能沿用上一版已命中的同一個 path 附近重新定位，不可擴張到其他檔案。"
+        if refine_mode else
+        "這一輪是新的修改需求。請只從候選檔案中選出一個最適合修改的 path。"
+    )
+    schema = (
+        '{\n'
+        '  "summary": "一句話說明修改目的",\n'
+        '  "needMoreContext": ["若定位不唯一，列出需要補看的檔案或函式"],\n'
+        '  "path": "單一最佳相對路徑，若無法判定則留空",\n'
+        '  "target": "命中的函式、方法或區塊名稱",\n'
+        '  "locationHint": "大致位置，例如 約第 120-160 行",\n'
+        '  "reason": "為何判斷應在這裡修改"\n'
+        '}'
+    )
+    system_prompt = (
+        "你是本機離線 code assistant，目前只負責定位修改位置，不負責產生 patch。"
+        "請使用 Gemma 4 標準 chat roles；本輪不要啟用 thinking，不要輸出思考過程，不要在 JSON 外加任何說明。"
+        "你只能在提供的候選檔案中選一個最佳 path。"
+        "若定位不唯一或資訊不足，path 必須留空，並把需要補看的檔案或函式寫到 needMoreContext。"
+        "禁止輸出多個候選 path。"
+        "請只輸出 JSON。"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"使用者需求:\n{message}\n\n"
+                f"本輪任務說明:\n{refine_block}\n\n"
+                f"候選檔案:\n{allowed_block}\n"
+                f"{forbidden_block}\n\n"
+                f"{pending_edit_block}\n\n"
+                f"以下是專案上下文:\n{context}\n\n"
+                f"回傳格式必須符合這個 JSON schema:\n{schema}"
+            ),
+        },
+    ]
+
+
+def build_gemma_patch_messages(
+    message: str,
+    context: str,
+    path: str,
+    target: str,
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+) -> List[Dict[str, str]]:
+    forbidden_identifiers = parse_forbidden_identifiers(message)
+    forbidden_block = (
+        "\n不得使用以下 identifier:\n" + "\n".join(f"- {item}" for item in forbidden_identifiers)
+        if forbidden_identifiers else ""
+    )
+    pending_edit_block = build_pending_edit_prompt_block(pending_edit)
+    refine_block = (
+        "這一輪是在修正上一版建議。你只能在同一個 path 與 target 附近重試，若仍無法安全修改就回 needMoreContext。"
+        if refine_mode else
+        "這一輪是新的修改需求。請只對這個已定位區段提出最小修改。"
+    )
+    schema = (
+        '{\n'
+        '  "summary": "一句話說明修改目的",\n'
+        '  "needMoreContext": ["若仍需要補充檔案或函式請列出"],\n'
+        '  "path": "必須與已定位 path 相同",\n'
+        '  "target": "命中的函式、方法或區塊名稱",\n'
+        '  "reason": "修改原因",\n'
+        '  "search": "要被精確取代的原始片段",\n'
+        '  "replace": "修改後的新片段",\n'
+        '  "notes": ["補充說明"]\n'
+        '}'
+    )
+    system_prompt = (
+        "你是本機離線 code assistant，目前只負責對單一已定位區段產生最小 patch。"
+        "請使用 Gemma 4 標準 chat roles；本輪不要啟用 thinking，不要輸出思考過程，不要在 JSON 外加任何說明。"
+        "只允許輸出一個 path 與一組 search/replace。"
+        "禁止重寫整份檔案，禁止輸出多個候選方案。"
+        "search 必須是提供節錄中的原文，replace 只放修改後的新片段。"
+        "若資訊不足或無法安全修改，請把 search/replace 留空，並把需要補看的函式或檔案寫到 needMoreContext。"
+        "請只輸出 JSON。"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"使用者需求:\n{message}\n\n"
+                f"已定位 path:\n- {path}\n\n"
+                f"已定位 target:\n- {target or '未提供'}\n\n"
+                f"本輪任務說明:\n{refine_block}\n"
+                f"{forbidden_block}\n\n"
+                f"{pending_edit_block}\n\n"
+                f"以下是已定位區段上下文:\n{context}\n\n"
+                f"回傳格式必須符合這個 JSON schema:\n{schema}"
+            ),
+        },
+    ]
 
 
 def build_project_context(project_root: Path, state: SessionState, message: str) -> str:
@@ -1282,6 +1480,267 @@ def format_notes(value: object) -> List[str]:
     return []
 
 
+def normalize_need_more_context(value: object) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def is_gemma4_state(state: SessionState) -> bool:
+    return state.model_key == "gemma4"
+
+
+def write_model_debug_log(kind: str, model_key: str, content: str) -> str:
+    stamp = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "[DateTime]::Now.ToString('yyyyMMdd-HHmmss')"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=10,
+    ).stdout.strip() or "unknown"
+    path = ROOT_DIR / "logs" / f"{kind}-{model_key}-{stamp}.log"
+    path.write_text(content[-12000:], encoding="utf-8", errors="replace")
+    return str(path)
+
+
+def resolve_primary_target_path(allowed_files: List[str], pending_edit: Optional[Dict[str, object]], refine_mode: bool) -> Optional[str]:
+    if refine_mode and pending_edit:
+        for item in iter_pending_edit_items(pending_edit):
+            path = str(item.get("path", "")).strip()
+            if path in allowed_files:
+                return path
+    return allowed_files[0] if allowed_files else None
+
+
+def build_gemma_locator_context(
+    project_root: Path,
+    allowed_files: List[str],
+    message: str,
+) -> str:
+    ranked_files = rank_paths_for_message(project_root, allowed_files, message)[:MAX_EDIT_FILES]
+    return build_context_for_paths(
+        project_root,
+        ranked_files,
+        message,
+        "Gemma 4 定位候選檔案",
+        file_char_limit=min(12000, MAX_EDIT_SINGLE_FILE_CHARS),
+        total_limit=min(18000, MAX_EDIT_SINGLE_FILE_CHARS),
+        max_sections=3,
+    )
+
+
+def create_gemma_locator(
+    project_root: Path,
+    state: SessionState,
+    message: str,
+    allowed_files: List[str],
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+) -> Dict[str, object]:
+    context = build_gemma_locator_context(project_root, allowed_files, message)
+    raw_reply = call_local_model(
+        state.model_alias,
+        build_gemma_locator_messages(
+            message,
+            context,
+            allowed_files,
+            pending_edit=pending_edit,
+            refine_mode=refine_mode,
+        ),
+        timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+        max_tokens=GEMMA4_LOCATOR_MAX_TOKENS,
+    )
+    try:
+        payload = extract_json_payload(raw_reply)
+    except Exception as exc:
+        log_path = write_model_debug_log("gemma4-locator", state.model_key, raw_reply)
+        return build_gemma_local_locator_fallback(
+            project_root,
+            allowed_files,
+            message,
+            failure_reason=f"EDIT_PLAN_SCHEMA_INVALID: Gemma 4 locator 回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}",
+        )
+
+    path = str(payload.get("path", "")).strip()
+    need_more_context = normalize_need_more_context(payload.get("needMoreContext"))
+    if path and path not in allowed_files:
+        raise RuntimeError(f"Gemma 4 locator 指向未允許的檔案：{path}")
+
+    if not path:
+        if len(allowed_files) == 1:
+            return build_gemma_local_locator_fallback(
+                project_root,
+                allowed_files,
+                message,
+                failure_reason="Gemma 4 locator 未提供 path，已改用本地區段定位。",
+            )
+        return {
+            "summary": str(payload.get("summary", "")).strip() or "Gemma 4 無法唯一定位修改區段",
+            "needMoreContext": need_more_context,
+            "path": "",
+            "target": str(payload.get("target", "")).strip(),
+            "locationHint": str(payload.get("locationHint", "")).strip(),
+            "reason": str(payload.get("reason", "")).strip(),
+        }
+
+    hint = derive_local_target_hint(project_root, path, "\n".join(part for part in [message, str(payload.get("target", ""))] if part))
+    return {
+        "summary": str(payload.get("summary", "")).strip() or "已定位修改區段",
+        "needMoreContext": need_more_context,
+        "path": path,
+        "target": str(payload.get("target", "")).strip() or hint.get("target", ""),
+        "locationHint": str(payload.get("locationHint", "")).strip() or hint.get("location", ""),
+        "reason": str(payload.get("reason", "")).strip() or "Gemma 4 已定位到單一最佳區段",
+        "before": hint.get("before", ""),
+    }
+
+
+def build_gemma_patch_context(
+    project_root: Path,
+    path: str,
+    message: str,
+    target: str,
+    locator_reason: str = "",
+) -> str:
+    ranking_message = "\n".join(part for part in [message, target, locator_reason] if part)
+    return build_context_for_paths(
+        project_root,
+        [path],
+        ranking_message,
+        "Gemma 4 已定位區段",
+        file_char_limit=min(14000, MAX_EDIT_SINGLE_FILE_CHARS),
+        total_limit=min(18000, MAX_EDIT_SINGLE_FILE_CHARS),
+        max_sections=2,
+    )
+
+
+def build_gemma_local_locator_fallback(
+    project_root: Path,
+    allowed_files: List[str],
+    message: str,
+    failure_reason: str = "",
+) -> Dict[str, object]:
+    ranked = rank_paths_for_message(project_root, allowed_files, message)
+    if not ranked:
+        return {
+            "summary": "Gemma 4 無法唯一定位修改區段",
+            "needMoreContext": [],
+            "path": "",
+            "target": "",
+            "locationHint": "",
+            "reason": failure_reason or "目前沒有可用的候選檔案。",
+            "before": "",
+        }
+    primary_path = ranked[0]
+    hint = derive_local_target_hint(project_root, primary_path, message)
+    return {
+        "summary": "Gemma 4 locator 未回合法 JSON，已改用本地區段定位",
+        "needMoreContext": [],
+        "path": primary_path,
+        "target": hint.get("target", ""),
+        "locationHint": hint.get("location", ""),
+        "reason": failure_reason or "Gemma 4 locator 未回合法 JSON，已改用本地規則定位。",
+        "before": hint.get("before", ""),
+    }
+
+
+def build_context_for_paths(
+    project_root: Path,
+    selected_paths: List[str],
+    message: str,
+    heading: str,
+    file_char_limit: int,
+    total_limit: int,
+    max_sections: int = 3,
+) -> str:
+    chunks = [f"{heading}:\n" + ("\n".join(selected_paths) if selected_paths else "(無)")]
+    total_chars = sum(len(chunk) for chunk in chunks)
+    for relative_path in selected_paths:
+        try:
+            excerpt = build_excerpt_for_message(
+                project_root,
+                relative_path,
+                message,
+                max_chars=file_char_limit,
+                max_sections=max_sections,
+            )
+        except (OSError, ValueError):
+            continue
+        block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
+        if total_chars + len(block) > total_limit:
+            if len(chunks) == 1:
+                chunks.append(truncate_middle(block, max(500, total_limit - total_chars)))
+            break
+        chunks.append(block)
+        total_chars += len(block)
+    return "\n\n".join(chunks)
+
+
+def build_fallback_advisory_plan(
+    project_root: Path,
+    state: SessionState,
+    message: str,
+    allowed_files: List[str],
+    failure_reason: str,
+    pending_edit: Optional[Dict[str, object]] = None,
+    refine_mode: bool = False,
+    raw_reply: str = "",
+) -> Dict[str, object]:
+    target_item = next(iter(iter_pending_edit_items(pending_edit)), {}) if pending_edit else {}
+    target_path = resolve_primary_target_path(allowed_files, pending_edit, refine_mode) or str(target_item.get("path", "")).strip() or "(未指定檔案)"
+    target_name = str(target_item.get("target", "")).strip() or "請補充要修改的函式或區塊"
+    location = str(target_item.get("location", "")).strip() or "未提供"
+    before_snippet = ""
+    if target_path and target_path != "(未指定檔案)":
+        try:
+            local_hint = derive_local_target_hint(project_root, target_path, message)
+            if target_name == "請補充要修改的函式或區塊":
+                target_name = local_hint.get("target", target_name)
+            location = local_hint.get("location", location)
+            before_snippet = local_hint.get("before", "")
+        except (OSError, ValueError):
+            pass
+    notes = [
+        "Gemma 4 目前未能穩定輸出合法的結構化 JSON，已改用保守文字 fallback。",
+        failure_reason or "模型沒有產生可解析的修改建議。",
+    ]
+    if raw_reply.strip():
+        notes.append("模型原始回覆已截斷保留於 logs，可供後續比對。")
+    suggestion = {
+        "path": target_path,
+        "location": location,
+        "target": target_name,
+        "whyHere": "目前只能確認應在這個檔案或區塊附近重新檢查，無法安全產出精準替換片段。",
+        "before": before_snippet,
+        "after": "",
+        "diffWindow": before_snippet or "Gemma 4 本輪未能產生可解析的結構化建議。請補充更明確的函式名稱、現有欄位名稱，或直接指出上一版建議哪裡錯。",
+        "notes": notes,
+    }
+    display_text = format_plan_for_chat(
+        {
+            "mode": "advisory",
+            "summary": "已產生保守文字建議",
+            "failureReason": failure_reason,
+            "suggestions": [suggestion],
+        }
+    )
+    return {
+        "mode": "advisory",
+        "request": message,
+        "refineMode": refine_mode,
+        "summary": "已產生保守文字建議",
+        "needMoreContext": [target_path] if target_path and target_path != "(未指定檔案)" else [],
+        "edits": [],
+        "suggestions": [suggestion],
+        "displayText": display_text,
+        "failureReason": failure_reason,
+    }
+
+
 def build_diff_window(relative_path: str, before: str, after: str) -> str:
     return generate_diff(relative_path, before, after)
 
@@ -1356,19 +1815,79 @@ def build_public_plan(plan: Dict[str, object]) -> Dict[str, object]:
 
 def extract_json_payload(raw: str) -> Dict[str, object]:
     cleaned = raw.strip()
+    attempts: List[str] = []
+    if cleaned:
+        attempts.append(cleaned)
+
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()
         if lines:
             lines = lines[1:]
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-    if not cleaned.startswith("{"):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start >= 0 and end > start:
-            cleaned = cleaned[start:end + 1]
-    return json.loads(cleaned)
+        stripped = "\n".join(lines).strip()
+        if stripped:
+            attempts.append(stripped)
+
+    extracted = cleaned
+    start = extracted.find("{")
+    end = extracted.rfind("}")
+    if start >= 0 and end > start:
+        extracted = extracted[start:end + 1].strip()
+        if extracted:
+            attempts.append(extracted)
+
+    repaired = extracted
+    repaired = repaired.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
+    repaired = re.sub(r"^\s*json\s*", "", repaired, flags=re.IGNORECASE)
+    repaired = re.sub(r"^[^{]*(\{)", r"\1", repaired, count=1, flags=re.DOTALL)
+    repaired = re.sub(r"(\})[^}]*$", r"\1", repaired, count=1, flags=re.DOTALL)
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    repaired = repaired.strip()
+    if repaired:
+        attempts.append(repaired)
+
+    compact = "\n".join(
+        line for line in repaired.splitlines()
+        if line.strip() and not re.match(r"^(說明|Explanation|Here is|以下是)", line.strip(), flags=re.IGNORECASE)
+    ).strip()
+    if compact:
+        attempts.append(compact)
+
+    brace_candidate = compact or repaired or cleaned
+    if brace_candidate:
+        first_brace = brace_candidate.find("{")
+        if first_brace >= 0:
+            depth = 0
+            end_index = -1
+            for index in range(first_brace, len(brace_candidate)):
+                char = brace_candidate[index]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end_index = index
+                        break
+            if end_index > first_brace:
+                balanced = brace_candidate[first_brace:end_index + 1].strip()
+                balanced = re.sub(r",(\s*[}\]])", r"\1", balanced)
+                if balanced:
+                    attempts.append(balanced)
+
+    last_error: Optional[Exception] = None
+    seen = set()
+    for candidate in attempts:
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return json.loads(candidate)
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(str(last_error) if last_error else "JSON payload is empty.")
 
 
 def generate_diff(relative_path: str, before: str, after: str) -> str:
@@ -1415,6 +1934,7 @@ def build_edit_messages(
     allowed_files: List[str],
     pending_edit: Optional[Dict[str, object]] = None,
     refine_mode: bool = False,
+    model_key: str = "qwen",
 ) -> List[Dict[str, str]]:
     allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無可編輯檔案)"
     forbidden_identifiers = parse_forbidden_identifiers(message)
@@ -1429,43 +1949,71 @@ def build_edit_messages(
         if refine_mode else
         "這一輪是新的修改需求，請直接根據目前已套用的釘選檔案提出最小修改。"
     )
-    schema = (
-        '{\n'
-        '  "summary": "一句話說明修改目的",\n'
-        '  "needMoreContext": ["若需要更多檔案請列出"],\n'
-        '  "edits": [\n'
-        '    {\n'
-        '      "path": "相對路徑",\n'
-        '      "target": "命中的函式、方法或區塊名稱",\n'
-        '      "reason": "修改原因",\n'
-        '      "notes": ["補充說明"],\n'
-        '      "operations": [\n'
-        '        {\n'
-        '          "search": "要被精確取代的原始片段",\n'
-        '          "replace": "修改後的新片段"\n'
-        '        }\n'
-        '      ]\n'
-        '    }\n'
-        '  ]\n'
-        '}'
-    )
+    if model_key == "gemma4":
+        schema = (
+            '{\n'
+            '  "summary": "一句話說明修改目的",\n'
+            '  "needMoreContext": ["若需要更多檔案請列出"],\n'
+            '  "path": "相對路徑",\n'
+            '  "target": "命中的函式、方法或區塊名稱",\n'
+            '  "reason": "修改原因",\n'
+            '  "search": "要被精確取代的原始片段",\n'
+            '  "replace": "修改後的新片段",\n'
+            '  "notes": ["補充說明"]\n'
+            '}'
+        )
+        system_prompt = (
+            "你是本機離線 code assistant，現在要產生可供人工參考的修改建議。"
+            "請全程使用繁體中文說明，但 JSON key 與檔案內容保留原文。"
+            "你只能修改提供給你的單一最佳候選檔案，不可新增檔案、不可刪除檔案。"
+            "這一輪只允許輸出一個 path，且只允許輸出一組 search/replace。"
+            "請優先做最小修改，避免重寫整個檔案。"
+            "search 必須是提供給你的檔案節錄中的原文片段，且必須可唯一定位。"
+            "replace 只放修改後的新片段，不要重複整份檔案。"
+            "若資訊不足或無法安全修改，請把 path 留空，並把需要補看的函式或檔案寫到 needMoreContext。"
+            "若需求明確指出某個名稱不存在或不可用，禁止在 target、search、replace 中繼續使用該名稱。"
+            "禁止輸出多個候選方案、禁止在 JSON 外加任何自然語言說明、禁止重寫整份檔案。"
+            "請只輸出 JSON。"
+        )
+    else:
+        schema = (
+            '{\n'
+            '  "summary": "一句話說明修改目的",\n'
+            '  "needMoreContext": ["若需要更多檔案請列出"],\n'
+            '  "edits": [\n'
+            '    {\n'
+            '      "path": "相對路徑",\n'
+            '      "target": "命中的函式、方法或區塊名稱",\n'
+            '      "reason": "修改原因",\n'
+            '      "notes": ["補充說明"],\n'
+            '      "operations": [\n'
+            '        {\n'
+            '          "search": "要被精確取代的原始片段",\n'
+            '          "replace": "修改後的新片段"\n'
+            '        }\n'
+            '      ]\n'
+            '    }\n'
+            '  ]\n'
+            '}'
+        )
+        system_prompt = (
+            "你是本機離線 code assistant，現在要產生可供人工參考的修改建議。"
+            "請全程使用繁體中文說明，但 JSON key 與檔案內容保留原文。"
+            "你只能修改提供給你的候選檔案，不可新增檔案、不可刪除檔案。"
+            "請優先做最小修改，避免重寫整個檔案。"
+            "請優先鎖定真正需要修改的函式或區塊，避免從檔案開頭輸出整份檔案。"
+            "operations.search 必須是提供給你的檔案節錄中的原文片段，且必須可唯一定位。"
+            "operations.replace 只放修改後的片段，不要重複整份檔案。"
+            "若資訊不足或無法安全修改，請回傳 edits 為空陣列，並把需要補看的檔案寫到 needMoreContext。"
+            "若需求是改功能，請務必指出 target 與修改原因。"
+            "若需求明確指出某個名稱不存在或不可用，禁止在 target、search、replace 中繼續使用該名稱。"
+            "若這一輪是在修正上一版建議，請先修正上一版的錯誤，再輸出新的最小修改，不要忽略使用者指出的問題。"
+            "請只輸出 JSON，不要加 markdown 或其他文字。"
+        )
     return [
         {
             "role": "system",
-            "content": (
-                "你是本機離線 code assistant，現在要產生可供人工參考的修改建議。"
-                "請全程使用繁體中文說明，但 JSON key 與檔案內容保留原文。"
-                "你只能修改提供給你的候選檔案，不可新增檔案、不可刪除檔案。"
-                "請優先做最小修改，避免重寫整個檔案。"
-                "請優先鎖定真正需要修改的函式或區塊，避免從檔案開頭輸出整份檔案。"
-                "operations.search 必須是提供給你的檔案節錄中的原文片段，且必須可唯一定位。"
-                "operations.replace 只放修改後的片段，不要重複整份檔案。"
-                "若資訊不足或無法安全修改，請回傳 edits 為空陣列，並把需要補看的檔案寫到 needMoreContext。"
-                "若需求是改功能，請務必指出 target 與修改原因。"
-                "若需求明確指出某個名稱不存在或不可用，禁止在 target、search、replace 中繼續使用該名稱。"
-                "若這一輪是在修正上一版建議，請先修正上一版的錯誤，再輸出新的最小修改，不要忽略使用者指出的問題。"
-                "請只輸出 JSON，不要加 markdown 或其他文字。"
-            ),
+            "content": system_prompt,
         },
         {
             "role": "user",
@@ -1489,6 +2037,7 @@ def build_advisory_edit_messages(
     failure_reason: str = "",
     pending_edit: Optional[Dict[str, object]] = None,
     refine_mode: bool = False,
+    model_key: str = "qwen",
 ) -> List[Dict[str, str]]:
     allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無候選檔案)"
     forbidden_identifiers = parse_forbidden_identifiers(message)
@@ -1497,22 +2046,59 @@ def build_advisory_edit_messages(
         if forbidden_identifiers else ""
     )
     pending_edit_block = build_pending_edit_prompt_block(pending_edit)
-    schema = (
-        '{\n'
-        '  "summary": "一句話說明修改目的",\n'
-        '  "needMoreContext": ["若需要更多檔案請列出"],\n'
-        '  "suggestions": [\n'
-        '    {\n'
-        '      "path": "相對路徑",\n'
-        '      "target": "應修改的函式、方法或區塊名稱",\n'
-        '      "whyHere": "為什麼判斷這裡要修改",\n'
-        '      "before": "建議替換前片段，請只放局部原始碼",\n'
-        '      "after": "建議替換後片段，請只放局部原始碼",\n'
-        '      "notes": ["補充說明"]\n'
-        '    }\n'
-        '  ]\n'
-        '}'
-    )
+    if model_key == "gemma4":
+        schema = (
+            '{\n'
+            '  "summary": "一句話說明修改目的",\n'
+            '  "needMoreContext": ["若需要更多檔案請列出"],\n'
+            '  "path": "相對路徑",\n'
+            '  "target": "應修改的函式、方法或區塊名稱",\n'
+            '  "whyHere": "為什麼判斷這裡要修改",\n'
+            '  "before": "建議替換前片段，請只放局部原始碼",\n'
+            '  "after": "建議替換後片段，請只放局部原始碼",\n'
+            '  "notes": ["補充說明"]\n'
+            '}'
+        )
+        system_prompt = (
+            "你是本機離線 code assistant，現在要產生可手動複製的修改建議。"
+            "請全程使用繁體中文說明，但檔案路徑、程式碼與 JSON key 保留原文。"
+            "你只能針對單一最佳候選檔案提出建議，不可虛構不存在的檔案。"
+            "這一輪禁止輸出多個候選方案，禁止在 JSON 外加任何自然語言說明。"
+            "若無法安全給出精準 search/replace，請改用人工可操作的局部替換片段。"
+            "你必須具體指出 path、target、whyHere、before、after。"
+            "before 與 after 只放局部片段，不要輸出整份檔案。"
+            "若需求明確指出某個名稱不存在或不可用，禁止在 target、before、after 中繼續使用該名稱。"
+            "請只輸出 JSON。"
+        )
+    else:
+        schema = (
+            '{\n'
+            '  "summary": "一句話說明修改目的",\n'
+            '  "needMoreContext": ["若需要更多檔案請列出"],\n'
+            '  "suggestions": [\n'
+            '    {\n'
+            '      "path": "相對路徑",\n'
+            '      "target": "應修改的函式、方法或區塊名稱",\n'
+            '      "whyHere": "為什麼判斷這裡要修改",\n'
+            '      "before": "建議替換前片段，請只放局部原始碼",\n'
+            '      "after": "建議替換後片段，請只放局部原始碼",\n'
+            '      "notes": ["補充說明"]\n'
+            '    }\n'
+            '  ]\n'
+            '}'
+        )
+        system_prompt = (
+            "你是本機離線 code assistant，現在要產生可手動複製的修改建議。"
+            "請全程使用繁體中文說明，但檔案路徑、程式碼與 JSON key 保留原文。"
+            "你只能針對提供的候選檔案提出建議，不可虛構不存在的檔案。"
+            "若無法安全給出精準 search/replace，請改用人工可操作的局部替換片段。"
+            "你必須具體指出 target、whyHere、before、after。"
+            "before 與 after 只放需要修改的局部片段，不要輸出整份檔案。"
+            "若需求明確指出某個名稱不存在或不可用，禁止在 target、before、after 中繼續使用該名稱。"
+            "notes 用來補充風險、前置條件或需要人工確認的地方。"
+            "若這一輪是在修正上一版建議，請直接說明上一版錯在哪裡，並給出新的局部替換片段。"
+            "請只輸出 JSON，不要加 markdown 或其他前後文。"
+        )
     failure_block = f"\n上一輪精準修改失敗原因:\n{failure_reason}\n" if failure_reason else ""
     refine_block = (
         "這一輪是在修正上一版修改建議。請明確指出上一版哪裡錯，並根據使用者新意見提出新的局部替換片段。"
@@ -1522,18 +2108,7 @@ def build_advisory_edit_messages(
     return [
         {
             "role": "system",
-            "content": (
-                "你是本機離線 code assistant，現在要產生可手動複製的修改建議。"
-                "請全程使用繁體中文說明，但檔案路徑、程式碼與 JSON key 保留原文。"
-                "你只能針對提供的候選檔案提出建議，不可虛構不存在的檔案。"
-                "若無法安全給出精準 search/replace，請改用人工可操作的局部替換片段。"
-                "你必須具體指出 target、whyHere、before、after。"
-                "before 與 after 只放需要修改的局部片段，不要輸出整份檔案。"
-                "若需求明確指出某個名稱不存在或不可用，禁止在 target、before、after 中繼續使用該名稱。"
-                "notes 用來補充風險、前置條件或需要人工確認的地方。"
-                "若這一輪是在修正上一版建議，請直接說明上一版錯在哪裡，並給出新的局部替換片段。"
-                "請只輸出 JSON，不要加 markdown 或其他前後文。"
-            ),
+            "content": system_prompt,
         },
         {
             "role": "user",
@@ -1551,6 +2126,12 @@ def build_advisory_edit_messages(
     ]
 
 
+def prepare_messages_for_model(model_alias: str, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    if model_alias.startswith("gemma4"):
+        return normalize_message_roles(messages)
+    return messages
+
+
 def create_precise_edit_plan(
     project_root: Path,
     state: SessionState,
@@ -1563,14 +2144,87 @@ def create_precise_edit_plan(
     context, allowed_files = build_edit_context(project_root, state, context_message)
     if not allowed_files:
         raise RuntimeError("目前沒有可用的候選檔案可修改。請先釘選目標檔案或確認專案已正確載入。")
-
-    raw_reply = call_local_model(
-        state.model_alias,
-        build_edit_messages(message, context, allowed_files, pending_edit=pending_edit, refine_mode=refine_mode),
-        timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
-        max_tokens=900,
-    )
-    payload = extract_json_payload(raw_reply)
+    if is_gemma4_state(state):
+        locator = create_gemma_locator(
+            project_root,
+            state,
+            context_message,
+            allowed_files,
+            pending_edit=pending_edit,
+            refine_mode=refine_mode,
+        )
+        primary_path = str(locator.get("path", "")).strip()
+        if not primary_path:
+            need_more = normalize_need_more_context(locator.get("needMoreContext"))
+            raise RuntimeError(
+                "Gemma 4 無法唯一定位修改區段。"
+                + (f"需要補充：{', '.join(need_more)}" if need_more else "請補充更明確的函式名稱、區塊名稱，或增加釘選檔案。")
+            )
+        allowed_files = [primary_path]
+        context = build_gemma_patch_context(
+            project_root,
+            primary_path,
+            context_message,
+            str(locator.get("target", "")).strip(),
+            str(locator.get("reason", "")).strip(),
+        )
+        raw_reply = call_local_model(
+            state.model_alias,
+            build_gemma_patch_messages(
+                message,
+                context,
+                primary_path,
+                str(locator.get("target", "")).strip(),
+                pending_edit=pending_edit,
+                refine_mode=refine_mode,
+            ),
+            timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+            max_tokens=GEMMA4_PATCH_MAX_TOKENS,
+        )
+        try:
+            patch_payload = extract_json_payload(raw_reply)
+        except Exception as exc:
+            log_path = write_model_debug_log("gemma4-patch", state.model_key, raw_reply)
+            raise RuntimeError(
+                f"EDIT_PLAN_SCHEMA_INVALID: Gemma 4 patch 回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}"
+            ) from exc
+        payload = {
+            "summary": patch_payload.get("summary", "") or locator.get("summary", ""),
+            "needMoreContext": normalize_need_more_context(patch_payload.get("needMoreContext")) or normalize_need_more_context(locator.get("needMoreContext")),
+            "edits": [
+                {
+                    "path": str(patch_payload.get("path", "")).strip() or primary_path,
+                    "target": str(patch_payload.get("target", "")).strip() or str(locator.get("target", "")).strip(),
+                    "reason": str(patch_payload.get("reason", "")).strip() or str(locator.get("reason", "")).strip(),
+                    "notes": patch_payload.get("notes", []),
+                    "operations": [
+                        {
+                            "search": str(patch_payload.get("search", "")),
+                            "replace": str(patch_payload.get("replace", "")),
+                        }
+                    ],
+                }
+            ],
+        }
+    else:
+        raw_reply = call_local_model(
+            state.model_alias,
+            build_edit_messages(
+                message,
+                context,
+                allowed_files,
+                pending_edit=pending_edit,
+                refine_mode=refine_mode,
+                model_key=state.model_key,
+            ),
+            timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+            max_tokens=900,
+        )
+        try:
+            payload = extract_json_payload(raw_reply)
+        except Exception as exc:
+            log_path = write_model_debug_log("edit-plan-raw", state.model_key, raw_reply)
+            raise RuntimeError(f"EDIT_PLAN_SCHEMA_INVALID: 模型回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}") from exc
     edits = payload.get("edits", [])
     if not isinstance(edits, list):
         raise RuntimeError("模型回傳的 edits 格式不正確。")
@@ -1610,6 +2264,8 @@ def create_precise_edit_plan(
             continue
         before_snippet = normalized_operations[0]["search"]
         after_snippet = normalized_operations[0]["replace"]
+        if is_gemma4_state(state) and (not before_snippet.strip() or not after_snippet.strip()):
+            raise RuntimeError(f"Gemma 4 未提供有效的 search/replace 片段：{path}")
         safety_issues = collect_edit_safety_issues(before_snippet, after_snippet, before, message)
         if safety_issues:
             raise RuntimeError("精準修改未通過安全檢查：" + "；".join(safety_issues))
@@ -1640,16 +2296,14 @@ def create_precise_edit_plan(
             }
         )
 
-    need_more_context = payload.get("needMoreContext", [])
-    if not isinstance(need_more_context, list):
-        need_more_context = []
+    need_more_context = normalize_need_more_context(payload.get("needMoreContext"))
 
     plan = {
         "mode": "precise",
         "request": message,
         "refineMode": refine_mode,
         "summary": str(payload.get("summary", "")).strip() or "已產生修改建議",
-        "needMoreContext": [str(item).strip() for item in need_more_context if str(item).strip()],
+        "needMoreContext": need_more_context,
         "edits": normalized_edits,
     }
     return plan
@@ -1665,7 +2319,87 @@ def create_advisory_edit_plan(
     refine_mode: bool = False,
     context_message: Optional[str] = None,
 ) -> Dict[str, object]:
-    context = build_advisory_context(project_root, state, context_message or message, allowed_files)
+    primary_path = resolve_primary_target_path(allowed_files, pending_edit, refine_mode) or ""
+    effective_pending_edit = pending_edit
+    if is_gemma4_state(state):
+        try:
+            locator = create_gemma_locator(
+                project_root,
+                state,
+                context_message or message,
+                allowed_files,
+                pending_edit=pending_edit,
+                refine_mode=refine_mode,
+            )
+        except RuntimeError as exc:
+            locator = {
+                "summary": "Gemma 4 無法唯一定位修改區段",
+                "needMoreContext": allowed_files[:1],
+                "path": "",
+                "target": "",
+                "locationHint": "",
+                "reason": str(exc),
+            }
+
+        primary_path = str(locator.get("path", "")).strip()
+        if primary_path:
+            allowed_files = [primary_path]
+            effective_pending_edit = effective_pending_edit or {
+                "summary": str(locator.get("summary", "")).strip() or "Gemma 4 已定位區段",
+                "mode": "precise",
+                "failureReason": failure_reason,
+                "edits": [
+                    {
+                        "path": primary_path,
+                        "target": str(locator.get("target", "")).strip(),
+                        "location": str(locator.get("locationHint", "")).strip(),
+                        "reason": str(locator.get("reason", "")).strip(),
+                        "beforeSnippet": str(locator.get("before", "")).strip(),
+                        "afterSnippet": "",
+                        "diffWindow": str(locator.get("before", "")).strip(),
+                        "notes": [],
+                    }
+                ],
+            }
+        else:
+            summary = str(locator.get("summary", "")).strip() or "Gemma 4 無法唯一定位修改區段"
+            need_more = normalize_need_more_context(locator.get("needMoreContext")) or allowed_files[:1]
+            suggestion = {
+                "path": "(未指定檔案)",
+                "location": str(locator.get("locationHint", "")).strip() or "未提供",
+                "target": str(locator.get("target", "")).strip() or "請補充要修改的函式或區塊",
+                "whyHere": str(locator.get("reason", "")).strip() or "目前無法唯一定位修改區段。",
+                "before": "",
+                "after": "",
+                "diffWindow": "Gemma 4 目前無法唯一定位修改區段。請補充更明確的函式名稱、區塊名稱，或增加釘選檔案。",
+                "notes": [
+                    failure_reason or "精準模式未能提供可安全套用的修改。",
+                    "目前已改為保守建議；請補充更多上下文後再試。",
+                ],
+            }
+            return {
+                "mode": "advisory",
+                "request": message,
+                "refineMode": refine_mode,
+                "summary": summary,
+                "needMoreContext": need_more,
+                "edits": [],
+                "suggestions": [suggestion],
+                "displayText": format_plan_for_chat(
+                    {
+                        "mode": "advisory",
+                        "summary": summary,
+                        "failureReason": failure_reason,
+                        "suggestions": [suggestion],
+                    }
+                ),
+                "failureReason": failure_reason,
+            }
+
+    advisory_message = context_message or message
+    if is_gemma4_state(state) and effective_pending_edit:
+        advisory_message = build_refinement_ranking_message(advisory_message, effective_pending_edit)
+    context = build_advisory_context(project_root, state, advisory_message, allowed_files)
     raw_reply = call_local_model(
         state.model_alias,
         build_advisory_edit_messages(
@@ -1673,26 +2407,43 @@ def create_advisory_edit_plan(
             context,
             allowed_files,
             failure_reason,
-            pending_edit=pending_edit,
+            pending_edit=effective_pending_edit,
             refine_mode=refine_mode,
+            model_key=state.model_key,
         ),
         timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
-        max_tokens=1200,
+        max_tokens=GEMMA4_ADVISORY_MAX_TOKENS if is_gemma4_state(state) else 1200,
     )
     try:
         payload = extract_json_payload(raw_reply)
-    except Exception:
-        text = raw_reply.strip() or "模型未提供可用內容。"
-        return {
-        "mode": "advisory",
-        "request": message,
-        "refineMode": refine_mode,
-        "summary": "已產生文字建議",
-        "needMoreContext": [],
-        "edits": [],
-            "suggestions": [],
-            "displayText": text,
-            "failureReason": failure_reason,
+    except Exception as exc:
+        log_kind = "gemma4-advisory" if is_gemma4_state(state) else "edit-plan-raw"
+        log_path = write_model_debug_log(log_kind, state.model_key, raw_reply)
+        schema_reason = f"{failure_reason + '；' if failure_reason else ''}EDIT_PLAN_SCHEMA_INVALID: 模型回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}"
+        return build_fallback_advisory_plan(
+            project_root,
+            state,
+            message,
+            allowed_files,
+            schema_reason,
+            pending_edit=effective_pending_edit,
+            refine_mode=refine_mode,
+            raw_reply=raw_reply,
+        )
+    if is_gemma4_state(state):
+        payload = {
+            "summary": payload.get("summary", ""),
+            "needMoreContext": normalize_need_more_context(payload.get("needMoreContext")),
+            "suggestions": [
+                {
+                    "path": str(payload.get("path", "")).strip() or (primary_path or ""),
+                    "target": str(payload.get("target", "")).strip(),
+                    "whyHere": str(payload.get("whyHere", "")).strip(),
+                    "before": str(payload.get("before", "")).strip(),
+                    "after": str(payload.get("after", "")).strip(),
+                    "notes": payload.get("notes", []),
+                }
+            ],
         }
 
     suggestions = payload.get("suggestions", [])
@@ -1709,6 +2460,8 @@ def create_advisory_edit_plan(
         before_snippet = str(item.get("before", "")).strip()
         after_snippet = str(item.get("after", "")).strip()
         notes = format_notes(item.get("notes"))
+        if not path and primary_path:
+            path = primary_path
         if path and path not in allowed_files:
             continue
         display_path = path or "(未指定檔案)"
@@ -1742,6 +2495,8 @@ def create_advisory_edit_plan(
             before_snippet = ""
             after_snippet = ""
             diff_window = "模型建議引用未確認或被否定的 identifier，已停止輸出具體替換片段。"
+        if is_gemma4_state(state) and not before_snippet and not after_snippet:
+            notes = notes + ["Gemma 4 未提供足夠的局部替換片段，已保留為保守文字建議。"]
         normalized_suggestions.append(
             {
                 "path": display_path,
@@ -1772,9 +2527,7 @@ def create_advisory_edit_plan(
             block.extend(["", "補充說明：", "\n".join(f"- {note}" for note in notes)])
         display_blocks.append("\n".join(block))
 
-    need_more_context = payload.get("needMoreContext", [])
-    if not isinstance(need_more_context, list):
-        need_more_context = []
+    need_more_context = normalize_need_more_context(payload.get("needMoreContext"))
     display_text = "\n\n---\n\n".join(display_blocks).strip()
     if not display_text:
         display_text = raw_reply.strip() or "模型未提供可用內容。"
@@ -1784,7 +2537,7 @@ def create_advisory_edit_plan(
         "request": message,
         "refineMode": refine_mode,
         "summary": str(payload.get("summary", "")).strip() or "已產生文字建議",
-        "needMoreContext": [str(item).strip() for item in need_more_context if str(item).strip()],
+        "needMoreContext": need_more_context,
         "edits": [],
         "suggestions": normalized_suggestions,
         "displayText": display_text,
@@ -1830,10 +2583,11 @@ def call_local_model(
     timeout_seconds: int = 180,
     max_tokens: int = 600,
 ) -> str:
+    prepared_messages = prepare_messages_for_model(model_alias, messages)
     payload = json.dumps(
         {
             "model": model_alias,
-            "messages": messages,
+            "messages": prepared_messages,
             "temperature": 0.2,
             "stream": False,
             "max_tokens": max_tokens,
@@ -1921,7 +2675,7 @@ def build_session_payload(
     tests = detect_test_locations(file_paths)
     summary = build_summary(project_root, files, entrypoints, tests)
     tree = file_paths[:MAX_TREE_ITEMS]
-    model_alias = "codellama-local" if model_key == "codellama" else "qwen-local"
+    _, model_alias = resolve_model_details(model_key)
     with STATE_LOCK:
         existing_history = list(STATE.history)
         existing_pins = [path for path in STATE.pinned_files if path in file_paths]
@@ -2025,7 +2779,7 @@ def open_project_worker(task_id: str, project_path: str, model_key: str) -> None
 def redownload_model_worker(task_id: str, model_key: str) -> None:
     try:
         update_task(task_id, status="running", progress=3, step="驗證模型", message="正在確認模型設定")
-        if model_key not in {"qwen", "codellama"}:
+        if model_key not in {"qwen", "gemma4", "codellama"}:
             raise RuntimeError(json.dumps(make_error("MODEL_INVALID", "Unsupported model.", model_key)))
 
         model_path, model_size = download_model_with_progress(task_id, model_key)
@@ -2193,8 +2947,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             project_path = str(payload.get("projectPath", "")).strip()
             model_key = str(payload.get("modelKey", "qwen")).strip().lower()
-            if model_key not in {"qwen", "codellama"}:
-                raise ValueError("Unsupported model. Use qwen or codellama.")
+            if model_key not in {"qwen", "gemma4", "codellama"}:
+                raise ValueError("Unsupported model. Use qwen, gemma4 or codellama.")
             if not project_path:
                 raise ValueError("Project path is required.")
             setattr(self.server, "_pending_edit_internal", None)

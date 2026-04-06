@@ -32,9 +32,10 @@ const HELP_CONTENT = {
   },
   "model-key": {
     title: "模型",
-    description: "選擇本次要用的本地模型。預設是 Qwen，比較適合中文對話與程式分析；Code Llama 是備援模型。",
+    description: "選擇本次要用的本地模型。預設是 Qwen；Gemma 4 E4B 是新增可選模型；Code Llama 是備援模型。",
     usage: [
       "一般建議使用 Qwen 2.5 Coder 7B。",
+      "若要評估真正 Gemma 4 的中文分析與 coding 表現，可切換到 Gemma 4 E4B。",
       "若要比對備援模型行為，再切換到 Code Llama 7B。",
       "切換模型後需重新開啟專案，系統才會改用新模型。",
     ],

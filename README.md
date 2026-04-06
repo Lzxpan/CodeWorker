@@ -1,4 +1,4 @@
-# CodeWorker V0.94b
+# CodeWorker V0.95b
 
 > GitHub Repository: [Lzxpan/CodeWorker](https://github.com/Lzxpan/CodeWorker)
 
@@ -18,6 +18,7 @@
 - 建議 CPU 支援 AVX2
 - 第一次下載 runtime / 模型時需要網路
 - 第一次下載的總檔案大小會超過 5GB，依網路速度與 USB / 硬碟寫入速度不同，可能需要一段時間，請耐心等待
+- 若啟用第三模型 `Gemma 4 E4B`，首次下載量與磁碟占用會再增加
 - 完成下載後可離線使用
 
 ---
@@ -30,6 +31,7 @@ CodeWorker/
   logs/
   models/
     codellama-7b-instruct-q4/
+    gemma4-e4b-it-q4/
     qwen2.5-coder-7b-instruct-q4/
   runtime/
     PortableGit/
@@ -68,6 +70,7 @@ scripts\bootstrap.cmd
 - 下載 `PortableGit`
 - 下載 `WinPython 3.12`
 - 下載預設 Qwen GGUF 模型
+- 下載 `Gemma 4 E4B` 對應的官方 GGUF 模型
 
 如果你之後想用 CLI agent，再執行：
 
@@ -99,6 +102,8 @@ scripts\launch-webui.cmd
   - 需包含 `cmd\git.exe` 或 `bin\git.exe`
 - `models\qwen2.5-coder-7b-instruct-q4\`
   - 放 Qwen GGUF
+- `models\gemma4-e4b-it-q4\`
+  - 放 `ggml-org/gemma-4-E4B-it-GGUF` 的 GGUF
 - `models\codellama-7b-instruct-q4\`
   - 放 Code Llama GGUF
 
@@ -150,7 +155,7 @@ http://127.0.0.1:8764
 
 1. 點一下 `專案路徑` 欄位
 2. 選擇你的專案根目錄
-3. 確認模型是 `Qwen 2.5 Coder 7B`
+3. 確認模型是你要使用的模型，預設建議先用 `Qwen 2.5 Coder 7B`
 4. 按 `開啟專案`
 5. 等進度條完成
 6. 在 `檔案樹` 勾選要給模型看的檔案
@@ -166,7 +171,7 @@ http://127.0.0.1:8764
 如果你是第一次使用，建議直接照這個順序對照畫面：
 
 1. 左上 `專案路徑`：點一下欄位，選專案資料夾
-2. 左上 `模型`：先維持 `Qwen 2.5 Coder 7B`
+2. 左上 `模型`：預設先維持 `Qwen 2.5 Coder 7B`，若要對照評估再切換到 `Gemma 4 E4B`
 3. 左上按 `開啟專案`
 4. 左下 `檔案樹`：勾選你要讓模型讀取的檔案
 5. 左下按 `套用釘選`
@@ -197,15 +202,45 @@ http://127.0.0.1:8764
 
 ### 模型
 
-目前支援兩個模型：
+目前支援三個模型：
 
 - `Qwen 2.5 Coder 7B`
   - 預設模型
   - 中文表現較好
   - 建議一般使用都選它
+- `Gemma 4 E4B`
+  - 新增可選模型
+  - 採用官方 `ggml-org/gemma-4-E4B-it-GGUF` 路線
+  - 適合做對照評估，不建議直接取代 Qwen
+  - 目前 `edit plan` 已改成較保守的 `locator -> patch -> advisory fallback` 路線
+  - 目前定位是現有 CPU / USB 架構下的輕量評估模型，不是主要修改建議模型
 - `Code Llama 7B`
   - 備援模型
   - 中文互動通常較弱
+
+### `Gemma 4` 與硬體的關係
+
+`Gemma 4 E4B` 不如預期，不應只歸因於硬體不足。
+
+- 目前影響最大的，是模型尺寸、chat template / prompt 對齊程度，以及結構化 `edit plan` 任務本身的難度
+- 硬體主要影響的是：
+  - 啟動速度
+  - 推理速度
+  - 可承受的 context
+  - 能不能改用更大的 `Gemma 4` 型號
+- 換句話說：
+  - 更高階硬體不太會把 `Gemma 4 E4B` 直接變成強結構化 code-edit 模型
+  - 但更高階硬體有機會讓你評估 `Gemma 4 31B` 或 `Gemma 4 26B A4B`
+
+### 高階硬體建議
+
+如果你未來有更高階的 GPU 或更大的記憶體，建議優先評估：
+
+- `Gemma 4 31B`
+- `Gemma 4 26B A4B`
+
+這兩個型號在官方 benchmark 與社群 local coding 測試中，都比 `Gemma 4 E4B` 更有機會成為可用的 coding / edit 模型。  
+目前 `CodeWorker` repo 尚未把它們接進預設下載流程，這一版只先保留為後續高階硬體候選路線。
 
 ### 開啟專案
 
@@ -397,6 +432,12 @@ scripts\start-server.cmd
 scripts\start-server.cmd codellama
 ```
 
+改用 Gemma 4：
+
+```cmd
+scripts\start-server.cmd gemma4
+```
+
 ### 開啟專案級 code chat
 
 ```cmd
@@ -407,6 +448,12 @@ scripts\code-chat.cmd C:\path\to\project
 
 ```cmd
 scripts\code-chat.cmd C:\path\to\project codellama
+```
+
+改用 Gemma 4：
+
+```cmd
+scripts\code-chat.cmd C:\path\to\project gemma4
 ```
 
 用 browser 模式：
@@ -526,6 +573,11 @@ scripts\code-chat.cmd C:\path\to\project qwen --browser
 
 ## 12. 版本歷程
 
+### V0.95b
+
+- 將目前 repo 內已完成但尚未發布的 `Gemma 4 E4B` 支援與穩定化調整收斂成正式版本
+- 同步更新專案版號，作為後續雙語 README 與 UI 語言切換的基線版本
+
 ### V0.94b
 
 - 移除 `修改建議` 的 modal / 獨立視窗
@@ -534,6 +586,12 @@ scripts\code-chat.cmd C:\path\to\project qwen --browser
 - `清空對話` 會同步清掉目前的 `pendingEdit`
 - 修正 live `H:\CodeWorker` 與工作目錄版本容易不同步的使用流程
 - README 新增 Web UI 截圖與畫面導覽說明
+- 新增真正的 `Gemma 4 E4B` 作為第三個可選模型，保留 `Qwen` 為預設
+- 針對 `Gemma 4 E4B` 的 `create_edit_plan()` 補上較保守的單筆扁平 schema 與 JSON 容錯，降低結構化建議失敗率
+- `Gemma 4` 改為較接近官方格式的訊息組裝方式，並加入 `precise -> advisory -> text fallback` 降級流程
+- 當 `Gemma 4` 無法產生合法 JSON 時，改由本地區段定位補出 `path / target / location / 區段原文`，避免只剩空白錯誤
+- `Gemma 4 E4B` 的 `edit plan` 進一步改成 `locator -> patch -> advisory fallback` 兩段式流程，降低單次結構化輸出失敗率
+- `README` 新增 `Gemma 4 E4B` 與硬體的關係說明，明確區分 `E4B` 與高階硬體下可評估的 `Gemma 4 31B / 26B A4B`
 
 ### V0.93b
 
@@ -562,6 +620,11 @@ scripts\code-chat.cmd C:\path\to\project qwen --browser
 - 目前畫面上只保留 `送出` 與 `清空對話` 兩個主要互動按鈕；修改建議已整合進主對話流程。
 - 目前不支援截圖貼上、OCR 或 Vision 模型整合；錯誤回報請先用文字描述。
 - 若需求跨很多檔案、需要大型 refactor，優先考慮 `scripts\code-chat.cmd`。
+- `Gemma 4 E4B` 目前是新增可選模型，不建議在未完成品質對照前取代 `Qwen 2.5 Coder 7B`。
+- `Gemma 4 E4B` 已完成官方 GGUF / `llama.cpp` 啟動驗證，但目前在結構化 `修改建議` 與 refine 穩定性上仍弱於 `Qwen 2.5 Coder 7B`，因此仍建議把 `Qwen` 保留為預設模型。
+- `Gemma 4 E4B` 的 `edit plan` 目前採較保守的 `locator -> patch -> advisory fallback` 路線；若需要高穩定度的修改建議，仍優先建議使用 `Qwen 2.5 Coder 7B`。
+- `Gemma 4 E4B` 的問題不應只歸因於硬體不足；硬體主要影響速度、可承受 context、以及是否能評估更大的 `Gemma 4` 型號。
+- 若有更高階 GPU 或更大記憶體，後續較值得評估的是 `Gemma 4 31B` 或 `Gemma 4 26B A4B`，而不是期待 `Gemma 4 E4B` 在同樣任務上直接超越 `Qwen 2.5 Coder 7B`。
 
 ---
 
@@ -582,7 +645,9 @@ scripts\bootstrap.cmd
 scripts\install-aider.cmd
 scripts\launch-webui.cmd
 scripts\start-server.cmd
+scripts\start-server.cmd gemma4
 scripts\code-chat.cmd C:\some\repo
+scripts\code-chat.cmd C:\some\repo gemma4
 ```
 
 確認：
@@ -592,6 +657,16 @@ scripts\code-chat.cmd C:\some\repo
 - `專案摘要`、`檔案樹`、`檔案預覽`、`對話`、`修改建議` 都能正常使用
 - 長內容時會在區塊內捲動，不會讓整頁無限拉長
 - 可在主對話框產生修改建議並正常顯示 diff 預覽
+- `Gemma 4 E4B` 與 `Qwen` 可在同一組 pinned files 和同一組題目下做對照評估
+
+實際評估重點：
+
+- `Gemma 4 E4B` 已證實可在 `llama.cpp + GGUF + Windows 本機 + USB` 這條架構下啟動
+- `Gemma 4 E4B` 的專案入口判讀與單檔函式名稱定位可用
+- 但在 `修改建議` 的結構化 JSON 輸出與 refine 回合穩定性，目前仍明顯不如 `Qwen 2.5 Coder 7B`
+- 因此現階段建議：
+  - 預設仍使用 `Qwen 2.5 Coder 7B`
+  - `Gemma 4 E4B` 作為對照評估或特殊需求時的可選模型
 
 ---
 

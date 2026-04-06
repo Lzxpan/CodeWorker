@@ -36,6 +36,20 @@ function Clear-Directory {
     Get-ChildItem -LiteralPath $Path -Force | Remove-Item -Recurse -Force
 }
 
+function Get-PortablePythonExe {
+    $rootDir = Get-RootDir
+    $candidates = @(
+        (Join-Path $rootDir "runtime\WinPython\python\python.exe"),
+        (Join-Path $rootDir "runtime\WinPython\python.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
 function Get-GitHubReleaseAsset {
     param(
         [string]$Repo,
@@ -48,9 +62,9 @@ function Get-GitHubReleaseAsset {
         "Accept"     = "application/vnd.github+json"
     }
     if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
-        $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/latest"
+        $release = Invoke-JsonApi -Headers $headers -Url "https://api.github.com/repos/$Repo/releases/latest"
     } else {
-        $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/tags/$ReleaseTag"
+        $release = Invoke-JsonApi -Headers $headers -Url "https://api.github.com/repos/$Repo/releases/tags/$ReleaseTag"
     }
     $asset = $release.assets | Where-Object { $_.name -match $AssetPattern } | Select-Object -First 1
     if (-not $asset) {
@@ -72,7 +86,83 @@ function Download-File {
     )
 
     Ensure-Directory -Path (Split-Path -Parent $Destination)
-    Invoke-WebRequest -Uri $Url -Headers $Headers -OutFile $Destination
+    try {
+        Invoke-WebRequest -Uri $Url -Headers $Headers -OutFile $Destination
+        return
+    } catch {
+        $curlError = $_
+        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if ($curl) {
+            $arguments = @("-L", "--fail", "--silent", "--show-error", "--ssl-no-revoke", "-o", $Destination)
+            foreach ($entry in $Headers.GetEnumerator()) {
+                $arguments += @("-H", "$($entry.Key): $($entry.Value)")
+            }
+            $arguments += $Url
+
+            & $curl.Source @arguments
+            if ($LASTEXITCODE -eq 0) {
+                return
+            }
+        }
+
+        $pythonExe = Get-PortablePythonExe
+        if (-not $pythonExe) {
+            throw $curlError
+        }
+
+        $headersJson = ($Headers | ConvertTo-Json -Compress)
+        $headersBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($headersJson))
+        $pythonCode = @'
+import base64
+import json
+import sys
+import urllib.request
+
+url = sys.argv[1]
+destination = sys.argv[2]
+headers = json.loads(base64.b64decode(sys.argv[3]).decode('utf-8'))
+request = urllib.request.Request(url, headers=headers)
+with urllib.request.urlopen(request, timeout=300) as response, open(destination, 'wb') as handle:
+    while True:
+        chunk = response.read(1024 * 1024)
+        if not chunk:
+            break
+        handle.write(chunk)
+'@
+        & $pythonExe -c $pythonCode $Url $Destination $headersBase64
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download file with portable Python: $Url"
+        }
+    }
+}
+
+function Invoke-JsonApi {
+    param(
+        [string]$Url,
+        [hashtable]$Headers = @{}
+    )
+
+    try {
+        return Invoke-RestMethod -Headers $Headers -Uri $Url
+    } catch {
+        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if (-not $curl) {
+            throw
+        }
+
+        $arguments = @("-L", "--fail", "--silent", "--show-error")
+        foreach ($entry in $Headers.GetEnumerator()) {
+            $arguments += @("-H", "$($entry.Key): $($entry.Value)")
+        }
+        $arguments += $Url
+
+        $output = & $curl.Source @arguments
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($output)) {
+            throw "Failed to fetch JSON from $Url with curl.exe"
+        }
+
+        return $output | ConvertFrom-Json
+    }
 }
 
 function Expand-ZipPayload {
@@ -138,7 +228,16 @@ function Get-HuggingFaceFiles {
         $headers["Authorization"] = "Bearer $Token"
     }
 
-    $model = Invoke-RestMethod -Headers $headers -Uri "https://huggingface.co/api/models/$Repo"
+    if ($Pattern -notmatch '[\*\?\[\]]') {
+        return @(
+            [pscustomobject]@{
+                Name = $Pattern
+                Url  = "https://huggingface.co/$Repo/resolve/main/${Pattern}?download=true"
+            }
+        )
+    }
+
+    $model = Invoke-JsonApi -Headers $headers -Url "https://huggingface.co/api/models/$Repo"
     $wildcard = [System.Management.Automation.WildcardPattern]::new($Pattern, [System.Management.Automation.WildcardOptions]::IgnoreCase)
     $matches = $model.siblings | Where-Object { $wildcard.IsMatch($_.rfilename) } | Sort-Object rfilename
 

@@ -31,6 +31,14 @@
       "filePattern": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
       "targetDir": "models/qwen2.5-coder-7b-instruct-q4"
     },
+    "gemma4": {
+      "enabled": true,
+      "provider": "huggingface",
+      "repo": "ggml-org/gemma-4-E4B-it-GGUF",
+      "filePattern": "gemma-4-e4b-it-Q4_K_M.gguf",
+      "targetDir": "models/gemma4-e4b-it-q4",
+      "note": "Official GGUF route for Gemma 4 E4B Instruct via ggml-org."
+    },
     "codellama": {
       "enabled": false,
       "provider": "huggingface",

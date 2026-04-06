@@ -15,6 +15,7 @@ call :resolve_model "%MODEL_KEY%"
 if errorlevel 1 exit /b 1
 
 set "LOG_FILE=%LOGS_DIR%\llama-server-%MODEL_KEY%-%STAMP%.log"
+set "ERR_FILE=%LOGS_DIR%\llama-server-%MODEL_KEY%-%STAMP%.err.log"
 echo [LOG_FILE] %LOG_FILE%
 
 if not exist "%LLAMA_SERVER%" (
@@ -72,7 +73,15 @@ if not errorlevel 1 (
 )
 
 echo [INFO] Starting llama-server with "%MODEL_FILE%"
-start "USB Code Assistant Server [%MODEL_ALIAS%]" /min cmd /c ""%LLAMA_SERVER%" --host 127.0.0.1 --port %PORT% --alias %MODEL_ALIAS% -m "%MODEL_FILE%" -c 8192 --threads %NUMBER_OF_PROCESSORS% --n-gpu-layers 0 > "%LOG_FILE%" 2>&1"
+if not exist "%WINPY_PYTHON%" (
+    call :emit_error RUNTIME_MISSING "Portable Python runtime not found." "%WINPY_PYTHON%"
+    exit /b 1
+)
+"%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --context 8192 --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul
+if errorlevel 1 (
+    call :emit_error MODEL_START_FAILED "Failed to launch llama-server process." "%LLAMA_SERVER%"
+    exit /b 1
+)
 
 set /a RETRIES=30
 :wait_loop
@@ -92,6 +101,7 @@ goto wait_loop
 echo [OK] Server is ready on http://127.0.0.1:%PORT%/v1
 echo [INFO] Model alias: %MODEL_ALIAS%
 echo [INFO] Log file: "%LOG_FILE%"
+if exist "%ERR_FILE%" echo [INFO] Error log: "%ERR_FILE%"
 exit /b 0
 
 :resolve_model
@@ -99,6 +109,11 @@ set "MODEL_INPUT=%~1"
 if /I "%MODEL_INPUT%"=="qwen" (
     set "MODEL_DIR=%MODELS_DIR%\qwen2.5-coder-7b-instruct-q4"
     set "MODEL_ALIAS=qwen-local"
+    exit /b 0
+)
+if /I "%MODEL_INPUT%"=="gemma4" (
+    set "MODEL_DIR=%MODELS_DIR%\gemma4-e4b-it-q4"
+    set "MODEL_ALIAS=gemma4-local"
     exit /b 0
 )
 if /I "%MODEL_INPUT%"=="codellama" (
@@ -110,7 +125,7 @@ call :emit_error MODEL_START_FAILED "Unknown model." "%MODEL_INPUT%"
 exit /b 1
 
 :check_memory
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$minimum = 16GB; $total = [int64](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory; if ($total -ge $minimum) { exit 0 } else { Write-Host ('[ERROR_CODE] RUNTIME_INVALID'); Write-Host ('[ERROR_MESSAGE] Need at least 16GB RAM.'); Write-Host ('[ERROR_DETAILS] Detected: {0:N1} GB' -f ($total / 1GB)); exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $minimum = 16GB; $total = [int64](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; if ($total -ge $minimum) { exit 0 } else { Write-Host ('[ERROR_CODE] RUNTIME_INVALID'); Write-Host ('[ERROR_MESSAGE] Need at least 16GB RAM.'); Write-Host ('[ERROR_DETAILS] Detected: {0:N1} GB' -f ($total / 1GB)); exit 1 } } catch { Write-Host '[WARN] Unable to determine total physical memory; skipping RAM check.'; exit 0 }"
 exit /b %ERRORLEVEL%
 
 :find_model_file

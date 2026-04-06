@@ -3,7 +3,7 @@ setlocal EnableExtensions
 call "%~dp0_env.cmd"
 
 if "%~1"=="" (
-    echo Usage: %~nx0 ^<project_path^> [qwen^|codellama] [--browser]
+    echo Usage: %~nx0 ^<project_path^> [qwen^|gemma4^|codellama] [--browser]
     exit /b 1
 )
 
@@ -25,6 +25,12 @@ if /I "%~2"=="qwen" (
     goto parse_optional_args
 )
 
+if /I "%~2"=="gemma4" (
+    set "MODEL_KEY=gemma4"
+    shift
+    goto parse_optional_args
+)
+
 if /I "%~2"=="codellama" (
     set "MODEL_KEY=codellama"
     shift
@@ -38,7 +44,7 @@ if /I "%~2"=="--browser" (
 )
 
 echo [ERROR] Unknown option: "%~2"
-echo         Supported options: qwen, codellama, --browser
+echo         Supported options: qwen, gemma4, codellama, --browser
 exit /b 1
 
 :args_done
@@ -84,10 +90,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if /I "%MODEL_KEY%"=="gemma4" (
+    set "AIDER_MODEL=gemma4"
+)
 if /I "%MODEL_KEY%"=="codellama" (
     set "AIDER_MODEL=codellama"
 )
-if /I not "%MODEL_KEY%"=="codellama" (
+if /I "%MODEL_KEY%"=="qwen" (
     set "AIDER_MODEL=qwen"
 )
 
