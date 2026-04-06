@@ -21,8 +21,8 @@ const state = {
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V0.95b Web UI",
-    brandTitle: "CodeWorker V0.95b",
+    pageTitle: "CodeWorker V0.96b Web UI",
+    brandTitle: "CodeWorker V0.96b",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -61,7 +61,6 @@ const I18N = {
     placeholders: {
       projectPath: "點擊這裡選擇專案資料夾",
       chatDefault: "輸入你的問題或修改需求，例如：請分析登入流程涉及哪些檔案？",
-      chatRefine: "直接描述上一版建議哪裡錯了，例如：piece 不存在，請改用現有變數。",
     },
     helpSections: {
       usage: "使用方式",
@@ -133,8 +132,8 @@ const I18N = {
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V0.95b Web UI",
-    brandTitle: "CodeWorker V0.95b",
+    pageTitle: "CodeWorker V0.96b Web UI",
+    brandTitle: "CodeWorker V0.96b",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -173,7 +172,6 @@ const I18N = {
     placeholders: {
       projectPath: "Click here to choose a project folder",
       chatDefault: "Enter your question or change request, for example: Which files are involved in the login flow?",
-      chatRefine: "Describe what is wrong with the previous suggestion, for example: piece does not exist, please use an existing variable.",
     },
     helpSections: {
       usage: "How to use",
@@ -269,19 +267,19 @@ const HELP_CONTENT = {
   "model-key": {
     "zh-Hant": {
       title: "模型",
-      description: "選擇本次要用的本地模型。預設是 Qwen；Gemma 4 E4B 是評估中可選模型；Code Llama 是備援模型。",
+      description: "選擇本次要用的本地模型。預設是 Qwen；Gemma 4 E4B 是評估中可選模型。一般對話與分析會直接顯示較接近模型原始輸出的內容。",
       usage: [
         "一般建議使用 Qwen 2.5 Coder 7B。",
-        "若要比較 Gemma 4 E4B 的分析與修改建議表現，可切換到 Gemma 4 E4B。",
+        "若要比較 Gemma 4 E4B 的分析與回答風格，可切換到 Gemma 4 E4B。",
         "切換模型後需重新開啟專案，系統才會改用新模型。",
       ],
     },
     en: {
       title: "Model",
-      description: "Select the local model for this session. Qwen is the default; Gemma 4 E4B is an evaluation option; Code Llama is a fallback model.",
+      description: "Select the local model for this session. Qwen is the default; Gemma 4 E4B is an evaluation option. General chat and analysis now stay closer to the model's original output.",
       usage: [
         "Qwen 2.5 Coder 7B is still the recommended default.",
-        "Switch to Gemma 4 E4B if you want to compare its analysis or edit-plan behavior.",
+        "Switch to Gemma 4 E4B if you want to compare its raw analysis and response style.",
         "After changing the model, reopen the project so the new model is actually used.",
       ],
     },
@@ -329,7 +327,7 @@ const HELP_CONTENT = {
   "analyze-project": {
     "zh-Hant": {
       title: "分析專案",
-      description: "請模型根據目前已套用的釘選檔案做總覽分析，通常會整理入口、核心模組、設定檔與測試位置。",
+      description: "請模型根據目前已套用的釘選檔案做總覽分析。結果會直接保留較接近模型原始輸出的內容，不再做額外格式修飾。",
       usage: [
         "先在檔案樹勾選要分析的檔案，再按「套用釘選」。",
         "分析結果會出現在中間對話區。",
@@ -337,7 +335,7 @@ const HELP_CONTENT = {
     },
     en: {
       title: "Analyze project",
-      description: "Ask the model to summarize the currently pinned files. It usually points out entry points, core modules, config files, and test locations.",
+      description: "Ask the model to summarize the currently pinned files. The result is shown closer to the model's original output instead of being heavily reformatted.",
       usage: [
         "Check the files you want in the file tree, then click Apply pins first.",
         "The analysis result appears in the main chat panel.",
@@ -446,7 +444,7 @@ const HELP_CONTENT = {
       description: "把你在檔案樹中勾選的檔案設成目前唯一的模型上下文。",
       usage: [
         "先在檔案樹勾選想關注的檔案。",
-        "按下後，模型之後分析、對話與修改建議只會根據這些檔案回答。",
+        "按下後，模型之後分析與對話只會根據這些檔案回答。",
       ],
     },
     en: {
@@ -454,7 +452,7 @@ const HELP_CONTENT = {
       description: "Turn the checked files in the file tree into the active model context.",
       usage: [
         "Check the files you want to focus on in the file tree.",
-        "After clicking Apply pins, analysis, chat, and edit suggestions use only those files as context.",
+        "After clicking Apply pins, analysis and chat use only those files as context.",
       ],
     },
   },
@@ -518,7 +516,7 @@ const HELP_CONTENT = {
       description: "把目前輸入框的問題送到模型。",
       usage: [
         "送出前請確認已開啟專案。",
-        "若你輸入的是修改需求，系統會直接在主對話框回覆修改建議與 diff。",
+        "回答會直接保留較接近模型原始輸出的內容，不再額外做大幅清洗或壓縮。",
       ],
     },
     en: {
@@ -526,7 +524,7 @@ const HELP_CONTENT = {
       description: "Send the current input to the model.",
       usage: [
         "Make sure the project is opened before sending.",
-        "If the input is a change request, the model replies with a structured code suggestion directly in the main chat.",
+        "Replies now stay closer to the model's original output instead of being heavily cleaned up.",
       ],
     },
   },
@@ -536,7 +534,7 @@ const HELP_CONTENT = {
       description: "清掉目前頁面上的對話歷史，讓你重新開始一輪提問。",
       usage: [
         "只清除這次 web UI 的對話內容。",
-        "也會一併清掉目前暫存的修改建議狀態。",
+        "不會改變目前已套用的釘選檔案。",
       ],
     },
     en: {
@@ -544,7 +542,7 @@ const HELP_CONTENT = {
       description: "Clear the current chat history in this page so you can start over.",
       usage: [
         "This only clears the current Web UI conversation history.",
-        "It also clears the current pending edit suggestion state.",
+        "It does not change the currently applied pinned files.",
       ],
     },
   },
@@ -952,10 +950,6 @@ function buildPendingEditText(plan) {
 }
 
 function updateChatPlaceholder() {
-  if (state.pendingEdit) {
-    elements.chatInput.placeholder = t("placeholders.chatRefine");
-    return;
-  }
   elements.chatInput.placeholder = t("placeholders.chatDefault");
 }
 

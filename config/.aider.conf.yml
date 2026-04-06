@@ -1,7 +1,6 @@
 alias:
   - "qwen:openai/qwen-local"
   - "gemma4:openai/gemma4-local"
-  - "codellama:openai/codellama-local"
 
 auto-commits: true
 dirty-commits: true

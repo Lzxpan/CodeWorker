@@ -1,4 +1,4 @@
-# CodeWorker V0.95b
+# CodeWorker V0.96b
 
 > 離線、可攜、以隱私與資安為優先的 Windows 本地 AI code assistant。
 
@@ -36,21 +36,6 @@
   - 可選的評估中模型
   - 已完成 `llama.cpp + GGUF + Windows 本機 + USB` 架構驗證
   - 目前可啟動、可定位，但修改建議穩定性仍弱於 `Qwen`
-- `Code Llama 7B`
-  - 備援模型
-  - 中文互動通常較弱
-
-### `Gemma 4 E4B` 與硬體的關係
-
-- `Gemma 4 E4B` 不如預期，不能只歸因於硬體不足
-- 硬體主要影響：
-  - 啟動速度
-  - 推理速度
-  - 可承受的 context
-  - 能否改評估更大的 `Gemma 4` 型號
-- 若有更高階 GPU / 更大記憶體，較值得評估的是：
-  - `Gemma 4 31B`
-  - `Gemma 4 26B A4B`
 
 ---
 
@@ -130,6 +115,12 @@ http://127.0.0.1:8764
 - 切換本次要使用的本地模型
 - 切換後要重新 `開啟專案`
 
+### 回應方式
+
+- 主對話框與 `分析專案` 會直接保留較接近模型原始輸出的內容
+- 系統不再對這兩條路徑做大幅回覆清洗或風格壓縮
+- 模型仍然只會根據 **已套用釘選檔案** 回答
+
 ### 開啟專案
 
 - 驗證路徑
@@ -170,7 +161,6 @@ scripts\start-server.cmd
 
 ```cmd
 scripts\start-server.cmd gemma4
-scripts\start-server.cmd codellama
 ```
 
 ### 啟動專案級對話

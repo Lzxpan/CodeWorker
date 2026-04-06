@@ -1,4 +1,4 @@
-# CodeWorker V0.95b
+# CodeWorker V0.96b
 
 Offline AI code assistant for **Windows local LLM**, **USB portable** deployment, and **privacy-first secure code analysis**.
 
@@ -46,7 +46,6 @@ Current model positioning:
 
 - `Qwen 2.5 Coder 7B`: default and recommended
 - `Gemma 4 E4B`: optional evaluation model, not the default
-- `Code Llama 7B`: fallback model
 
 ---
 
@@ -93,6 +92,12 @@ http://127.0.0.1:8764
 3. Check files in the file tree
 4. Click `Apply pins`
 5. Ask questions in the main chat
+
+### Response behavior
+
+- General chat and `Analyze project` now stay closer to each model's original output
+- CodeWorker no longer adds heavy reply cleanup or style compression in these two flows
+- The applied pinned files are still the only trusted context source
 
 ---
 

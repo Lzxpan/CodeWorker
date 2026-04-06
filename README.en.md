@@ -1,4 +1,4 @@
-# CodeWorker V0.95b
+# CodeWorker V0.96b
 
 > A privacy-first, offline AI code assistant for Windows, built for local LLM workflows and USB portable deployment.
 
@@ -37,24 +37,6 @@
   - optional evaluation model
   - validated for the `llama.cpp + GGUF + Windows local + USB` architecture
   - can start and localize target code regions, but is still less stable than `Qwen` for edit suggestions
-- `Code Llama 7B`
-  - fallback model
-
-### Gemma 4 and hardware
-
-`Gemma 4 E4B` underperforming is **not only a hardware issue**.
-
-Hardware mainly affects:
-
-- startup speed
-- inference speed
-- context budget
-- whether you can move on to larger `Gemma 4` variants
-
-If you have stronger hardware, the more promising next candidates are:
-
-- `Gemma 4 31B`
-- `Gemma 4 26B A4B`
 
 ---
 
@@ -132,6 +114,12 @@ http://127.0.0.1:8764
 - Switches the local model for the current session
 - Reopen the project after changing the model
 
+### Response behavior
+
+- Main chat and `Analyze project` now stay closer to the model's original output
+- The system no longer applies heavy reply cleanup or style compression
+- Answers still use only the **applied pinned files** as trusted context
+
 ### Open project
 
 - validates the path
@@ -172,7 +160,6 @@ Switch model:
 
 ```cmd
 scripts\start-server.cmd gemma4
-scripts\start-server.cmd codellama
 ```
 
 ### Start project-level chat

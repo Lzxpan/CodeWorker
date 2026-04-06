@@ -55,7 +55,6 @@ def main() -> int:
                 "--n-gpu-layers",
                 "0",
             ],
-            stdin=subprocess.DEVNULL,
             stdout=stdout_handle,
             stderr=stderr_handle,
             creationflags=DETACHED_FLAGS,

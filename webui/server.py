@@ -25,7 +25,6 @@ SCRIPTS_DIR = ROOT_DIR / "scripts"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONFIG_DIR = ROOT_DIR / "config"
 BOOTSTRAP_MANIFEST_PATH = CONFIG_DIR / "bootstrap.manifest.json"
-LLM_ENDPOINT = "http://127.0.0.1:8080/v1/chat/completions"
 MAX_SCAN_FILES = 800
 MAX_TREE_ITEMS = 400
 MAX_CONTEXT_FILES = 4
@@ -38,6 +37,38 @@ MAX_TREE_CONTEXT_ITEMS = 30
 MAX_CHAT_HISTORY_ITEMS = 4
 ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
+MODEL_PORTS = {
+    "qwen": 8080,
+    "gemma4": 8081,
+}
+MODEL_DEFAULT_CONTEXT = {
+    "qwen": 16384,
+    "gemma4": 4096,
+}
+MODEL_CHAT_MAX_TOKENS = {
+    "qwen": 1400,
+    "gemma4": 3200,
+}
+MODEL_ANALYZE_MAX_TOKENS = {
+    "qwen": 1600,
+    "gemma4": 2800,
+}
+MODEL_CHAT_TIMEOUT_SECONDS = {
+    "qwen": 180,
+    "gemma4": 240,
+}
+MODEL_ANALYZE_TIMEOUT_SECONDS = {
+    "qwen": 180,
+    "gemma4": 240,
+}
+MODEL_HISTORY_LIMIT = {
+    "qwen": 4,
+    "gemma4": 1,
+}
+MODEL_CONTEXT_LIMITS = {
+    "qwen": {"max_files": 4, "file_chars": 3600, "total_chars": 12000, "single_file_chars": 22000, "single_total_chars": 22000},
+    "gemma4": {"max_files": 2, "file_chars": 2600, "total_chars": 9000, "single_file_chars": 18000, "single_total_chars": 18000},
+}
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     "dist", "build", "target", "out", ".idea", ".vscode", ".next", ".nuxt", ".cache", "coverage",
@@ -132,9 +163,56 @@ HF_API_HEADERS = {
     "Accept": "application/json",
 }
 DETACHED_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-PROCESS_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 MODEL_SERVER_PROCESSES: Dict[Tuple[str, int], subprocess.Popen] = {}
 MODEL_SERVER_LOG_HANDLES: Dict[Tuple[str, int], Tuple[object, object]] = {}
+
+
+def get_model_key_from_alias(model_alias: str) -> str:
+    lowered = (model_alias or "").lower()
+    if lowered.startswith("gemma4"):
+        return "gemma4"
+    return "qwen"
+
+
+def get_model_port(model_name: str) -> int:
+    model_key = get_model_key_from_alias(model_name)
+    return MODEL_PORTS.get(model_key, MODEL_PORTS["qwen"])
+
+
+def get_model_endpoint(model_name: str) -> str:
+    return f"http://127.0.0.1:{get_model_port(model_name)}/v1/chat/completions"
+
+
+def get_model_context_limit(model_key: str) -> int:
+    return MODEL_DEFAULT_CONTEXT.get(model_key, MODEL_DEFAULT_CONTEXT["qwen"])
+
+
+def get_chat_history_limit(model_key: str) -> int:
+    return MODEL_HISTORY_LIMIT.get(model_key, MODEL_HISTORY_LIMIT["qwen"])
+
+
+def get_chat_max_tokens(model_key: str) -> int:
+    return MODEL_CHAT_MAX_TOKENS.get(model_key, MODEL_CHAT_MAX_TOKENS["qwen"])
+
+
+def get_analyze_max_tokens(model_key: str) -> int:
+    return MODEL_ANALYZE_MAX_TOKENS.get(model_key, MODEL_ANALYZE_MAX_TOKENS["qwen"])
+
+
+def get_chat_timeout_seconds(model_key: str) -> int:
+    return MODEL_CHAT_TIMEOUT_SECONDS.get(model_key, MODEL_CHAT_TIMEOUT_SECONDS["qwen"])
+
+
+def get_analyze_timeout_seconds(model_key: str) -> int:
+    return MODEL_ANALYZE_TIMEOUT_SECONDS.get(model_key, MODEL_ANALYZE_TIMEOUT_SECONDS["qwen"])
+
+
+def get_context_limits(model_key: str, single_file_focus: bool) -> Dict[str, int]:
+    limits = MODEL_CONTEXT_LIMITS.get(model_key, MODEL_CONTEXT_LIMITS["qwen"]).copy()
+    if single_file_focus:
+        limits["file_chars"] = limits["single_file_chars"]
+        limits["total_chars"] = limits["single_total_chars"]
+    return limits
 
 
 def make_error(
@@ -380,8 +458,6 @@ def check_minimum_memory() -> None:
 def resolve_model_details(model_key: str) -> Tuple[Path, str]:
     if model_key == "gemma4":
         return ROOT_DIR / "models" / "gemma4-e4b-it-q4", "gemma4-local"
-    if model_key == "codellama":
-        return ROOT_DIR / "models" / "codellama-7b-instruct-q4", "codellama-local"
     return ROOT_DIR / "models" / "qwen2.5-coder-7b-instruct-q4", "qwen-local"
 
 
@@ -424,6 +500,81 @@ def is_port_listening(port: int) -> bool:
     return result.returncode == 0
 
 
+def get_listening_pid(port: int) -> Optional[int]:
+    if os.name != "nt":
+        return None
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            f"try {{ (Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction Stop | Select-Object -First 1 -ExpandProperty OwningProcess) }} catch {{ '' }}",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=10,
+    )
+    text = result.stdout.strip()
+    if text.isdigit():
+        return int(text)
+    return None
+
+
+def get_process_commandline(pid: int) -> str:
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            f"try {{ (Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" -ErrorAction Stop).CommandLine }} catch {{ '' }}",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=15,
+    )
+    return result.stdout.strip()
+
+
+def kill_process(pid: int) -> bool:
+    result = subprocess.run(
+        ["taskkill", "/PID", str(pid), "/F"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=15,
+    )
+    return result.returncode == 0
+
+
+def try_reclaim_codeworker_port(port: int) -> Optional[str]:
+    pid = get_listening_pid(port)
+    if not pid:
+        return None
+    commandline = get_process_commandline(pid)
+    lowered = commandline.lower()
+    if "codeworker" in lowered and ("launch_llama_server.py" in lowered or "llama-server.exe" in lowered):
+        if kill_process(pid):
+            for _ in range(10):
+                if not is_port_listening(port):
+                    return f"Reclaimed CodeWorker model port {port} by stopping PID {pid}."
+                threading.Event().wait(1)
+            return f"Attempted to reclaim CodeWorker model port {port}, but it is still listening."
+        return f"Failed to stop stale CodeWorker model server on PID {pid}."
+    return f"Port {port} is occupied by PID {pid}: {commandline or 'unknown process'}"
+
+
 def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str]:
     llama_server = ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
     if not llama_server.exists():
@@ -459,9 +610,10 @@ def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str]:
     return model_file, model_alias
 
 
-def ensure_local_model_server(model_key: str, port: int = 8080) -> Dict[str, object]:
-    if model_key not in {"qwen", "gemma4", "codellama"}:
+def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dict[str, object]:
+    if model_key not in {"qwen", "gemma4"}:
         raise RuntimeError(json.dumps(make_error("MODEL_START_FAILED", "Unknown model.", model_key)))
+    port = port or get_model_port(model_key)
 
     check_minimum_memory()
     model_file, model_alias = ensure_runtime_and_model(model_key)
@@ -471,16 +623,20 @@ def ensure_local_model_server(model_key: str, port: int = 8080) -> Dict[str, obj
         return {"modelAlias": model_alias, "logPath": None, "alreadyRunning": True}
 
     if is_port_listening(port):
-        raise RuntimeError(
-            json.dumps(
-                make_error(
-                    "MODEL_START_FAILED",
-                    "Port is already in use.",
-                    f"Port {port} is occupied by another process.",
-                    extra={"modelKey": model_key},
+        reclaim_details = try_reclaim_codeworker_port(port)
+        if is_model_ready(model_alias, port):
+            return {"modelAlias": model_alias, "logPath": None, "alreadyRunning": True}
+        if is_port_listening(port):
+            raise RuntimeError(
+                json.dumps(
+                    make_error(
+                        "MODEL_START_FAILED",
+                        "Port is already in use.",
+                        reclaim_details or f"Port {port} is occupied by another process.",
+                        extra={"modelKey": model_key},
+                    )
                 )
             )
-        )
 
     stamp = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "[DateTime]::Now.ToString('yyyyMMdd-HHmmss')"],
@@ -493,51 +649,31 @@ def ensure_local_model_server(model_key: str, port: int = 8080) -> Dict[str, obj
     ).stdout.strip() or "unknown"
     log_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.log"
     err_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.err.log"
-    stdout_handle = open(log_path, "ab")
-    stderr_handle = open(err_path, "ab")
-    process = subprocess.Popen(
+    subprocess.Popen(
         [
-            str(llama_server),
+            sys.executable,
+            str(SCRIPTS_DIR / "launch_llama_server.py"),
+            "--server", str(llama_server),
             "--host", "127.0.0.1",
             "--port", str(port),
             "--alias", model_alias,
-            "-m", str(model_file),
-            "-c", "8192",
+            "--model", str(model_file),
+            "--context", str(get_model_context_limit(model_key)),
             "--threads", str(os.cpu_count() or 4),
-            "--n-gpu-layers", "0",
+            "--log", str(log_path),
+            "--err", str(err_path),
         ],
         cwd=str(ROOT_DIR),
         stdin=subprocess.DEVNULL,
-        stdout=stdout_handle,
-        stderr=stderr_handle,
-        creationflags=PROCESS_FLAGS,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=DETACHED_FLAGS,
         close_fds=True,
     )
-    MODEL_SERVER_PROCESSES[(model_alias, port)] = process
-    MODEL_SERVER_LOG_HANDLES[(model_alias, port)] = (stdout_handle, stderr_handle)
 
     for _ in range(60):
         if is_model_ready(model_alias, port):
             return {"modelAlias": model_alias, "logPath": str(log_path), "alreadyRunning": False}
-        if process.poll() is not None:
-            details = ""
-            if log_path.exists():
-                details += log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-            if err_path.exists():
-                stderr_text = err_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-                if stderr_text:
-                    details += ("\n" if details else "") + stderr_text
-            raise RuntimeError(
-                json.dumps(
-                    make_error(
-                        "MODEL_START_FAILED",
-                        "llama-server process exited before becoming ready.",
-                        details or f"Exit code: {process.returncode}",
-                        log_path=str(log_path),
-                        extra={"modelKey": model_key},
-                    )
-                )
-            )
         threading.Event().wait(2)
 
     details = ""
@@ -1246,6 +1382,81 @@ def normalize_message_roles(messages: List[Dict[str, str]]) -> List[Dict[str, st
     return normalized
 
 
+def sanitize_gemma_reply(content: str) -> str:
+    cleaned = content.strip()
+    cleaned = re.sub(r"^\s*根據您提供的[^\n。！？]*[。！？]?\s*", "", cleaned)
+    cleaned = re.sub(r"^\s*以下是根據[^\n。！？]*[。！？]?\s*", "", cleaned)
+    cleaned = re.sub(r"^\s*以下為[^\n。！？]*[。！？]?\s*", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def sanitize_qwen_reply(content: str) -> str:
+    cleaned = content.strip()
+    cleaned = re.sub(r"^\s*以下是根據[^\n。！？]*[。！？]?\s*", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def sanitize_model_reply(model_alias: str, content: str, raw_mode: bool = False) -> str:
+    if raw_mode:
+        return str(content or "").strip()
+    if model_alias.startswith("gemma4"):
+        return sanitize_gemma_reply(content)
+    if model_alias.startswith("qwen"):
+        return sanitize_qwen_reply(content)
+    return content.strip()
+
+
+def get_continue_on_length(model_key: str) -> int:
+    if model_key == "gemma4":
+        return 2
+    if model_key == "qwen":
+        return 1
+    return 0
+
+
+def build_chat_system_prompt(model_key: str) -> str:
+    if model_key == "gemma4":
+        return (
+            "你是本機離線 code assistant。請使用繁體中文直接回答重點。"
+            "第一段先給結論，不要重述問題、不要說『根據您提供』、不要做長篇鋪陳。"
+            "若需要列點，最多 5 點。若資訊不足，直接回答不確定。"
+        )
+    return (
+        "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案回答。"
+        "檔案預覽僅供閱讀，不是模型上下文來源。若資訊不足請直接回答不確定。"
+        "若問題是在問函式名稱、方法名稱、類別名稱、變數名稱、檔案名稱或事件處理函式，"
+        "請先從上下文找出精確 identifier，再直接回覆該名稱與所在檔案；若上下文已經有明確名稱，禁止改寫成泛化的可能性清單。"
+    )
+
+
+def build_analyze_system_prompt(model_key: str) -> str:
+    if model_key == "gemma4":
+        return (
+            "你是本機離線 code assistant。請使用繁體中文分析，先給結論，再補依據。"
+            "不要重述問題或專案背景，不要用 markdown 表格。若資訊不足請直接說不確定。"
+        )
+    return "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案分析；若資訊不足請直接說不確定。"
+
+
+def build_raw_chat_user_message(context: str, message: str) -> str:
+    return (
+        "以下是目前已套用釘選檔案的上下文：\n"
+        f"{context}\n\n"
+        "請只根據上面內容回答。\n"
+        f"使用者問題：\n{message}"
+    )
+
+
+def build_raw_analyze_user_message(prompt: str, context: str) -> str:
+    return (
+        f"{prompt}\n\n"
+        "以下是目前已套用釘選檔案的上下文：\n"
+        f"{context}"
+    )
+
+
 def build_gemma_locator_messages(
     message: str,
     context: str,
@@ -1360,9 +1571,11 @@ def build_gemma_patch_messages(
 
 def build_project_context(project_root: Path, state: SessionState, message: str) -> str:
     selected_paths = rank_paths_for_message(project_root, require_pinned_context(state), message)
-    chunks = ["已套用釘選檔案:\n" + "\n".join(selected_paths)]
     single_file_focus = len(selected_paths) == 1
-    total_limit = MAX_FOCUSED_CHAT_TOTAL_CHARS if single_file_focus else MAX_TOTAL_CONTEXT
+    limits = get_context_limits(state.model_key, single_file_focus)
+    selected_paths = selected_paths[: limits["max_files"]]
+    chunks = ["已套用釘選檔案:\n" + "\n".join(selected_paths)]
+    total_limit = limits["total_chars"]
     total_chars = sum(len(chunk) for chunk in chunks)
     for relative_path in selected_paths:
         try:
@@ -1370,7 +1583,7 @@ def build_project_context(project_root: Path, state: SessionState, message: str)
                 project_root,
                 relative_path,
                 message,
-                max_chars=MAX_FOCUSED_CHAT_FILE_CHARS if single_file_focus else MAX_FILE_CHARS,
+                max_chars=limits["file_chars"],
                 max_sections=3 if single_file_focus else 2,
             )
         except (OSError, ValueError):
@@ -2582,53 +2795,69 @@ def call_local_model(
     messages: List[Dict[str, str]],
     timeout_seconds: int = 180,
     max_tokens: int = 600,
+    continue_on_length: int = 0,
+    raw_mode: bool = False,
 ) -> str:
-    prepared_messages = prepare_messages_for_model(model_alias, messages)
-    payload = json.dumps(
-        {
-            "model": model_alias,
-            "messages": prepared_messages,
-            "temperature": 0.2,
-            "stream": False,
-            "max_tokens": max_tokens,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        LLM_ENDPOINT,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except (TimeoutError, socket.timeout) as exc:
-        raise RuntimeError(
-            f"本地模型回應逾時。模型可能正在生成過長內容、主機效能不足，或需要縮小上下文。timeout={timeout_seconds}s"
-        ) from exc
-    except urllib.error.HTTPError as exc:
-        details = ""
+    endpoint = get_model_endpoint(model_alias)
+    working_messages = list(messages)
+    parts: List[str] = []
+    remaining_continuations = max(0, continue_on_length)
+    while True:
+        prepared_messages = prepare_messages_for_model(model_alias, working_messages)
+        payload = json.dumps(
+            {
+                "model": model_alias,
+                "messages": prepared_messages,
+                "temperature": 0.2,
+                "stream": False,
+                "max_tokens": max_tokens,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
-            details = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            details = str(exc)
-        if exc.code == 400 and "exceeds the available context size" in details:
-            raise RuntimeError(
-                "目前送給模型的專案上下文太大，超過本機模型的 8192 token 上限。請縮小對話歷史、減少釘選檔案，或重新開啟專案後再試。"
-            ) from exc
-        raise RuntimeError(f"Failed to call local model endpoint: HTTP {exc.code}: {details}") from exc
-    except urllib.error.URLError as exc:
-        reason = getattr(exc, "reason", "")
-        if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except (TimeoutError, socket.timeout) as exc:
             raise RuntimeError(
                 f"本地模型回應逾時。模型可能正在生成過長內容、主機效能不足，或需要縮小上下文。timeout={timeout_seconds}s"
             ) from exc
-        raise RuntimeError(f"Failed to call local model endpoint: {exc}") from exc
-    try:
-        return body["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("Unexpected model response format.") from exc
+        except urllib.error.HTTPError as exc:
+            details = ""
+            try:
+                details = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                details = str(exc)
+            if exc.code == 400 and "exceeds the available context size" in details:
+                raise RuntimeError(
+                    "目前送給模型的專案上下文太大，超過這台機器目前可用的 context 上限。請縮小對話歷史、減少釘選檔案，或重新開啟專案後再試。"
+                ) from exc
+            raise RuntimeError(f"Failed to call local model endpoint: HTTP {exc.code}: {details}") from exc
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", "")
+            if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+                raise RuntimeError(
+                    f"本地模型回應逾時。模型可能正在生成過長內容、主機效能不足，或需要縮小上下文。timeout={timeout_seconds}s"
+                ) from exc
+            raise RuntimeError(f"Failed to call local model endpoint: {exc}") from exc
+        try:
+            choice = body["choices"][0]
+            raw_content = str(choice["message"]["content"])
+            finish_reason = str(choice.get("finish_reason", "") or "")
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("Unexpected model response format.") from exc
+        parts.append(raw_content)
+        if finish_reason != "length" or remaining_continuations <= 0:
+            break
+        remaining_continuations -= 1
+        working_messages.append({"role": "assistant", "content": raw_content})
+        working_messages.append({"role": "user", "content": "請直接從上一句繼續回答，不要重複前文，不要重新開場。"})
+    return sanitize_model_reply(model_alias, "\n".join(part for part in parts if part.strip()), raw_mode=raw_mode)
 
 
 def parse_script_output(output: str) -> Dict[str, str]:
@@ -2721,7 +2950,7 @@ def open_project_worker(task_id: str, project_path: str, model_key: str) -> None
 
         update_task(task_id, progress=45, step="Git 工作區完成", message="已完成 git 初始化與基線快照")
         update_task(task_id, progress=55, step="啟動本地模型", message="正在驗證模型並啟動 llama-server")
-        ensure_local_model_server(model_key, port=8080)
+        ensure_local_model_server(model_key, port=get_model_port(model_key))
 
         update_task(task_id, progress=85, step="索引專案", message="正在掃描檔案、入口與測試位置")
         result = build_session_payload(project_root, model_key)
@@ -2779,7 +3008,7 @@ def open_project_worker(task_id: str, project_path: str, model_key: str) -> None
 def redownload_model_worker(task_id: str, model_key: str) -> None:
     try:
         update_task(task_id, status="running", progress=3, step="驗證模型", message="正在確認模型設定")
-        if model_key not in {"qwen", "gemma4", "codellama"}:
+        if model_key not in {"qwen", "gemma4"}:
             raise RuntimeError(json.dumps(make_error("MODEL_INVALID", "Unsupported model.", model_key)))
 
         model_path, model_size = download_model_with_progress(task_id, model_key)
@@ -2947,8 +3176,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             project_path = str(payload.get("projectPath", "")).strip()
             model_key = str(payload.get("modelKey", "qwen")).strip().lower()
-            if model_key not in {"qwen", "gemma4", "codellama"}:
-                raise ValueError("Unsupported model. Use qwen, gemma4 or codellama.")
+            if model_key not in {"qwen", "gemma4"}:
+                raise ValueError("Unsupported model. Use qwen or gemma4.")
             if not project_path:
                 raise ValueError("Project path is required.")
             setattr(self.server, "_pending_edit_internal", None)
@@ -2977,11 +3206,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 project_root = Path(STATE.project_path)
                 context = build_project_context(project_root, STATE, prompt)
                 model_alias = STATE.model_alias
+                model_key = STATE.model_key
             messages = [
-                {"role": "system", "content": "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案分析；若資訊不足請直接說不確定。"},
-                {"role": "user", "content": f"{prompt}\n\n以下是專案上下文：\n{context}"},
+                {"role": "user", "content": build_raw_analyze_user_message(prompt, context)},
             ]
-            reply = call_local_model(model_alias, messages, max_tokens=900)
+            reply = call_local_model(
+                model_alias,
+                messages,
+                max_tokens=get_analyze_max_tokens(model_key),
+                timeout_seconds=get_analyze_timeout_seconds(model_key),
+                continue_on_length=0,
+                raw_mode=True,
+            )
             with STATE_LOCK:
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "analysis"})
             json_response(self, {"ok": True, "data": {"reply": reply}})
@@ -3020,40 +3256,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     ui_state=STATE.ui_state,
                 )
                 context = build_project_context(project_root, snapshot, message)
-                history = [
-                    item for item in snapshot.history[-MAX_CHAT_HISTORY_ITEMS:]
-                    if item.get("role") == "user" and item.get("content")
-                ]
                 model_alias = STATE.model_alias
-            resolved_reply = try_resolve_identifier_question(project_root, snapshot, message)
-            if resolved_reply:
-                with STATE_LOCK:
-                    STATE.history.append({"role": "user", "content": message, "kind": "chat"})
-                    STATE.history.append({"role": "assistant", "content": resolved_reply, "kind": "chat"})
-                json_response(self, {"ok": True, "data": {"reply": resolved_reply}})
-                return
-            refine_mode = is_refinement_request(message, snapshot.pending_edit)
-            if refine_mode or is_code_change_request(message):
-                plan = create_edit_plan(project_root, snapshot, message)
-                public_plan = build_public_plan(plan)
-                reply = format_plan_for_chat(plan)
-                if refine_mode:
-                    reply = "以下是根據上一版修改建議修正後的版本：\n\n" + reply
-                with STATE_LOCK:
-                    STATE.pending_edit = public_plan
-                    STATE.history.append({"role": "user", "content": message, "kind": "chat"})
-                    STATE.history.append({"role": "assistant", "content": reply, "kind": "chat-refine" if refine_mode else "chat-edit"})
-                setattr(self.server, "_pending_edit_internal", plan)
-                json_response(self, {"ok": True, "data": {"reply": reply, "plan": public_plan}})
-                return
             messages = [
-                {"role": "system", "content": "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案回答。檔案預覽僅供閱讀，不是模型上下文來源。若資訊不足請直接回答不確定。若問題是在問函式名稱、方法名稱、類別名稱、變數名稱、檔案名稱或事件處理函式，請先從上下文找出精確 identifier，再直接回覆該名稱與所在檔案；若上下文已經有明確名稱，禁止改寫成泛化的可能性清單。"},
-                {"role": "system", "content": f"目前已套用釘選檔案上下文如下：\n{context}"},
+                {"role": "user", "content": build_raw_chat_user_message(context, message)},
             ]
-            for item in history:
-                messages.append({"role": item["role"], "content": item["content"]})
-            messages.append({"role": "user", "content": message})
-            reply = call_local_model(model_alias, messages, max_tokens=900)
+            reply = call_local_model(
+                model_alias,
+                messages,
+                max_tokens=get_chat_max_tokens(snapshot.model_key),
+                timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
+                continue_on_length=0,
+                raw_mode=True,
+            )
             with STATE_LOCK:
                 STATE.history.append({"role": "user", "content": message, "kind": "chat"})
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "chat"})

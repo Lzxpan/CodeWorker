@@ -6,13 +6,16 @@ set "MODEL_KEY=%~1"
 if "%MODEL_KEY%"=="" set "MODEL_KEY=qwen"
 
 set "PORT=%~2"
-if "%PORT%"=="" set "PORT=%DEFAULT_PORT%"
+set "CONTEXT_SIZE=%~3"
 
 for /f %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "[DateTime]::Now.ToString('yyyyMMdd-HHmmss')"' ) do set "STAMP=%%I"
 if not defined STAMP set "STAMP=unknown"
 
 call :resolve_model "%MODEL_KEY%"
 if errorlevel 1 exit /b 1
+
+if "%PORT%"=="" set "PORT=%MODEL_PORT%"
+if "%CONTEXT_SIZE%"=="" set "CONTEXT_SIZE=%MODEL_CONTEXT%"
 
 set "LOG_FILE=%LOGS_DIR%\llama-server-%MODEL_KEY%-%STAMP%.log"
 set "ERR_FILE=%LOGS_DIR%\llama-server-%MODEL_KEY%-%STAMP%.err.log"
@@ -77,11 +80,7 @@ if not exist "%WINPY_PYTHON%" (
     call :emit_error RUNTIME_MISSING "Portable Python runtime not found." "%WINPY_PYTHON%"
     exit /b 1
 )
-"%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --context 8192 --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul
-if errorlevel 1 (
-    call :emit_error MODEL_START_FAILED "Failed to launch llama-server process." "%LLAMA_SERVER%"
-    exit /b 1
-)
+start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --context "%CONTEXT_SIZE%" --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
 
 set /a RETRIES=30
 :wait_loop
@@ -109,16 +108,15 @@ set "MODEL_INPUT=%~1"
 if /I "%MODEL_INPUT%"=="qwen" (
     set "MODEL_DIR=%MODELS_DIR%\qwen2.5-coder-7b-instruct-q4"
     set "MODEL_ALIAS=qwen-local"
+    set "MODEL_PORT=8080"
+    set "MODEL_CONTEXT=16384"
     exit /b 0
 )
 if /I "%MODEL_INPUT%"=="gemma4" (
     set "MODEL_DIR=%MODELS_DIR%\gemma4-e4b-it-q4"
     set "MODEL_ALIAS=gemma4-local"
-    exit /b 0
-)
-if /I "%MODEL_INPUT%"=="codellama" (
-    set "MODEL_DIR=%MODELS_DIR%\codellama-7b-instruct-q4"
-    set "MODEL_ALIAS=codellama-local"
+    set "MODEL_PORT=8081"
+    set "MODEL_CONTEXT=4096"
     exit /b 0
 )
 call :emit_error MODEL_START_FAILED "Unknown model." "%MODEL_INPUT%"

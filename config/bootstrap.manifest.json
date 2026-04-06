@@ -38,14 +38,6 @@
       "filePattern": "gemma-4-e4b-it-Q4_K_M.gguf",
       "targetDir": "models/gemma4-e4b-it-q4",
       "note": "Official GGUF route for Gemma 4 E4B Instruct via ggml-org."
-    },
-    "codellama": {
-      "enabled": false,
-      "provider": "huggingface",
-      "repo": "",
-      "filePattern": "",
-      "targetDir": "models/codellama-7b-instruct-q4",
-      "note": "Code Llama does not have an official Meta GGUF repo. Fill repo and filePattern with a GGUF source you trust before enabling."
     }
   }
 }

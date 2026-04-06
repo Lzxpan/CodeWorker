@@ -13,11 +13,3 @@
   reminder: sys
   use_system_prompt: true
   system_prompt_prefix: "請全程使用繁體中文回答與解說；程式碼、檔案路徑、檔名、指令、API 名稱與錯誤訊息保留原文。"
-
-- name: openai/codellama-local
-  edit_format: whole
-  weak_model_name: openai/codellama-local
-  use_repo_map: true
-  reminder: sys
-  use_system_prompt: true
-  system_prompt_prefix: "請全程使用繁體中文回答與解說；程式碼、檔案路徑、檔名、指令、API 名稱與錯誤訊息保留原文。"

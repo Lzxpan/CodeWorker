@@ -3,7 +3,7 @@ setlocal EnableExtensions
 call "%~dp0_env.cmd"
 
 if "%~1"=="" (
-    echo Usage: %~nx0 ^<project_path^> [qwen^|gemma4^|codellama] [--browser]
+    echo Usage: %~nx0 ^<project_path^> [qwen^|gemma4] [--browser]
     exit /b 1
 )
 
@@ -31,12 +31,6 @@ if /I "%~2"=="gemma4" (
     goto parse_optional_args
 )
 
-if /I "%~2"=="codellama" (
-    set "MODEL_KEY=codellama"
-    shift
-    goto parse_optional_args
-)
-
 if /I "%~2"=="--browser" (
     set "USE_BROWSER=1"
     shift
@@ -44,10 +38,13 @@ if /I "%~2"=="--browser" (
 )
 
 echo [ERROR] Unknown option: "%~2"
-echo         Supported options: qwen, gemma4, codellama, --browser
+echo         Supported options: qwen, gemma4, --browser
 exit /b 1
 
 :args_done
+
+call :resolve_model_port "%MODEL_KEY%"
+if errorlevel 1 exit /b 1
 
 if not exist "%WINPY_PYTHON%" (
     echo [INFO] Portable Python not found. Running bootstrap...
@@ -76,10 +73,10 @@ if errorlevel 1 (
 call "%~dp0attach-project.cmd" "%PROJECT_DIR%"
 if errorlevel 1 exit /b 1
 
-call "%~dp0start-server.cmd" "%MODEL_KEY%" "%DEFAULT_PORT%"
+call "%~dp0start-server.cmd" "%MODEL_KEY%" "%MODEL_PORT%"
 if errorlevel 1 exit /b 1
 
-set "OPENAI_API_BASE=http://127.0.0.1:%DEFAULT_PORT%/v1"
+set "OPENAI_API_BASE=http://127.0.0.1:%MODEL_PORT%/v1"
 set "OPENAI_API_KEY=local-not-used"
 set "AIDER_ANALYTICS_DISABLE=1"
 set "LITELLM_DISABLE_TELEMETRY=1"
@@ -92,9 +89,6 @@ if errorlevel 1 (
 
 if /I "%MODEL_KEY%"=="gemma4" (
     set "AIDER_MODEL=gemma4"
-)
-if /I "%MODEL_KEY%"=="codellama" (
-    set "AIDER_MODEL=codellama"
 )
 if /I "%MODEL_KEY%"=="qwen" (
     set "AIDER_MODEL=qwen"
@@ -113,3 +107,15 @@ if "%USE_BROWSER%"=="1" (
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 exit /b %EXIT_CODE%
+
+:resolve_model_port
+if /I "%~1"=="qwen" (
+    set "MODEL_PORT=8080"
+    exit /b 0
+)
+if /I "%~1"=="gemma4" (
+    set "MODEL_PORT=8081"
+    exit /b 0
+)
+echo [ERROR] Unknown model: "%~1"
+exit /b 1
