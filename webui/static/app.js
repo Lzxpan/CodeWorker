@@ -21,8 +21,8 @@ const state = {
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V0.96b Web UI",
-    brandTitle: "CodeWorker V0.96b",
+    pageTitle: "CodeWorker V0.97b Web UI",
+    brandTitle: "CodeWorker V0.97b",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -132,8 +132,8 @@ const I18N = {
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V0.96b Web UI",
-    brandTitle: "CodeWorker V0.96b",
+    pageTitle: "CodeWorker V0.97b Web UI",
+    brandTitle: "CodeWorker V0.97b",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {

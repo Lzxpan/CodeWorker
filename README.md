@@ -1,4 +1,4 @@
-# CodeWorker V0.96b
+# CodeWorker V0.97b
 
 Offline AI code assistant for **Windows local LLM**, **USB portable** deployment, and **privacy-first secure code analysis**.
 
@@ -51,7 +51,13 @@ Current model positioning:
 
 ## Web UI Screenshots
 
-![CodeWorker Web UI overview](docs/screenshots/webui-overview-en-v096b.png)
+Traditional Chinese UI with `Qwen 2.5 Coder 7B`:
+
+![CodeWorker V0.97b Traditional Chinese Web UI overview](docs/screenshots/webui-overview-zh-v097b.png)
+
+English UI with `Gemma 4 E4B`:
+
+![CodeWorker V0.97b English Web UI overview](docs/screenshots/webui-overview-en-v097b.png)
 
 ---
 
@@ -89,8 +95,8 @@ http://127.0.0.1:8764
 
 ### Response behavior
 
-- General chat and `Analyze project` now stay closer to each model's original output
-- CodeWorker no longer adds heavy reply cleanup or style compression in these two flows
+- General chat and `Analyze project` use a raw-first prompt flow
+- CodeWorker keeps the pinned-file content delimiters, but does not auto-route feature requests into edit plans
 - The applied pinned files are still the only trusted context source
 
 ---

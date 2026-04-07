@@ -54,12 +54,12 @@ MODEL_ANALYZE_MAX_TOKENS = {
     "gemma4": 2800,
 }
 MODEL_CHAT_TIMEOUT_SECONDS = {
-    "qwen": 180,
-    "gemma4": 240,
+    "qwen": 1200,
+    "gemma4": 1200,
 }
 MODEL_ANALYZE_TIMEOUT_SECONDS = {
-    "qwen": 180,
-    "gemma4": 240,
+    "qwen": 1200,
+    "gemma4": 1200,
 }
 MODEL_HISTORY_LIMIT = {
     "qwen": 4,
@@ -98,7 +98,7 @@ MAX_EDIT_FILE_CHARS = 4200
 MAX_EDIT_TOTAL_CHARS = 14000
 MAX_EDIT_SINGLE_FILE_CHARS = 22000
 MAX_ADVISORY_FILE_CHARS = 18000
-EDIT_PLAN_TIMEOUT_SECONDS = 300
+EDIT_PLAN_TIMEOUT_SECONDS = 1200
 GEMMA4_LOCATOR_MAX_TOKENS = 320
 GEMMA4_PATCH_MAX_TOKENS = 700
 GEMMA4_PRECISE_MAX_TOKENS = 720
@@ -913,6 +913,15 @@ def truncate_middle(text: str, max_chars: int) -> str:
     return f"{text[:keep_each_side]}\n... [truncated] ...\n{text[-keep_each_side:]}"
 
 
+def fit_text_to_limit(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return truncate_middle(text, max_chars)
+
+
 def char_index_to_line(content: str, index: int) -> int:
     if index <= 0:
         return 1
@@ -926,6 +935,37 @@ def slice_lines(content: str, start_line: int, end_line: int) -> str:
     start = max(1, start_line)
     end = min(len(lines), end_line)
     return "\n".join(lines[start - 1:end])
+
+
+def build_line_chunk(title: str, content: str, start_line: int, end_line: int) -> str:
+    snippet = slice_lines(content, start_line, end_line).strip()
+    if not snippet:
+        return ""
+    lines = content.splitlines()
+    line_count = max(1, len(lines))
+    start = max(1, min(start_line, line_count))
+    end = max(start, min(end_line, line_count))
+    return f"{title} / lines {start}-{end}\n{snippet}"
+
+
+def append_limited_chunk(chunks: List[str], chunk: str, max_chars: int) -> int:
+    if not chunk or max_chars <= 0:
+        return 0
+    current = sum(len(item) for item in chunks) + max(0, len(chunks) - 1) * 2
+    remaining = max_chars - current
+    if remaining <= 0:
+        return 0
+    separator_cost = 2 if chunks else 0
+    available = remaining - separator_cost
+    if available <= 0:
+        return 0
+    if len(chunk) <= available:
+        chunks.append(chunk)
+        return len(chunk) + separator_cost
+    if available >= 160:
+        chunks.append(fit_text_to_limit(chunk, available))
+        return available + separator_cost
+    return 0
 
 
 def find_matching_brace(content: str, brace_start: int) -> Optional[int]:
@@ -1199,6 +1239,62 @@ def rank_paths_for_message(project_root: Path, paths: List[str], message: str) -
     return [path for _, path in ranked]
 
 
+def build_member_index_chunk(content: str, relative_path: str, max_items: int = 80) -> str:
+    if Path(relative_path).suffix.lower() != ".cs":
+        return ""
+    regions = detect_csharp_regions(content)
+    if not regions:
+        return ""
+    lines = ["C# member index / detected members"]
+    for region in regions[:max_items]:
+        lines.append(f"- {region['name']}: lines {region['start_line']}-{region['end_line']}")
+    if len(regions) > max_items:
+        lines.append(f"- ... [truncated {len(regions) - max_items} more members]")
+    return "\n".join(lines)
+
+
+def build_general_file_excerpt(content: str, relative_path: str, message: str, max_chars: int) -> str:
+    if not content.strip() or max_chars <= 0:
+        return ""
+    line_count = max(1, len(content.splitlines()))
+    if len(content) <= max_chars:
+        return build_line_chunk("Chunk 1", content, 1, line_count)
+
+    chunks: List[str] = []
+    seen_ranges = set()
+
+    def add_range(title: str, start_line: int, end_line: int) -> None:
+        start = max(1, start_line)
+        end = min(line_count, end_line)
+        if start > end:
+            return
+        marker = (start, end)
+        if marker in seen_ranges:
+            return
+        seen_ranges.add(marker)
+        append_limited_chunk(chunks, build_line_chunk(title, content, start, end), max_chars)
+
+    add_range("Chunk 1 / file start", 1, min(line_count, 90))
+    member_index = build_member_index_chunk(content, relative_path)
+    if member_index:
+        append_limited_chunk(chunks, member_index, max_chars)
+
+    lowered_content = content.lower()
+    for term in build_query_terms(message):
+        index = lowered_content.find(term.lower())
+        if index < 0:
+            continue
+        target_line = char_index_to_line(content, index)
+        add_range(f"Chunk / keyword {term}", target_line - 25, target_line + 35)
+
+    if line_count > 120:
+        add_range("Chunk / file end", max(1, line_count - 70), line_count)
+
+    if not chunks:
+        return fit_text_to_limit(content, max_chars)
+    return "\n\n".join(chunks)
+
+
 def build_excerpt_for_message(
     project_root: Path,
     relative_path: str,
@@ -1209,7 +1305,7 @@ def build_excerpt_for_message(
     content = read_file_full(project_root, relative_path)
     sections = select_relevant_sections(content, relative_path, message, max_sections=max_sections)
     if not sections:
-        return read_file_excerpt(project_root, relative_path, max_chars=max_chars)
+        return build_general_file_excerpt(content, relative_path, message, max_chars=max_chars)
 
     blocks: List[str] = []
     total_chars = 0
@@ -1418,43 +1514,50 @@ def get_continue_on_length(model_key: str) -> int:
 
 def build_chat_system_prompt(model_key: str) -> str:
     if model_key == "gemma4":
-        return (
-            "你是本機離線 code assistant。請使用繁體中文直接回答重點。"
-            "第一段先給結論，不要重述問題、不要說『根據您提供』、不要做長篇鋪陳。"
-            "若需要列點，最多 5 點。若資訊不足，直接回答不確定。"
-        )
-    return (
-        "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案回答。"
-        "檔案預覽僅供閱讀，不是模型上下文來源。若資訊不足請直接回答不確定。"
-        "若問題是在問函式名稱、方法名稱、類別名稱、變數名稱、檔案名稱或事件處理函式，"
-        "請先從上下文找出精確 identifier，再直接回覆該名稱與所在檔案；若上下文已經有明確名稱，禁止改寫成泛化的可能性清單。"
-    )
+        return "請直接回答使用者問題，不要輸出思考過程。"
+    return ""
 
 
 def build_analyze_system_prompt(model_key: str) -> str:
     if model_key == "gemma4":
-        return (
-            "你是本機離線 code assistant。請使用繁體中文分析，先給結論，再補依據。"
-            "不要重述問題或專案背景，不要用 markdown 表格。若資訊不足請直接說不確定。"
-        )
-    return "你是本機離線 code assistant。請使用繁體中文回答，並只根據目前已套用釘選檔案分析；若資訊不足請直接說不確定。"
+        return "請直接回答使用者問題，不要輸出思考過程。"
+    return ""
 
 
 def build_raw_chat_user_message(context: str, message: str) -> str:
     return (
-        "以下是目前已套用釘選檔案的上下文：\n"
+        "PINNED FILE CONTENT:\n"
         f"{context}\n\n"
-        "請只根據上面內容回答。\n"
-        f"使用者問題：\n{message}"
+        f"USER QUESTION:\n{message}"
     )
 
 
 def build_raw_analyze_user_message(prompt: str, context: str) -> str:
     return (
-        f"{prompt}\n\n"
-        "以下是目前已套用釘選檔案的上下文：\n"
-        f"{context}"
+        "PINNED FILE CONTENT:\n"
+        f"{context}\n\n"
+        f"USER QUESTION:\n{prompt}"
     )
+
+
+def build_raw_messages(model_key: str, user_content: str, system_prompt: str = "") -> List[Dict[str, str]]:
+    messages: List[Dict[str, str]] = []
+    if model_key == "gemma4" and system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt.strip()})
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+def build_pinned_file_block(relative_path: str, excerpt: str, max_chars: int) -> str:
+    prefix = f"\n檔案: {relative_path}\nPINNED FILE CONTENT START\n```\n"
+    suffix = "\n```\nPINNED FILE CONTENT END"
+    content_budget = max_chars - len(prefix) - len(suffix)
+    if content_budget < 160:
+        return ""
+    content = fit_text_to_limit(excerpt, content_budget)
+    if not content:
+        return ""
+    return f"{prefix}{content}{suffix}"
 
 
 def build_gemma_locator_messages(
@@ -1574,7 +1677,17 @@ def build_project_context(project_root: Path, state: SessionState, message: str)
     single_file_focus = len(selected_paths) == 1
     limits = get_context_limits(state.model_key, single_file_focus)
     selected_paths = selected_paths[: limits["max_files"]]
-    chunks = ["已套用釘選檔案:\n" + "\n".join(selected_paths)]
+    chunks = [
+        "\n".join(
+            [
+                "PINNED FILE CONTENT",
+                "以下是已套用釘選檔案的實際內容，不只是檔名。",
+                "檔案預覽不會自動加入上下文；只有下列 PINNED FILE CONTENT 區塊會提供給模型。",
+                "已套用釘選檔案:",
+                *selected_paths,
+            ]
+        )
+    ]
     total_limit = limits["total_chars"]
     total_chars = sum(len(chunk) for chunk in chunks)
     for relative_path in selected_paths:
@@ -1588,11 +1701,15 @@ def build_project_context(project_root: Path, state: SessionState, message: str)
             )
         except (OSError, ValueError):
             continue
-        block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
-        if total_chars + len(block) > total_limit:
-            break
+        separator_chars = 2 if chunks else 0
+        remaining_chars = total_limit - total_chars - separator_chars
+        block = build_pinned_file_block(relative_path, excerpt, remaining_chars)
+        if not block:
+            if len(chunks) > 1:
+                break
+            continue
         chunks.append(block)
-        total_chars += len(block)
+        total_chars += len(block) + separator_chars
     return "\n\n".join(chunks)
 
 
@@ -2825,7 +2942,7 @@ def call_local_model(
                 body = json.loads(response.read().decode("utf-8"))
         except (TimeoutError, socket.timeout) as exc:
             raise RuntimeError(
-                f"本地模型回應逾時。模型可能正在生成過長內容、主機效能不足，或需要縮小上下文。timeout={timeout_seconds}s"
+                f"本地模型回應已等到目前上限仍未完成。模型可能仍在生成超長內容、主機效能不足，或本輪上下文需要縮小。timeout={timeout_seconds}s。若經常發生，請減少釘選檔案或縮小問題範圍後再試。"
             ) from exc
         except urllib.error.HTTPError as exc:
             details = ""
@@ -2842,7 +2959,7 @@ def call_local_model(
             reason = getattr(exc, "reason", "")
             if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
                 raise RuntimeError(
-                    f"本地模型回應逾時。模型可能正在生成過長內容、主機效能不足，或需要縮小上下文。timeout={timeout_seconds}s"
+                    f"本地模型回應已等到目前上限仍未完成。模型可能仍在生成超長內容、主機效能不足，或本輪上下文需要縮小。timeout={timeout_seconds}s。若經常發生，請減少釘選檔案或縮小問題範圍後再試。"
                 ) from exc
             raise RuntimeError(f"Failed to call local model endpoint: {exc}") from exc
         try:
@@ -3207,9 +3324,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 context = build_project_context(project_root, STATE, prompt)
                 model_alias = STATE.model_alias
                 model_key = STATE.model_key
-            messages = [
-                {"role": "user", "content": build_raw_analyze_user_message(prompt, context)},
-            ]
+            messages = build_raw_messages(
+                model_key,
+                build_raw_analyze_user_message(prompt, context),
+                build_analyze_system_prompt(model_key),
+            )
             reply = call_local_model(
                 model_alias,
                 messages,
@@ -3257,9 +3376,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 )
                 context = build_project_context(project_root, snapshot, message)
                 model_alias = STATE.model_alias
-            messages = [
-                {"role": "user", "content": build_raw_chat_user_message(context, message)},
-            ]
+            messages = build_raw_messages(
+                snapshot.model_key,
+                build_raw_chat_user_message(context, message),
+                build_chat_system_prompt(snapshot.model_key),
+            )
             reply = call_local_model(
                 model_alias,
                 messages,

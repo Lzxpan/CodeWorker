@@ -1,4 +1,4 @@
-# CodeWorker V0.96b
+# CodeWorker V0.97b
 
 > A privacy-first, offline AI code assistant for Windows, built for local LLM workflows and USB portable deployment.
 
@@ -79,7 +79,7 @@ http://127.0.0.1:8764
 
 ### Web UI screenshots
 
-![CodeWorker Web UI overview](docs/screenshots/webui-overview-en-v096b.png)
+![CodeWorker V0.97b English Web UI overview](docs/screenshots/webui-overview-en-v097b.png)
 
 ---
 
@@ -184,6 +184,15 @@ scripts\code-chat.cmd C:\path\to\project gemma4
 ---
 
 ## 9. Version History
+
+### V0.97b
+
+- updated the Web UI and README version strings to `V0.97b`
+- fixed a Qwen and Gemma4 pinned-file context issue where a single large pinned file could degrade to filename-only context
+- aligned main chat and `Analyze project` with a raw-first prompt flow: keep the required `PINNED FILE CONTENT` blocks, but do not auto-route feature requests into edit plans
+- improved Qwen and Gemma4 responses for feature-planning questions such as adding TCP/IP connectivity
+- extended Qwen and Gemma4 chat, analysis, and edit suggestion timeouts to reduce early interruption of long responses
+- updated the GitHub README screenshots with `V0.97b` Traditional Chinese Qwen and English Gemma4 smoke-test views
 
 ### V0.96b
 

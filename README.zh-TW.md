@@ -1,4 +1,4 @@
-# CodeWorker V0.96b
+# CodeWorker V0.97b
 
 > 離線、可攜、以隱私與資安為優先的 Windows 本地 AI code assistant。
 
@@ -78,7 +78,7 @@ http://127.0.0.1:8764
 
 ### Web UI 畫面範例
 
-![CodeWorker Web UI overview](docs/screenshots/webui-overview-zh-v096b.png)
+![CodeWorker V0.97b 繁中 Web UI 畫面範例](docs/screenshots/webui-overview-zh-v097b.png)
 
 ---
 
@@ -185,6 +185,15 @@ scripts\code-chat.cmd C:\path\to\project gemma4
 ---
 
 ## 9. 版本歷程
+
+### V0.97b
+
+- Web UI 與 README 版號同步更新為 `V0.97b`
+- 修正 Qwen 與 Gemma4 在單一大型釘選檔案略超過上下文預算時只收到檔名的問題
+- 主對話框與 `分析專案` 收斂為 raw-first prompt：保留必要的 `PINNED FILE CONTENT` 區塊，不自動把新增功能需求轉成修改建議
+- 改善 Qwen 與 Gemma4 對新增 TCP/IP 連線規劃這類問題的回覆表現
+- 將 Qwen 與 Gemma4 的 chat、analysis、edit suggestion 等待上限拉長，減少長回答被提早中斷
+- 更新 GitHub README 截圖為 `V0.97b` 繁中 Qwen 與英文 Gemma4 實測畫面
 
 ### V0.96b
 
