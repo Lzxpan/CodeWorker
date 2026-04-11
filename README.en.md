@@ -1,4 +1,4 @@
-# CodeWorker V0.97b
+# CodeWorker V0.98b
 
 > A privacy-first, offline AI code assistant for Windows, built for local LLM workflows and USB portable deployment.
 
@@ -19,24 +19,30 @@
 ## 1. System Requirements
 
 - Windows 10 / 11 x64
-- 16GB RAM recommended
+- 32GB RAM is the more reliable target for larger local models
+- If the machine uses integrated graphics, shared memory can reduce the system RAM actually available to the model
+- Whether the machine is sufficient still depends on the user's real hardware and runtime load
 - AVX2-capable CPU recommended
 - Internet access is required for the first runtime / model download
 - The initial download is **over 5GB**, so expect some waiting time depending on network speed and USB / disk write speed
-- Enabling `Gemma 4 E4B` increases initial download size and disk usage further
+- The new default two-model layout is roughly **11.6 GB** after removing `Qwen 2.5` from the packaged route
+- Older upgraded workspaces that still keep the removed `qwen25` model files can remain near the previous **16.6 GB** footprint
+- Reclaiming that space still requires deleting the old local `qwen2.5` model directory
 - After setup completes, the tool can run offline
 
 ---
 
 ## 2. Model Positioning
 
-- `Qwen 2.5 Coder 7B`
-  - default model
-  - currently the most stable option
+- `Qwen 3.5 9B Vision`
+  - default and primary model
+  - handles both text and image input
+  - now used as the main code-analysis and project-chat model
 - `Gemma 4 E4B`
-  - optional evaluation model
+  - secondary optional model
   - validated for the `llama.cpp + GGUF + Windows local + USB` architecture
-  - can start and localize target code regions, but is still less stable than `Qwen` for edit suggestions
+  - currently treated as a text-analysis model in this project; image input is not yet a formally supported path in the current local `llama.cpp` GGUF route
+  - can start and localize target code regions, but is still less stable than `Qwen 3.5` for edit suggestions
 
 ---
 
@@ -79,7 +85,7 @@ http://127.0.0.1:8764
 
 ### Web UI screenshots
 
-![CodeWorker V0.97b English Web UI overview](docs/screenshots/webui-overview-en-v097b.png)
+![CodeWorker V0.98b English Web UI overview](docs/screenshots/webui-overview-en-v097b.png)
 
 ---
 
@@ -89,13 +95,21 @@ http://127.0.0.1:8764
 2. Confirm the model selection
 3. Click `Open project`
 4. Check the files you want in the file tree
-5. Click `Apply pins`
+5. The pin state syncs immediately when you check or uncheck files
 6. Ask questions or describe change requests in the main chat
+
+For image understanding:
+
+7. Click `Attach image`, or paste a screenshot into the chat box
+8. Make sure the currently selected model actually supports images; the formally supported image model in this build is `Qwen 3.5 9B Vision`
+9. Ask about the image alone, or combine it with the current project context
 
 ### Important context rules
 
 - `File preview` is read-only and **does not** automatically become model context
-- The model only answers from the **applied pinned files**
+- The model only answers from the **synced pinned files**
+- Small to medium pinned code sets are sent to `Qwen 3.5` as full files whenever the local context budget allows it
+- If the request falls back to excerpt mode, the Web UI now clearly says the model only received excerpts
 - If the last suggestion is wrong, continue in the same main chat and explain what is wrong
 
 ---
@@ -116,7 +130,7 @@ http://127.0.0.1:8764
 
 - Main chat and `Analyze project` now stay closer to the model's original output
 - The system no longer applies heavy reply cleanup or style compression
-- Answers still use only the **applied pinned files** as trusted context
+- Answers still use only the **synced pinned files** as trusted context
 
 ### Open project
 
@@ -128,12 +142,12 @@ http://127.0.0.1:8764
 ### Project summary
 
 - shows project path, file count, major languages, likely entry points, and test locations
-- also shows the currently applied pinned files
+- also shows the currently synced pinned files
 
 ### File tree
 
 - the only place where model context is selected
-- check files, then click `Apply pins`
+- checking or unchecking files syncs the pinned state immediately
 
 ### File preview
 
@@ -143,6 +157,10 @@ http://127.0.0.1:8764
 ### Chat
 
 - all analysis, explanation, and iterative code-suggestion work happens in the main chat panel
+- if an image is attached while the selected model does not support image input, the Web UI now shows a clear error instead of silently switching models
+- images can be added either by file upload or by pasting a screenshot
+- larger screenshots are automatically downscaled before they are sent to `Qwen 3.5`, reducing the chance that image tokens consume too much multimodal context
+- the chat panel shows `context coverage` so you can tell whether the model received full files or excerpts
 
 ---
 
@@ -160,6 +178,12 @@ Switch model:
 scripts\start-server.cmd gemma4
 ```
 
+Start `Qwen 3.5`:
+
+```cmd
+scripts\start-server.cmd qwen35
+```
+
 ### Start project-level chat
 
 ```cmd
@@ -170,6 +194,12 @@ Use Gemma 4:
 
 ```cmd
 scripts\code-chat.cmd C:\path\to\project gemma4
+```
+
+Use `Qwen 3.5`:
+
+```cmd
+scripts\code-chat.cmd C:\path\to\project qwen35
 ```
 
 ---
@@ -184,6 +214,17 @@ scripts\code-chat.cmd C:\path\to\project gemma4
 ---
 
 ## 9. Version History
+
+### V0.98b
+
+- updated the Web UI and README version strings to `V0.98b`
+- moved the image-attachment hint and `Attach image` / `Remove image` controls into the same row to reduce chat form height
+- replaced `Qwen 2.5` with `Qwen 3.5` as the default model in the Web UI and CLI
+- expanded the `Qwen 3.5` pinned-file context budget so small C# project analysis can use full files instead of short excerpts
+- added `context coverage` so excerpt-mode requests are visible in the UI
+- aligned the current `llama.cpp` request flow with Ollama-style concepts such as answer-only output, image-capable model checks, and explicit completion-state handling
+- added automatic screenshot downscaling to reduce `failed to process image` errors on larger `Qwen 3.5` image inputs
+- updated the storage note to distinguish the new default footprint of about `11.6 GB` from older upgraded machines that may still stay near `16.6 GB` until `qwen25` files are deleted
 
 ### V0.97b
 
@@ -216,9 +257,10 @@ scripts\code-chat.cmd C:\path\to\project gemma4
 
 ## 10. Important Notes
 
-- `Qwen 2.5 Coder 7B` remains the default model
-- `Gemma 4 E4B` is an evaluation model, not the recommended default
-- If you need more reliable structured edit suggestions, `Qwen` is still the safer option
+- `Qwen 3.5 9B Vision` is now the default model
+- `Gemma 4 E4B` remains the secondary model, not the primary default
+- `Gemma 4 E4B` should still be treated as a text model in this project unless the local `llama.cpp` GGUF route is separately verified for image input
+- The new default packaged layout is about `11.6 GB`, but upgraded workspaces can still remain near the old `16.6 GB` footprint if `qwen25` files are still present
 
 ---
 

@@ -3,7 +3,7 @@ setlocal EnableExtensions
 call "%~dp0_env.cmd"
 
 if "%~1"=="" (
-    echo Usage: %~nx0 ^<project_path^> [qwen^|gemma4] [--browser]
+    echo Usage: %~nx0 ^<project_path^> [gemma4^|qwen35] [--browser]
     exit /b 1
 )
 
@@ -13,20 +13,25 @@ if not exist "%PROJECT_DIR%\" (
     exit /b 1
 )
 
-set "MODEL_KEY=qwen"
+set "MODEL_KEY=qwen35"
 set "USE_BROWSER=0"
 
 :parse_optional_args
 if "%~2"=="" goto args_done
 
 if /I "%~2"=="qwen" (
-    set "MODEL_KEY=qwen"
-    shift
-    goto parse_optional_args
+    echo [ERROR] Model "qwen" has been removed. Please use "qwen35".
+    exit /b 1
 )
 
 if /I "%~2"=="gemma4" (
     set "MODEL_KEY=gemma4"
+    shift
+    goto parse_optional_args
+)
+
+if /I "%~2"=="qwen35" (
+    set "MODEL_KEY=qwen35"
     shift
     goto parse_optional_args
 )
@@ -38,7 +43,7 @@ if /I "%~2"=="--browser" (
 )
 
 echo [ERROR] Unknown option: "%~2"
-echo         Supported options: qwen, gemma4, --browser
+echo         Supported options: gemma4, qwen35, --browser
 exit /b 1
 
 :args_done
@@ -90,8 +95,8 @@ if errorlevel 1 (
 if /I "%MODEL_KEY%"=="gemma4" (
     set "AIDER_MODEL=gemma4"
 )
-if /I "%MODEL_KEY%"=="qwen" (
-    set "AIDER_MODEL=qwen"
+if /I "%MODEL_KEY%"=="qwen35" (
+    set "AIDER_MODEL=qwen35"
 )
 
 echo [INFO] Launching aider in "%PROJECT_DIR%"
@@ -110,11 +115,15 @@ exit /b %EXIT_CODE%
 
 :resolve_model_port
 if /I "%~1"=="qwen" (
-    set "MODEL_PORT=8080"
-    exit /b 0
+    echo [ERROR] Model "qwen" has been removed. Please use "qwen35".
+    exit /b 1
 )
 if /I "%~1"=="gemma4" (
     set "MODEL_PORT=8081"
+    exit /b 0
+)
+if /I "%~1"=="qwen35" (
+    set "MODEL_PORT=8082"
     exit /b 0
 )
 echo [ERROR] Unknown model: "%~1"

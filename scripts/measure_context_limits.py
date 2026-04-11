@@ -30,10 +30,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 START_SERVER = ROOT_DIR / "scripts" / "start-server.cmd"
 GAME_DIR = Path(r"C:\Games")
-MODELS = ("qwen", "gemma4")
-CONTEXTS = (4096, 8192, 12288, 16384)
+MODELS = ("qwen35", "gemma4")
+CONTEXTS = (8192, 12288, 16384)
 PORT_BASE = {
-    "qwen": 18080,
+    "qwen35": 18080,
     "gemma4": 18180,
 }
 
@@ -127,6 +127,7 @@ def request_chat(port: int, model: str, messages, max_tokens: int, timeout: int 
             "temperature": 0.2,
             "stream": False,
             "max_tokens": max_tokens,
+            **({"chat_template_kwargs": {"enable_thinking": False}} if model == "qwen35-local" else {}),
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -219,7 +220,7 @@ def probe_model(model_key: str, context_size: int, port: int, include_structured
         }
     
 
-    model_alias = {"qwen": "qwen-local", "gemma4": "gemma4-local"}[model_key]
+    model_alias = {"qwen35": "qwen35-local", "gemma4": "gemma4-local"}[model_key]
     for name, spec in tests.items():
         reply = request_chat(port, model_alias, spec["messages"], spec["max_tokens"], timeout=spec.get("timeout", 180))
         result["tests"][name] = reply

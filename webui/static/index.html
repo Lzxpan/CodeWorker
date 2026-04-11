@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CodeWorker V0.97b Web UI</title>
+  <title>CodeWorker V0.98b Web UI</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
         <div class="brand-main">
           <div class="brand-mark">CW</div>
           <div class="brand-copy">
-            <h1 id="brandTitle">CodeWorker V0.97b</h1>
+            <h1 id="brandTitle">CodeWorker V0.98b</h1>
             <p id="brandSubtitle">本地離線專案分析與對話</p>
           </div>
         </div>
@@ -38,7 +38,7 @@
             <button type="button" class="help-trigger" data-help="model-key" aria-label="模型說明">?</button>
           </div>
           <select id="modelKey">
-            <option value="qwen">Qwen 2.5 Coder 7B</option>
+            <option value="qwen35" selected>Qwen 3.5 9B Vision</option>
             <option value="gemma4">Gemma 4 E4B</option>
           </select>
         </div>
@@ -114,10 +114,6 @@
             <h2 id="fileTreeTitle">檔案樹</h2>
             <button type="button" class="help-trigger" data-help="file-tree" aria-label="檔案樹說明">?</button>
           </div>
-          <div class="action-item">
-            <button id="applyPinsBtn" class="ghost">套用釘選</button>
-            <button type="button" class="help-trigger" data-help="apply-pins" aria-label="套用釘選說明">?</button>
-          </div>
         </div>
         <div id="fileTree" class="tree empty">尚未載入檔案。</div>
       </section>
@@ -134,20 +130,33 @@
           <div id="statusBadge" class="status">待命</div>
         </div>
         <div id="chatLog" class="chat-log"></div>
+        <div id="contextCoverageBanner" class="context-coverage-banner hidden" data-mode="full">尚未送出上下文。</div>
         <form id="chatForm" class="chat-form">
           <div class="field-label-row">
             <label id="chatInputLabel" for="chatInput" class="meta">對話輸入</label>
             <button type="button" class="help-trigger" data-help="chat-input" aria-label="對話輸入說明">?</button>
           </div>
           <textarea id="chatInput" rows="4" placeholder="輸入你的問題，例如：請分析登入流程涉及哪些檔案？"></textarea>
-          <div class="actions">
-            <div class="action-item">
-              <button id="sendChatBtn" type="submit" class="primary">送出</button>
-              <button type="button" class="help-trigger" data-help="send-chat" aria-label="送出說明">?</button>
+          <div id="chatImagePreview" class="chat-image-preview hidden"></div>
+          <div class="chat-footer-row">
+            <div class="chat-footer-meta">
+              <span id="chatImageLabel" class="meta">圖片附件</span>
+              <span id="chatImagePasteHint" class="meta">可貼上截圖，送圖時會自動使用 Qwen 3.5。</span>
+              <div class="chat-tool-row">
+                <input id="chatImageInput" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+                <button id="attachImageBtn" type="button">上傳圖片</button>
+                <button id="removeChatImageBtn" type="button" class="ghost hidden">移除圖片</button>
+              </div>
             </div>
-            <div class="action-item">
-              <button type="button" id="clearChatBtn">清空對話</button>
-              <button type="button" class="help-trigger" data-help="clear-chat" aria-label="清空對話說明">?</button>
+            <div class="actions chat-actions">
+              <div class="action-item">
+                <button id="sendChatBtn" type="submit" class="primary">送出</button>
+                <button type="button" class="help-trigger" data-help="send-chat" aria-label="送出說明">?</button>
+              </div>
+              <div class="action-item">
+                <button type="button" id="clearChatBtn">清空對話</button>
+                <button type="button" class="help-trigger" data-help="clear-chat" aria-label="清空對話說明">?</button>
+              </div>
             </div>
           </div>
         </form>

@@ -1,9 +1,13 @@
 const state = {
   uiState: "idle",
   projectPath: "",
-  modelKey: "qwen",
+  modelKey: "qwen35",
+  modelCapabilities: {},
   language: localStorage.getItem("codeworker.language") || "zh-Hant",
   pinnedFiles: new Set(),
+  pinSyncTimer: null,
+  pinSyncRollback: null,
+  pinSyncRequestId: 0,
   currentPreviewPath: null,
   pendingEdit: null,
   history: [],
@@ -13,22 +17,25 @@ const state = {
   lastStatusText: "待命",
   lastStatusBusy: false,
   lastProgress: { progress: 0, step: "", title: "背景作業執行中" },
+  lastContextCoverage: null,
   summaryRaw: "",
   tree: [],
   openHelpKey: null,
+  chatImage: null,
 };
 
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V0.97b Web UI",
-    brandTitle: "CodeWorker V0.97b",
+    pageTitle: "CodeWorker V0.98b Web UI",
+    brandTitle: "CodeWorker V0.98b",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
       projectPath: "專案路徑",
       model: "模型",
       chatInput: "對話輸入",
+      chatImage: "圖片附件",
     },
     headings: {
       errorPanel: "錯誤訊息",
@@ -44,9 +51,10 @@ const I18N = {
       redownloadModel: "重新下載模型",
       dismiss: "關閉",
       refresh: "重新整理",
-      applyPins: "套用釘選",
       send: "送出",
       clearChat: "清空對話",
+      attachImage: "上傳圖片",
+      removeImage: "移除圖片",
     },
     hints: {
       firstRun: "第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。",
@@ -57,6 +65,9 @@ const I18N = {
       initialPreview: "點左側檔案即可預覽內容。檔案預覽僅供閱讀，不會自動加入模型上下文。",
       projectOpened: "專案已開啟。",
       projectOpenedReady: "專案已開啟。你可以先按「分析專案」，或直接開始提問。",
+      imagePasteHint: "可貼上截圖；送出時會使用目前選定且支援圖片的模型。",
+      imageAttachedHint: "已附加圖片，可直接詢問圖片內容或搭配專案上下文提問。",
+      contextCoverageHidden: "尚未送出上下文。",
     },
     placeholders: {
       projectPath: "點擊這裡選擇專案資料夾",
@@ -79,7 +90,7 @@ const I18N = {
       tests: "測試相關檔案",
       none: "無",
       notFound: "未明確找到",
-      pinned: "已套用釘選檔案",
+      pinned: "已同步釘選檔案",
       noPins: "(無)",
       moreCount: (count) => `+${count} 個`,
     },
@@ -102,7 +113,11 @@ const I18N = {
       historyCleared: "對話已清空",
       modelRedownloaded: "模型已重新下載",
       modelRedownloadFailed: "模型重新下載失敗",
-      appliedPins: (count) => `已套用 ${count} 個釘選檔案`,
+      appliedPins: (count) => `已同步 ${count} 個釘選檔案`,
+      uploadingImage: "正在上傳圖片",
+      imageAttached: "圖片已附加",
+      imageRemoved: "已移除圖片",
+      imageModelUnsupported: "目前選定模型不支援圖片，請改用支援圖片的模型。",
     },
     progress: {
       defaultTitle: "背景作業執行中",
@@ -113,8 +128,8 @@ const I18N = {
     errors: {
       unexpected: "發生未預期錯誤。",
       requestFailed: "Request failed.",
-      pinnedRequiredMessage: "請先套用釘選檔案。",
-      pinnedRequiredDetails: "請先在檔案樹勾選並套用至少一個檔案，模型才會根據這些檔案分析。",
+      pinnedRequiredMessage: "請先勾選釘選檔案。",
+      pinnedRequiredDetails: "請先在檔案樹勾選至少一個檔案，模型才會根據這些檔案分析。",
       projectNotReady: "請先完成開啟專案。",
       projectPathInvalid: "請先選擇專案資料夾。",
       pickFolderFailed: "選擇資料夾失敗。",
@@ -128,18 +143,23 @@ const I18N = {
       modelReady: "模型已重新下載完成。",
       modelReadyDetails: "請再次按「開啟專案」重新啟動模型與索引流程。",
       taskFailed: "Task failed.",
+      imageUploadFailed: "圖片上傳失敗。",
+      emptyChat: "請輸入問題或附加圖片。",
+      modelEmptyReply: "模型沒有產生可顯示的最終答案。",
+      imageModelUnsupported: "目前選定模型不支援圖片輸入，請切換到支援圖片的模型後再送出。",
     },
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V0.97b Web UI",
-    brandTitle: "CodeWorker V0.97b",
+    pageTitle: "CodeWorker V0.98b Web UI",
+    brandTitle: "CodeWorker V0.98b",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
       projectPath: "Project path",
       model: "Model",
       chatInput: "Chat input",
+      chatImage: "Image attachment",
     },
     headings: {
       errorPanel: "Errors",
@@ -155,9 +175,10 @@ const I18N = {
       redownloadModel: "Redownload model",
       dismiss: "Close",
       refresh: "Refresh",
-      applyPins: "Apply pins",
       send: "Send",
       clearChat: "Clear chat",
+      attachImage: "Attach image",
+      removeImage: "Remove image",
     },
     hints: {
       firstRun: "On the first run, CodeWorker will automatically download missing runtime files or models.",
@@ -168,6 +189,9 @@ const I18N = {
       initialPreview: "Click a file on the left to preview it. File preview is read-only and does not automatically join model context.",
       projectOpened: "Project opened.",
       projectOpenedReady: "Project opened. You can analyze it first or start asking questions right away.",
+      imagePasteHint: "Paste a screenshot here. The request will use the currently selected model only if it supports images.",
+      imageAttachedHint: "An image is attached. You can ask about the image alone or together with project context.",
+      contextCoverageHidden: "No model context sent yet.",
     },
     placeholders: {
       projectPath: "Click here to choose a project folder",
@@ -190,7 +214,7 @@ const I18N = {
       tests: "Test-related files",
       none: "None",
       notFound: "Not clearly found",
-      pinned: "Applied pinned files",
+      pinned: "Synced pinned files",
       noPins: "(none)",
       moreCount: (count) => `+${count} more`,
     },
@@ -213,7 +237,11 @@ const I18N = {
       historyCleared: "Chat cleared",
       modelRedownloaded: "Model redownloaded",
       modelRedownloadFailed: "Model redownload failed",
-      appliedPins: (count) => `Applied ${count} pinned files`,
+      appliedPins: (count) => `Synced ${count} pinned files`,
+      uploadingImage: "Uploading image",
+      imageAttached: "Image attached",
+      imageRemoved: "Image removed",
+      imageModelUnsupported: "The selected model does not support image input. Switch to a vision-capable model.",
     },
     progress: {
       defaultTitle: "Background task running",
@@ -224,8 +252,8 @@ const I18N = {
     errors: {
       unexpected: "An unexpected error occurred.",
       requestFailed: "Request failed.",
-      pinnedRequiredMessage: "Please apply pinned files first.",
-      pinnedRequiredDetails: "Please check and apply at least one file in the file tree before asking the model to analyze or answer.",
+      pinnedRequiredMessage: "Please pin at least one file first.",
+      pinnedRequiredDetails: "Please check at least one file in the file tree before asking the model to analyze or answer.",
       projectNotReady: "Please finish opening the project first.",
       projectPathInvalid: "Please choose a project folder first.",
       pickFolderFailed: "Failed to choose a folder.",
@@ -239,6 +267,10 @@ const I18N = {
       modelReady: "Model redownload completed.",
       modelReadyDetails: "Click Open project again to restart the model and project indexing flow.",
       taskFailed: "Task failed.",
+      imageUploadFailed: "Image upload failed.",
+      emptyChat: "Enter a question or attach an image.",
+      modelEmptyReply: "The model did not return a displayable final answer.",
+      imageModelUnsupported: "The selected model does not support image input. Switch to a vision-capable model and try again.",
     },
   },
 };
@@ -267,20 +299,32 @@ const HELP_CONTENT = {
   "model-key": {
     "zh-Hant": {
       title: "模型",
-      description: "選擇本次要用的本地模型。預設是 Qwen；Gemma 4 E4B 是評估中可選模型。一般對話與分析會直接顯示較接近模型原始輸出的內容。",
+      description: "選擇本次要用的本地模型。預設與主力模型是 Qwen 3.5；Gemma 4 E4B 保留為第二模型。一般對話與分析會直接顯示較接近模型原始輸出的內容。",
       usage: [
-        "一般建議使用 Qwen 2.5 Coder 7B。",
+        "一般建議直接使用 Qwen 3.5 9B Vision。",
+        "Qwen 3.5 同時支援文字與圖片，也作為目前主要的 code 分析模型。",
+        "Gemma 4 E4B 目前保留為文字分析模型；本機 llama.cpp GGUF 路線尚未把圖片輸入列為正式支援。",
         "若要比較 Gemma 4 E4B 的分析與回答風格，可切換到 Gemma 4 E4B。",
         "切換模型後需重新開啟專案，系統才會改用新模型。",
+      ],
+      notes: [
+        "較大的本地模型建議以 32GB RAM 作為較穩妥的目標，但不會因此阻擋啟動。",
+        "若使用內顯，共用記憶體可能會讓模型可用的系統 RAM 變少。",
       ],
     },
     en: {
       title: "Model",
-      description: "Select the local model for this session. Qwen is the default; Gemma 4 E4B is an evaluation option. General chat and analysis now stay closer to the model's original output.",
+      description: "Select the local model for this session. Qwen 3.5 is the primary default; Gemma 4 E4B remains the secondary option. General chat and analysis stay closer to the model's original output.",
       usage: [
-        "Qwen 2.5 Coder 7B is still the recommended default.",
+        "Qwen 3.5 9B Vision is the recommended default.",
+        "Qwen 3.5 handles both text and image input and is now the main code-analysis model.",
+        "Gemma 4 E4B currently remains a text-analysis model in this local llama.cpp GGUF route; image input is not yet a supported default path.",
         "Switch to Gemma 4 E4B if you want to compare its raw analysis and response style.",
         "After changing the model, reopen the project so the new model is actually used.",
+      ],
+      notes: [
+        "For larger local models, 32GB RAM is the more reliable target, but CodeWorker does not hard-block startup on that basis.",
+        "Integrated graphics may reduce the amount of system memory actually available to the model.",
       ],
     },
   },
@@ -327,9 +371,9 @@ const HELP_CONTENT = {
   "analyze-project": {
     "zh-Hant": {
       title: "分析專案",
-      description: "請模型根據目前已套用的釘選檔案做總覽分析。結果會直接保留較接近模型原始輸出的內容，不再做額外格式修飾。",
+      description: "請模型根據目前已同步的釘選檔案做總覽分析。結果會直接保留較接近模型原始輸出的內容，不再做額外格式修飾。",
       usage: [
-        "先在檔案樹勾選要分析的檔案，再按「套用釘選」。",
+        "先在檔案樹勾選要分析的檔案。",
         "分析結果會出現在中間對話區。",
       ],
     },
@@ -337,7 +381,7 @@ const HELP_CONTENT = {
       title: "Analyze project",
       description: "Ask the model to summarize the currently pinned files. The result is shown closer to the model's original output instead of being heavily reformatted.",
       usage: [
-        "Check the files you want in the file tree, then click Apply pins first.",
+        "Check the files you want in the file tree first.",
         "The analysis result appears in the main chat panel.",
       ],
     },
@@ -396,7 +440,7 @@ const HELP_CONTENT = {
       description: "用來快速看整個專案的大方向。它不是原始碼本身，而是系統掃描後整理出的重點資訊。",
       usage: [
         "可看到專案路徑、已掃描檔案數量、估計文字檔大小、主要語言、可能入口檔案與測試位置。",
-        "也會顯示目前已套用的釘選檔案清單，方便確認模型此刻會看哪些檔案。",
+        "也會顯示目前已同步的釘選檔案清單，方便確認模型此刻會看哪些檔案。",
       ],
     },
     en: {
@@ -438,31 +482,13 @@ const HELP_CONTENT = {
       ],
     },
   },
-  "apply-pins": {
-    "zh-Hant": {
-      title: "套用釘選",
-      description: "把你在檔案樹中勾選的檔案設成目前唯一的模型上下文。",
-      usage: [
-        "先在檔案樹勾選想關注的檔案。",
-        "按下後，模型之後分析與對話只會根據這些檔案回答。",
-      ],
-    },
-    en: {
-      title: "Apply pins",
-      description: "Turn the checked files in the file tree into the active model context.",
-      usage: [
-        "Check the files you want to focus on in the file tree.",
-        "After clicking Apply pins, analysis and chat use only those files as context.",
-      ],
-    },
-  },
   "file-preview": {
     "zh-Hant": {
       title: "檔案預覽",
       description: "顯示你在檔案樹點到的單一檔案內容，讓你先快速閱讀與確認內容。",
       usage: [
         "它是閱讀區，不是編輯器，也不是模型上下文來源。",
-        "若要讓模型真的讀取該檔案，仍需在檔案樹勾選並按「套用釘選」。",
+        "若要讓模型真的讀取該檔案，只要在檔案樹勾選即可。",
       ],
     },
     en: {
@@ -470,7 +496,7 @@ const HELP_CONTENT = {
       description: "Shows the content of the single file you clicked in the file tree so you can read it quickly.",
       usage: [
         "This is a reading area, not an editor, and not a model-context source by itself.",
-        "If you want the model to use this file, you still have to check it in the file tree and click Apply pins.",
+        "If you want the model to use this file, just check it in the file tree.",
       ],
     },
   },
@@ -479,23 +505,23 @@ const HELP_CONTENT = {
       title: "對話",
       description: "你和本地模型互動的主區域。分析結果與一般提問都會顯示在這裡。",
       usage: [
-        "先開啟專案，再套用至少一個釘選檔案後開始提問。",
-        "模型只會根據目前已套用的釘選檔案回答，不會自動讀取你正在預覽的檔案。",
+        "先開啟專案，再勾選至少一個釘選檔案後開始提問。",
+        "模型只會根據目前已同步的釘選檔案回答，不會自動讀取你正在預覽的檔案。",
       ],
     },
     en: {
       title: "Chat",
       description: "The main interaction area between you and the local model. Analysis results and general questions appear here.",
       usage: [
-        "Open a project first, then apply at least one pinned file before asking questions.",
-        "The model only answers from the currently pinned files, not from whatever file you happen to preview.",
+        "Open a project first, then pin at least one file before asking questions.",
+        "The model only answers from the currently synced pinned files, not from whatever file you happen to preview.",
       ],
     },
   },
   "chat-input": {
     "zh-Hant": {
       title: "對話輸入",
-      description: "輸入你要問模型的內容。模型會根據目前已套用的釘選檔案回答。",
+      description: "輸入你要問模型的內容。模型會根據目前已同步的釘選檔案回答。",
       usage: [
         "可直接問：『登入流程在哪些檔案？』",
         "也可下指令：『先不要改檔，先分析 bug 可能位置。』",
@@ -534,7 +560,7 @@ const HELP_CONTENT = {
       description: "清掉目前頁面上的對話歷史，讓你重新開始一輪提問。",
       usage: [
         "只清除這次 web UI 的對話內容。",
-        "不會改變目前已套用的釘選檔案。",
+        "不會改變目前已同步的釘選檔案。",
       ],
     },
     en: {
@@ -562,7 +588,6 @@ const elements = {
   firstRunHint: document.getElementById("firstRunHint"),
   errorPanelTitle: document.getElementById("errorPanelTitle"),
   refreshStatusBtn: document.getElementById("refreshStatusBtn"),
-  applyPinsBtn: document.getElementById("applyPinsBtn"),
   projectSummaryTitle: document.getElementById("projectSummaryTitle"),
   projectSummary: document.getElementById("projectSummary"),
   fileTreeTitle: document.getElementById("fileTreeTitle"),
@@ -573,9 +598,16 @@ const elements = {
   filePreview: document.getElementById("filePreview"),
   chatPanelTitle: document.getElementById("chatPanelTitle"),
   chatLog: document.getElementById("chatLog"),
+  contextCoverageBanner: document.getElementById("contextCoverageBanner"),
   chatForm: document.getElementById("chatForm"),
   chatInputLabel: document.getElementById("chatInputLabel"),
   chatInput: document.getElementById("chatInput"),
+  chatImageLabel: document.getElementById("chatImageLabel"),
+  attachImageBtn: document.getElementById("attachImageBtn"),
+  chatImageInput: document.getElementById("chatImageInput"),
+  chatImagePasteHint: document.getElementById("chatImagePasteHint"),
+  chatImagePreview: document.getElementById("chatImagePreview"),
+  removeChatImageBtn: document.getElementById("removeChatImageBtn"),
   sendChatBtn: document.getElementById("sendChatBtn"),
   clearChatBtn: document.getElementById("clearChatBtn"),
   statusBadge: document.getElementById("statusBadge"),
@@ -704,6 +736,12 @@ function localizeError(error) {
     CHAT_FAILED: {
       message: t("errors.chatFailed"),
     },
+    IMAGE_UPLOAD_FAILED: {
+      message: t("errors.imageUploadFailed"),
+    },
+    MODEL_EMPTY_REPLY: {
+      message: t("errors.modelEmptyReply"),
+    },
     RESET_HISTORY_FAILED: {
       message: t("errors.resetHistoryFailed"),
     },
@@ -741,10 +779,98 @@ function escapeHtml(text) {
     .replaceAll(">", "&gt;");
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderAttachmentHtml(attachment) {
+  if (!attachment) return "";
+  const label = escapeHtml(attachment.name || t("labels.chatImage"));
+  const meta = [attachment.mimeType, attachment.sizeBytes ? formatBytes(attachment.sizeBytes) : ""].filter(Boolean).join(" | ");
+  const preview = attachment.previewUrl
+    ? `<img class="chat-attachment-preview" src="${attachment.previewUrl}" alt="${label}">`
+    : "";
+  return `
+    <div class="chat-attachment-card">
+      ${preview}
+      <div class="chat-attachment-meta">
+        <strong>${label}</strong>
+        <span>${escapeHtml(meta)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderChatImagePreview() {
+  const image = state.chatImage;
+  elements.chatImagePreview.innerHTML = "";
+  elements.chatImagePreview.classList.toggle("hidden", !image);
+  elements.removeChatImageBtn.classList.toggle("hidden", !image);
+  if (!image) return;
+  elements.chatImagePreview.innerHTML = renderAttachmentHtml(image);
+}
+
+function formatContextCoverage(coverage) {
+  if (!coverage || typeof coverage !== "object") {
+    return "";
+  }
+  const filesSent = Number(coverage.filesSent || 0);
+  const selectedFiles = Number(coverage.selectedFiles || filesSent);
+  const fullCount = Number(coverage.fullCount || 0);
+  const excerptCount = Number(coverage.excerptCount || 0);
+  const omittedFiles = Number(coverage.omittedFiles || 0);
+  if (state.language === "en") {
+    const parts = [
+      `Context: sent ${filesSent}/${selectedFiles} pinned file(s)`,
+      excerptCount > 0 ? `(${fullCount} full, ${excerptCount} excerpt)` : "(all full)",
+    ];
+    if (omittedFiles > 0) {
+      parts.push(`, omitted ${omittedFiles}`);
+    }
+    if (coverage.truncated) {
+      parts.push(". The model did not receive every file in full.");
+    }
+    return parts.join("");
+  }
+  const parts = [
+    `本次上下文：已送出 ${filesSent}/${selectedFiles} 個釘選檔案`,
+    excerptCount > 0 ? `（完整 ${fullCount}、節錄 ${excerptCount}）` : "（全部為完整內容）",
+  ];
+  if (omittedFiles > 0) {
+    parts.push(`，另有 ${omittedFiles} 個未送出`);
+  }
+  if (coverage.truncated) {
+    parts.push("。模型沒有讀到所有檔案的完整內容。");
+  }
+  return parts.join("");
+}
+
+function renderContextCoverage(coverage) {
+  state.lastContextCoverage = coverage || null;
+  const text = formatContextCoverage(state.lastContextCoverage);
+  if (!text) {
+    elements.contextCoverageBanner.textContent = t("hints.contextCoverageHidden");
+    elements.contextCoverageBanner.dataset.mode = "full";
+    elements.contextCoverageBanner.classList.add("hidden");
+    return;
+  }
+  elements.contextCoverageBanner.textContent = text;
+  elements.contextCoverageBanner.dataset.mode = state.lastContextCoverage?.truncated ? "excerpt" : "full";
+  elements.contextCoverageBanner.classList.remove("hidden");
+}
+
 async function requestJson(url, options = {}) {
+  const defaultHeaders = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: {
+      ...defaultHeaders,
+      ...(options.headers || {}),
+    },
   });
   const payload = await response.json();
   if (!payload.ok) {
@@ -785,10 +911,11 @@ function setUiState(nextState) {
   elements.modelKey.disabled = opening;
   elements.projectPath.disabled = opening;
   elements.analyzeBtn.disabled = !ready || busy;
-  elements.applyPinsBtn.disabled = !ready || busy;
   elements.sendChatBtn.disabled = !ready || busy;
   elements.chatInput.disabled = !ready || busy;
   elements.clearChatBtn.disabled = !ready;
+  elements.attachImageBtn.disabled = !ready || busy;
+  elements.removeChatImageBtn.disabled = !ready || busy;
 }
 
 function renderProgress(progress = 0, step = "", title = t("progress.defaultTitle")) {
@@ -868,8 +995,8 @@ function clearError() {
   elements.errorActionBtn.classList.add("hidden");
 }
 
-function requirePinnedFiles() {
-  if (state.pinnedFiles.size > 0) {
+function requirePinnedFiles({ allowWithoutPins = false } = {}) {
+  if (allowWithoutPins || state.pinnedFiles.size > 0) {
     return true;
   }
   showError({
@@ -879,6 +1006,77 @@ function requirePinnedFiles() {
   });
   setStatus(t("errors.pinnedRequiredMessage"));
   return false;
+}
+
+function clearChatImage({ silent = false } = {}) {
+  state.chatImage = null;
+  elements.chatImageInput.value = "";
+  renderChatImagePreview();
+  if (!silent) {
+    setStatus(t("statuses.imageRemoved"));
+  }
+}
+
+function getModelCapability(modelKey) {
+  return state.modelCapabilities?.[modelKey] || {};
+}
+
+function selectedModelSupportsImages() {
+  return !!getModelCapability(elements.modelKey.value || state.modelKey).supportsImages;
+}
+
+function getModelLabel(modelKey) {
+  const capability = getModelCapability(modelKey);
+  return capability.displayName || modelKey || "model";
+}
+
+async function uploadImageData({ name, mimeType, data }) {
+  clearError();
+  setStatus(t("statuses.uploadingImage"), true);
+  return requestJson("/api/uploads/image", {
+    method: "POST",
+    body: JSON.stringify({ name, mimeType, data }),
+  });
+}
+
+async function attachImageFile(file) {
+  if (!file) return;
+  const mimeType = String(file.type || "").toLowerCase();
+  if (!mimeType.startsWith("image/")) {
+    showError({ code: "IMAGE_UPLOAD_FAILED", message: t("errors.imageUploadFailed"), details: "Unsupported image format." });
+    return;
+  }
+  const data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Failed to read image."));
+    reader.readAsDataURL(file);
+  });
+  try {
+    const image = await uploadImageData({
+      name: file.name || "image",
+      mimeType,
+      data,
+    });
+    state.chatImage = {
+      ...image,
+      previewUrl: typeof data === "string" ? data : "",
+    };
+    renderChatImagePreview();
+    if (selectedModelSupportsImages()) {
+      setStatus(t("statuses.imageAttached"));
+    } else {
+      setStatus(t("statuses.imageModelUnsupported"));
+      showError({
+        code: "IMAGE_MODEL_UNSUPPORTED",
+        message: t("errors.imageModelUnsupported"),
+        details: `${getModelLabel(elements.modelKey.value)} does not currently accept image input in this CodeWorker build.`,
+      });
+    }
+  } catch (error) {
+    setStatus(t("statuses.chatFailed"));
+    showError(normalizeError(error, "IMAGE_UPLOAD_FAILED", t("errors.imageUploadFailed")));
+  }
 }
 
 function renderPendingEdit(plan) {
@@ -963,12 +1161,27 @@ function formatProjectSummary(summary, pinnedFiles = []) {
   return `${base}${pinnedBlock}`;
 }
 
-function appendMessage(role, content) {
+function setPinnedFiles(files = []) {
+  state.pinnedFiles = new Set((files || []).filter(Boolean));
+  elements.projectSummary.textContent = formatProjectSummary(state.summaryRaw, [...state.pinnedFiles]);
+  renderTree(state.tree);
+}
+
+function appendMessage(role, content, attachments = []) {
+  const normalizedContent = String(content || "").trim();
+  const safeAttachments = Array.isArray(attachments) ? attachments : [];
+  if (!normalizedContent && safeAttachments.length === 0) {
+    return;
+  }
   const item = document.createElement("div");
   item.className = `chat-item ${role}`;
+  const attachmentHtml = safeAttachments.length
+    ? `<div class="chat-attachments">${safeAttachments.map((entry) => renderAttachmentHtml(entry)).join("")}</div>`
+    : "";
   item.innerHTML = `
     <div class="chat-role">${role === "user" ? t("roles.user") : t("roles.assistant")}</div>
-    <div class="chat-content">${escapeHtml(content)}</div>
+    <div class="chat-content">${escapeHtml(normalizedContent)}</div>
+    ${attachmentHtml}
   `;
   elements.chatLog.appendChild(item);
   elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
@@ -976,7 +1189,7 @@ function appendMessage(role, content) {
 
 function renderHistory(history) {
   elements.chatLog.innerHTML = "";
-  history.forEach((item) => appendMessage(item.role, item.content));
+  history.forEach((item) => appendMessage(item.role, item.content, item.attachments || []));
 }
 
 function applyTranslations() {
@@ -1000,9 +1213,13 @@ function applyTranslations() {
   elements.projectSummaryTitle.textContent = t("headings.projectSummary");
   elements.refreshStatusBtn.textContent = t("buttons.refresh");
   elements.fileTreeTitle.textContent = t("headings.fileTree");
-  elements.applyPinsBtn.textContent = t("buttons.applyPins");
   elements.chatPanelTitle.textContent = t("headings.chatPanel");
+  renderContextCoverage(state.lastContextCoverage);
   elements.chatInputLabel.textContent = t("labels.chatInput");
+  elements.chatImageLabel.textContent = t("labels.chatImage");
+  elements.attachImageBtn.textContent = t("buttons.attachImage");
+  elements.chatImagePasteHint.textContent = t("hints.imagePasteHint");
+  elements.removeChatImageBtn.textContent = t("buttons.removeImage");
   elements.sendChatBtn.textContent = t("buttons.send");
   elements.clearChatBtn.textContent = t("buttons.clearChat");
   elements.previewPanelTitle.textContent = t("headings.previewPanel");
@@ -1013,6 +1230,7 @@ function applyTranslations() {
   elements.projectSummary.textContent = formatProjectSummary(state.summaryRaw, [...state.pinnedFiles]);
   renderTree(state.tree);
   renderHistory(state.history);
+  renderChatImagePreview();
   if (!state.currentPreviewPath) {
     elements.previewPath.textContent = t("hints.initialPreviewPath");
     elements.filePreview.textContent = state.projectPath ? t("hints.projectOpenedReady") : t("hints.initialPreview");
@@ -1053,8 +1271,11 @@ function renderTree(tree) {
     checkbox.checked = state.pinnedFiles.has(path);
     checkbox.disabled = state.uiState !== "ready";
     checkbox.addEventListener("change", () => {
+      const rollback = new Set(state.pinnedFiles);
       if (checkbox.checked) state.pinnedFiles.add(path);
       else state.pinnedFiles.delete(path);
+      elements.projectSummary.textContent = formatProjectSummary(state.summaryRaw, [...state.pinnedFiles]);
+      schedulePinnedFilesSync(rollback);
     });
     button.textContent = path;
     button.disabled = state.uiState !== "ready";
@@ -1066,21 +1287,26 @@ function renderTree(tree) {
 async function refreshStatus() {
   const data = await requestJson("/api/status");
   state.projectPath = data.projectPath || "";
-  state.modelKey = data.modelKey || "qwen";
-  state.pinnedFiles = new Set(data.pinnedFiles || []);
+  state.modelKey = data.modelKey || "qwen35";
+  state.modelCapabilities = data.models || {};
+  state.uiState = data.uiState || (data.projectPath ? "ready" : "idle");
+  state.summaryRaw = data.summary || "";
+  clearTimeout(state.pinSyncTimer);
+  state.pinSyncTimer = null;
+  state.pinSyncRollback = null;
   state.currentPreviewPath = data.currentPreviewPath || null;
   state.pendingEdit = data.pendingEdit || null;
   state.history = data.history || [];
-  state.summaryRaw = data.summary || "";
   elements.projectPath.value = state.projectPath;
   elements.modelKey.value = state.modelKey;
   elements.previewPath.textContent = state.currentPreviewPath || t("hints.initialPreviewPath");
-  elements.projectSummary.textContent = formatProjectSummary(data.summary, data.pinnedFiles || []);
   renderTree(data.tree || []);
+  setPinnedFiles(data.pinnedFiles || []);
   renderHistory(state.history);
   renderPendingEdit(state.pendingEdit);
+  renderContextCoverage(null);
   if (state.uiState !== "opening" && state.currentTaskKind !== "redownload-model") {
-    setUiState(data.uiState || (data.projectPath ? "ready" : "idle"));
+    setUiState(state.uiState);
     if (data.projectPath) {
       setStatus(t("statuses.ready"));
       elements.filePreview.textContent = elements.filePreview.textContent || t("hints.projectOpened");
@@ -1093,10 +1319,17 @@ async function refreshStatus() {
 function resetProjectViews(message = t("hints.initialSummary")) {
   state.summaryRaw = message;
   elements.projectSummary.textContent = message;
+  clearTimeout(state.pinSyncTimer);
+  state.pinSyncTimer = null;
+  state.pinSyncRollback = null;
+  state.pinSyncRequestId = 0;
+  state.pinnedFiles = new Set();
   state.currentPreviewPath = null;
+  state.lastContextCoverage = null;
   elements.previewPath.textContent = t("hints.initialPreviewPath");
   elements.filePreview.textContent = t("hints.initialPreview");
   renderPendingEdit(null);
+  renderContextCoverage(null);
   renderTree([]);
 }
 
@@ -1173,6 +1406,7 @@ async function openProject() {
   }
 
   clearError();
+  clearChatImage({ silent: true });
   resetProjectViews(t("statuses.opening"));
   elements.chatLog.innerHTML = "";
   setUiState("opening");
@@ -1195,7 +1429,7 @@ async function openProject() {
 }
 
 async function redownloadModel() {
-  const modelKey = state.lastError?.modelKey || elements.modelKey.value || "qwen";
+  const modelKey = state.lastError?.modelKey || elements.modelKey.value || "qwen35";
   clearError();
   setUiState("error");
   setStatus(t("statuses.redownloading"), true);
@@ -1225,8 +1459,9 @@ async function analyzeProject() {
   try {
     const data = await requestJson("/api/analyze", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ modelKey: elements.modelKey.value }),
     });
+    renderContextCoverage(data.contextCoverage || null);
     appendMessage("assistant", data.reply);
     setStatus(t("statuses.analyzeDone"));
   } catch (error) {
@@ -1301,22 +1536,45 @@ async function loadFilePreview(path) {
   }
 }
 
-async function applyPins() {
+function schedulePinnedFilesSync(rollback) {
   if (state.uiState !== "ready") {
-    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
     return;
   }
-  clearError();
+  if (!state.pinSyncRollback) {
+    state.pinSyncRollback = rollback;
+  }
+  clearTimeout(state.pinSyncTimer);
   setStatus(t("statuses.updateContext"), true);
+  state.pinSyncTimer = window.setTimeout(() => {
+    syncPinnedFiles().catch(() => {});
+  }, 200);
+}
+
+async function syncPinnedFiles() {
+  if (state.uiState !== "ready") {
+    return;
+  }
+  const rollback = state.pinSyncRollback ? new Set(state.pinSyncRollback) : new Set(state.pinnedFiles);
+  state.pinSyncRollback = null;
+  state.pinSyncTimer = null;
+  const requestId = ++state.pinSyncRequestId;
   try {
     const data = await requestJson("/api/pin-files", {
       method: "POST",
       body: JSON.stringify({ files: [...state.pinnedFiles] }),
     });
-    state.pinnedFiles = new Set(data.pinnedFiles || []);
-    await refreshStatus();
+    if (requestId !== state.pinSyncRequestId) {
+      return;
+    }
+    setPinnedFiles(data.pinnedFiles || []);
     setStatus(t("statuses.appliedPins", state.pinnedFiles.size));
   } catch (error) {
+    if (requestId !== state.pinSyncRequestId) {
+      return;
+    }
+    state.pinnedFiles = rollback;
+    elements.projectSummary.textContent = formatProjectSummary(state.summaryRaw, [...state.pinnedFiles]);
+    renderTree(state.tree);
     setStatus(t("statuses.updateFailed"));
     showError(normalizeError(error, "PIN_FILES_FAILED", t("errors.pinFilesFailed")));
   }
@@ -1325,32 +1583,61 @@ async function applyPins() {
 async function sendChat(event) {
   event.preventDefault();
   const message = elements.chatInput.value.trim();
-  if (!message) return;
+  const image = state.chatImage;
+  if (!message && !image) {
+    showError({ code: "CHAT_FAILED", message: t("errors.emptyChat"), details: "" });
+    return;
+  }
   if (state.uiState !== "ready") {
     showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
     return;
   }
-  if (!requirePinnedFiles()) {
+  if (!requirePinnedFiles({ allowWithoutPins: !!image })) {
+    return;
+  }
+  if (image && !selectedModelSupportsImages()) {
+    const modelKey = elements.modelKey.value || state.modelKey;
+    showError({
+      code: "IMAGE_MODEL_UNSUPPORTED",
+      message: t("errors.imageModelUnsupported"),
+      details: `${getModelLabel(modelKey)} does not currently accept image input in this CodeWorker build.`,
+    });
+    setStatus(t("statuses.chatFailed"));
     return;
   }
   clearError();
-  appendMessage("user", message);
+  appendMessage("user", message || t("hints.imageAttachedHint"), image ? [image] : []);
   elements.chatInput.value = "";
   setStatus(t("statuses.thinking"), true);
   try {
     const data = await requestJson("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        message,
+        modelKey: elements.modelKey.value,
+        imageId: image?.id || "",
+      }),
     });
     if (data.plan) {
       renderPendingEdit(data.plan);
     }
-    appendMessage("assistant", data.reply);
+    if (data.modelKey) {
+      state.modelKey = data.modelKey;
+      elements.modelKey.value = data.modelKey;
+    }
+    renderContextCoverage(data.contextCoverage || null);
+    const reply = String(data.reply || "").trim();
+    if (!reply) {
+      throw { code: "MODEL_EMPTY_REPLY", message: t("errors.modelEmptyReply"), details: "" };
+    }
+    appendMessage("assistant", reply);
+    clearChatImage({ silent: true });
     setStatus(t("statuses.done"));
   } catch (error) {
     setStatus(t("statuses.chatFailed"));
     const normalized = normalizeError(error, "CHAT_FAILED", t("errors.chatFailed"));
     showError(normalized);
+    renderContextCoverage(null);
     appendMessage("assistant", `${state.language === "en" ? "Error:" : "發生錯誤："} ${localizeError(normalized).message}`);
   }
 }
@@ -1363,6 +1650,8 @@ function clearChat() {
     .then(() => {
       elements.chatLog.innerHTML = "";
       renderPendingEdit(null);
+      renderContextCoverage(null);
+      clearChatImage({ silent: true });
       setStatus(state.uiState === "ready" ? t("statuses.ready") : t("statuses.historyCleared"));
     })
     .catch((error) => showError(normalizeError(error, "RESET_HISTORY_FAILED", t("errors.resetHistoryFailed"))));
@@ -1389,7 +1678,20 @@ elements.projectPath.addEventListener("keydown", (event) => {
 elements.openProjectBtn.addEventListener("click", openProject);
 elements.analyzeBtn.addEventListener("click", analyzeProject);
 elements.refreshStatusBtn.addEventListener("click", refreshStatus);
-elements.applyPinsBtn.addEventListener("click", applyPins);
+elements.attachImageBtn.addEventListener("click", () => elements.chatImageInput.click());
+elements.chatImageInput.addEventListener("change", async (event) => {
+  const [file] = event.target.files || [];
+  await attachImageFile(file);
+});
+elements.removeChatImageBtn.addEventListener("click", () => clearChatImage());
+elements.chatInput.addEventListener("paste", async (event) => {
+  const items = [...(event.clipboardData?.items || [])];
+  const imageItem = items.find((item) => item.type && item.type.startsWith("image/"));
+  if (!imageItem) return;
+  event.preventDefault();
+  const file = imageItem.getAsFile();
+  await attachImageFile(file);
+});
 elements.chatForm.addEventListener("submit", sendChat);
 elements.clearChatBtn.addEventListener("click", clearChat);
 elements.errorActionBtn.addEventListener("click", redownloadModel);

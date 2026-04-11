@@ -3,7 +3,7 @@ setlocal EnableExtensions
 call "%~dp0_env.cmd"
 
 set "MODEL_KEY=%~1"
-if "%MODEL_KEY%"=="" set "MODEL_KEY=qwen"
+if "%MODEL_KEY%"=="" set "MODEL_KEY=qwen35"
 
 set "PORT=%~2"
 set "CONTEXT_SIZE=%~3"
@@ -45,21 +45,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
-call :find_model_file "%MODEL_DIR%"
-if errorlevel 1 (
+set "NEED_MODEL_BOOTSTRAP=0"
+if not exist "%MODEL_FILE%" set "NEED_MODEL_BOOTSTRAP=1"
+if defined MODEL_MMPROJ if not exist "%MODEL_MMPROJ%" set "NEED_MODEL_BOOTSTRAP=1"
+if "%NEED_MODEL_BOOTSTRAP%"=="1" (
     echo [INFO] Model file not found. Running bootstrap for model "%MODEL_KEY%"...
     call "%~dp0bootstrap.cmd" -SkipRuntime -Models "%MODEL_KEY%"
     if errorlevel 1 (
         call :emit_error MODEL_MISSING "Bootstrap failed while preparing model." "%MODEL_DIR%"
         exit /b 1
     )
-    call :find_model_file "%MODEL_DIR%"
-    if errorlevel 1 (
-        call :emit_error MODEL_MISSING "No GGUF model found." "%MODEL_DIR%"
-        exit /b 1
-    )
 )
 
+if defined MODEL_MMPROJ (
+    echo [INFO] Resolved mmproj file: "%MODEL_MMPROJ%"
+    call :validate_model_file "%MODEL_MMPROJ%"
+    if errorlevel 1 exit /b 1
+)
+
+echo [INFO] Resolved model file: "%MODEL_FILE%"
 call :validate_model_file "%MODEL_FILE%"
 if errorlevel 1 exit /b 1
 
@@ -80,7 +84,11 @@ if not exist "%WINPY_PYTHON%" (
     call :emit_error RUNTIME_MISSING "Portable Python runtime not found." "%WINPY_PYTHON%"
     exit /b 1
 )
-start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --context "%CONTEXT_SIZE%" --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
+if defined MODEL_MMPROJ (
+    start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --mmproj "%MODEL_MMPROJ%" --context "%CONTEXT_SIZE%" --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
+) else (
+    start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --context "%CONTEXT_SIZE%" --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
+)
 
 set /a RETRIES=30
 :wait_loop
@@ -105,32 +113,34 @@ exit /b 0
 
 :resolve_model
 set "MODEL_INPUT=%~1"
+set "MODEL_MMPROJ="
 if /I "%MODEL_INPUT%"=="qwen" (
-    set "MODEL_DIR=%MODELS_DIR%\qwen2.5-coder-7b-instruct-q4"
-    set "MODEL_ALIAS=qwen-local"
-    set "MODEL_PORT=8080"
-    set "MODEL_CONTEXT=16384"
-    exit /b 0
+    call :emit_error MODEL_REMOVED "Model 'qwen' has been removed." "Use 'qwen35' instead."
+    exit /b 1
 )
 if /I "%MODEL_INPUT%"=="gemma4" (
     set "MODEL_DIR=%MODELS_DIR%\gemma4-e4b-it-q4"
     set "MODEL_ALIAS=gemma4-local"
     set "MODEL_PORT=8081"
     set "MODEL_CONTEXT=4096"
+    set "MODEL_FILE=%MODELS_DIR%\gemma4-e4b-it-q4\gemma-4-e4b-it-Q4_K_M.gguf"
+    exit /b 0
+)
+if /I "%MODEL_INPUT%"=="qwen35" (
+    set "MODEL_DIR=%MODELS_DIR%\qwen3.5-9b-q4-mmproj"
+    set "MODEL_ALIAS=qwen35-local"
+    set "MODEL_PORT=8082"
+    set "MODEL_CONTEXT=12288"
+    set "MODEL_FILE=%MODELS_DIR%\qwen3.5-9b-q4-mmproj\Qwen3.5-9B-Q4_K_M.gguf"
+    set "MODEL_MMPROJ=%MODELS_DIR%\qwen3.5-9b-q4-mmproj\mmproj-BF16.gguf"
     exit /b 0
 )
 call :emit_error MODEL_START_FAILED "Unknown model." "%MODEL_INPUT%"
 exit /b 1
 
 :check_memory
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $minimum = 16GB; $total = [int64](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; if ($total -ge $minimum) { exit 0 } else { Write-Host ('[ERROR_CODE] RUNTIME_INVALID'); Write-Host ('[ERROR_MESSAGE] Need at least 16GB RAM.'); Write-Host ('[ERROR_DETAILS] Detected: {0:N1} GB' -f ($total / 1GB)); exit 1 } } catch { Write-Host '[WARN] Unable to determine total physical memory; skipping RAM check.'; exit 0 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $recommended = 32GB; $total = [int64](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; if ($total -gt 0 -and $total -lt $recommended) { Write-Host ('[WARN] Recommended system memory for larger local models is 32GB RAM or above. Detected: {0:N1} GB' -f ($total / 1GB)); Write-Host '[WARN] Integrated graphics may reduce available system memory.' }; exit 0 } catch { Write-Host '[WARN] Unable to determine total physical memory; skipping RAM check.'; exit 0 }"
 exit /b %ERRORLEVEL%
-
-:find_model_file
-set "MODEL_FILE="
-for /f "delims=" %%I in ('dir /b /a-d "%~1\*.gguf" 2^>nul') do if not defined MODEL_FILE set "MODEL_FILE=%~1\%%I"
-if defined MODEL_FILE exit /b 0
-exit /b 1
 
 :validate_model_file
 if not exist "%~1" (

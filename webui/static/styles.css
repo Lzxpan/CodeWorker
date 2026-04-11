@@ -414,6 +414,23 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
   overscroll-behavior: contain;
 }
 
+.context-coverage-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line-strong);
+  background: rgba(13, 92, 99, 0.06);
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.context-coverage-banner[data-mode="excerpt"] {
+  background: rgba(208, 129, 89, 0.1);
+  border-color: rgba(208, 129, 89, 0.24);
+  color: #7a4d31;
+}
+
 .chat-item {
   border-radius: 18px;
   padding: 14px 16px;
@@ -426,6 +443,79 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
 .chat-role { font-size: 0.82rem; color: var(--muted); margin-bottom: 6px; }
 .chat-content { white-space: pre-wrap; line-height: 1.6; }
 .chat-form { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; margin-bottom: 0; flex: 0 0 auto; }
+
+.chat-attach-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.chat-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chat-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+  flex-wrap: wrap;
+}
+
+.chat-footer-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.chat-actions {
+  margin-top: 0;
+  margin-left: auto;
+}
+
+.chat-image-preview,
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.chat-attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.72);
+  min-width: 0;
+}
+
+.chat-attachment-preview {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.chat-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.chat-attachment-meta strong,
+.chat-attachment-meta span {
+  overflow-wrap: anywhere;
+}
 
 .chat-form textarea {
   min-height: 72px;
@@ -534,6 +624,12 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
   .compact-field {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+  .chat-footer-row {
+    align-items: flex-start;
+  }
+  .chat-actions {
+    margin-left: 0;
   }
   .brand {
     align-items: flex-start;

@@ -17,7 +17,7 @@ set "PORTABLE_GIT_BIN=%PORTABLE_GIT_HOME%\bin\git.exe"
 set "AIDER_CONFIG=%CONFIG_DIR%\.aider.conf.yml"
 set "AIDER_MODEL_SETTINGS=%CONFIG_DIR%\.aider.model.settings.yml"
 set "AIDER_MODEL_METADATA=%CONFIG_DIR%\.aider.model.metadata.json"
-set "DEFAULT_PORT=8080"
+set "DEFAULT_PORT=8082"
 
 if not exist "%LOGS_DIR%" mkdir "%LOGS_DIR%" >nul 2>&1
 

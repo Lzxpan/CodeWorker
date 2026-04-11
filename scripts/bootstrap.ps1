@@ -267,10 +267,32 @@ function Download-HuggingFaceModel {
 
     $targetDir = Join-Path $RootDir $Config.targetDir
     Ensure-Directory -Path $targetDir
+    $requiredPatterns = @()
+    if ($Config.PSObject.Properties.Name -contains "filePatterns" -and $Config.filePatterns) {
+        $requiredPatterns += @($Config.filePatterns | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    }
+    if ($Config.PSObject.Properties.Name -contains "filePattern" -and -not [string]::IsNullOrWhiteSpace($Config.filePattern)) {
+        $requiredPatterns = @("$($Config.filePattern)".Trim()) + $requiredPatterns
+    }
+    $requiredPatterns = $requiredPatterns | Select-Object -Unique
+    if (-not $requiredPatterns) {
+        throw "Model manifest is incomplete for '$($Config.repo)': filePattern/filePatterns is empty."
+    }
 
     $existing = Get-ChildItem -LiteralPath $targetDir -Filter *.gguf -ErrorAction SilentlyContinue
     $healthyExisting = $existing | Where-Object { $_.Length -gt 0 }
-    if ($healthyExisting -and $healthyExisting.Count -eq $existing.Count -and -not $Force) {
+    $allRequiredPresent = $false
+    if ($healthyExisting -and $healthyExisting.Count -eq $existing.Count) {
+        $allRequiredPresent = $true
+        foreach ($pattern in $requiredPatterns) {
+            $wildcard = [System.Management.Automation.WildcardPattern]::new($pattern, [System.Management.Automation.WildcardOptions]::IgnoreCase)
+            if (-not ($healthyExisting | Where-Object { $wildcard.IsMatch($_.Name) } | Select-Object -First 1)) {
+                $allRequiredPresent = $false
+                break
+            }
+        }
+    }
+    if ($allRequiredPresent -and -not $Force) {
         Write-Step "Skipping model '$($Config.repo)' because GGUF already exists in '$targetDir'."
         return
     }
@@ -286,13 +308,15 @@ function Download-HuggingFaceModel {
         $headers["Authorization"] = "Bearer $Token"
     }
 
-    foreach ($file in (Get-HuggingFaceFiles -Repo $Config.repo -Pattern $Config.filePattern -Token $Token)) {
-        $destination = Join-Path $targetDir ([System.IO.Path]::GetFileName($file.Name))
-        Write-Step "Downloading $($file.Name)"
-        Download-File -Url $file.Url -Destination $destination -Headers $headers
-        $downloaded = Get-Item -LiteralPath $destination -ErrorAction Stop
-        if ($downloaded.Length -le 0) {
-            throw "Downloaded model file is empty: $destination"
+    foreach ($pattern in $requiredPatterns) {
+        foreach ($file in (Get-HuggingFaceFiles -Repo $Config.repo -Pattern $pattern -Token $Token)) {
+            $destination = Join-Path $targetDir ([System.IO.Path]::GetFileName($file.Name))
+            Write-Step "Downloading $($file.Name)"
+            Download-File -Url $file.Url -Destination $destination -Headers $headers
+            $downloaded = Get-Item -LiteralPath $destination -ErrorAction Stop
+            if ($downloaded.Length -le 0) {
+                throw "Downloaded model file is empty: $destination"
+            }
         }
     }
 
@@ -417,8 +441,10 @@ if (-not $SkipModels) {
             continue
         }
 
-        if ([string]::IsNullOrWhiteSpace($config.repo) -or [string]::IsNullOrWhiteSpace($config.filePattern)) {
-            Write-Step "Skipping model '$name' because repo or filePattern is empty in bootstrap.manifest.json."
+        $hasSinglePattern = -not [string]::IsNullOrWhiteSpace($config.filePattern)
+        $hasPatternArray = $config.PSObject.Properties.Name -contains "filePatterns" -and @($config.filePatterns).Count -gt 0
+        if ([string]::IsNullOrWhiteSpace($config.repo) -or (-not $hasSinglePattern -and -not $hasPatternArray)) {
+            Write-Step "Skipping model '$name' because repo or filePattern/filePatterns is empty in bootstrap.manifest.json."
             continue
         }
 

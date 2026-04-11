@@ -15,6 +15,7 @@ def main() -> int:
     parser.add_argument("--port", required=True)
     parser.add_argument("--alias", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--mmproj")
     parser.add_argument("--context", default="8192")
     parser.add_argument("--threads", default=str(os.cpu_count() or 4))
     parser.add_argument("--log", required=True)
@@ -23,6 +24,7 @@ def main() -> int:
 
     server_path = Path(args.server)
     model_path = Path(args.model)
+    mmproj_path = Path(args.mmproj) if args.mmproj else None
     log_path = Path(args.log)
     err_path = Path(args.err)
 
@@ -32,29 +34,37 @@ def main() -> int:
     if not model_path.exists():
         print(f"Model file not found: {model_path}", file=sys.stderr)
         return 1
+    if mmproj_path is not None and not mmproj_path.exists():
+        print(f"mmproj file not found: {mmproj_path}", file=sys.stderr)
+        return 1
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     err_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(log_path, "ab") as stdout_handle, open(err_path, "ab") as stderr_handle:
+        command = [
+            str(server_path),
+            "--host",
+            args.host,
+            "--port",
+            str(args.port),
+            "--alias",
+            args.alias,
+            "-m",
+            str(model_path),
+        ]
+        if mmproj_path is not None:
+            command.extend(["--mmproj", str(mmproj_path)])
+        command.extend([
+            "-c",
+            str(args.context),
+            "--threads",
+            str(args.threads),
+            "--n-gpu-layers",
+            "0",
+        ])
         process = subprocess.Popen(
-            [
-                str(server_path),
-                "--host",
-                args.host,
-                "--port",
-                str(args.port),
-                "--alias",
-                args.alias,
-                "-m",
-                str(model_path),
-                "-c",
-                str(args.context),
-                "--threads",
-                str(args.threads),
-                "--n-gpu-layers",
-                "0",
-            ],
+            command,
             stdout=stdout_handle,
             stderr=stderr_handle,
             creationflags=DETACHED_FLAGS,

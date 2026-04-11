@@ -1,9 +1,12 @@
 import argparse
+import base64
 import difflib
+import fnmatch
 import json
 import mimetypes
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -37,37 +40,86 @@ MAX_TREE_CONTEXT_ITEMS = 30
 MAX_CHAT_HISTORY_ITEMS = 4
 ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
+DEFAULT_MODEL_KEY = "qwen35"
+DEFAULT_MODEL_ALIAS = "qwen35-local"
 MODEL_PORTS = {
-    "qwen": 8080,
     "gemma4": 8081,
+    "qwen35": 8082,
 }
 MODEL_DEFAULT_CONTEXT = {
-    "qwen": 16384,
     "gemma4": 4096,
+    "qwen35": 12288,
 }
 MODEL_CHAT_MAX_TOKENS = {
-    "qwen": 1400,
     "gemma4": 3200,
+    "qwen35": 1024,
 }
 MODEL_ANALYZE_MAX_TOKENS = {
-    "qwen": 1600,
     "gemma4": 2800,
+    "qwen35": 1200,
 }
 MODEL_CHAT_TIMEOUT_SECONDS = {
-    "qwen": 1200,
     "gemma4": 1200,
+    "qwen35": 1200,
 }
 MODEL_ANALYZE_TIMEOUT_SECONDS = {
-    "qwen": 1200,
     "gemma4": 1200,
+    "qwen35": 1200,
 }
 MODEL_HISTORY_LIMIT = {
-    "qwen": 4,
     "gemma4": 1,
+    "qwen35": 2,
 }
 MODEL_CONTEXT_LIMITS = {
-    "qwen": {"max_files": 4, "file_chars": 3600, "total_chars": 12000, "single_file_chars": 22000, "single_total_chars": 22000},
     "gemma4": {"max_files": 2, "file_chars": 2600, "total_chars": 9000, "single_file_chars": 18000, "single_total_chars": 18000},
+    "qwen35": {
+        "max_files": 4,
+        "file_chars": 6400,
+        "total_chars": 26000,
+        "single_file_chars": 26000,
+        "single_total_chars": 30000,
+        "full_max_files": 4,
+        "full_total_chars": 32000,
+        "full_file_chars": 22000,
+    },
+}
+MODEL_ALIASES = {
+    "gemma4": "gemma4-local",
+    "qwen35": "qwen35-local",
+}
+MODEL_DIR_NAMES = {
+    "gemma4": "gemma4-e4b-it-q4",
+    "qwen35": "qwen3.5-9b-q4-mmproj",
+}
+MODEL_FILE_PATTERNS = {
+    "gemma4": "gemma-4-e4b-it-Q4_K_M.gguf",
+    "qwen35": "Qwen3.5-9B-Q4_K_M.gguf",
+}
+MODEL_MMPROJ_PATTERNS = {
+    "qwen35": "mmproj-BF16.gguf",
+}
+MODEL_CAPABILITIES = {
+    "gemma4": {
+        "display_name": "Gemma 4 E4B",
+        "supports_images": False,
+        "requires_mmproj": False,
+        "compact_image_context": False,
+    },
+    "qwen35": {
+        "display_name": "Qwen 3.5 9B Vision",
+        "supports_images": True,
+        "requires_mmproj": True,
+        "compact_image_context": True,
+    },
+}
+SUPPORTED_MODEL_KEYS = set(MODEL_PORTS.keys())
+IMAGE_UPLOAD_DIR = ROOT_DIR / ".tmp" / "chat-images"
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_MODEL_IMAGE_EDGE = 896
+SUPPORTED_IMAGE_MIME_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
 }
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
@@ -128,8 +180,8 @@ class ProjectFile:
 @dataclass
 class SessionState:
     project_path: Optional[str] = None
-    model_key: str = "qwen"
-    model_alias: str = "qwen-local"
+    model_key: str = DEFAULT_MODEL_KEY
+    model_alias: str = DEFAULT_MODEL_ALIAS
     summary: str = ""
     tree: List[str] = field(default_factory=list)
     files: List[ProjectFile] = field(default_factory=list)
@@ -137,7 +189,7 @@ class SessionState:
     tests: List[str] = field(default_factory=list)
     pinned_files: List[str] = field(default_factory=list)
     current_preview_path: Optional[str] = None
-    history: List[Dict[str, str]] = field(default_factory=list)
+    history: List[Dict[str, object]] = field(default_factory=list)
     pending_edit: Optional[Dict[str, object]] = None
     ui_state: str = "idle"
 
@@ -165,18 +217,83 @@ HF_API_HEADERS = {
 DETACHED_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 MODEL_SERVER_PROCESSES: Dict[Tuple[str, int], subprocess.Popen] = {}
 MODEL_SERVER_LOG_HANDLES: Dict[Tuple[str, int], Tuple[object, object]] = {}
+IMAGE_UPLOADS: Dict[str, Dict[str, object]] = {}
+IMAGE_UPLOADS_LOCK = threading.Lock()
+ANSWER_ONLY_SYSTEM_PROMPT = (
+    "請只輸出最終答案，不要輸出 thinking、推理過程、分析步驟或 reasoning。"
+    "若需要整理，直接給結論與可執行重點。"
+)
+ANSWER_ONLY_RETRY_PROMPT = (
+    "上一輪只產生了 reasoning，沒有產生可顯示的 final answer。"
+    "請重新回答同一個問題，只輸出最終答案，不要輸出 thinking、推理過程、分析步驟或 reasoning。"
+)
+
+
+class ModelReplyError(RuntimeError):
+    def __init__(self, error: Dict[str, object]):
+        super().__init__(str(error.get("message", "Model reply failed.")))
+        self.error = error
 
 
 def get_model_key_from_alias(model_alias: str) -> str:
     lowered = (model_alias or "").lower()
+    if lowered.startswith("qwen35"):
+        return "qwen35"
     if lowered.startswith("gemma4"):
         return "gemma4"
-    return "qwen"
+    return DEFAULT_MODEL_KEY
 
 
 def get_model_port(model_name: str) -> int:
     model_key = get_model_key_from_alias(model_name)
-    return MODEL_PORTS.get(model_key, MODEL_PORTS["qwen"])
+    return MODEL_PORTS.get(model_key, MODEL_PORTS[DEFAULT_MODEL_KEY])
+
+
+def get_model_alias(model_key: str) -> str:
+    return MODEL_ALIASES.get(model_key, MODEL_ALIASES[DEFAULT_MODEL_KEY])
+
+
+def get_model_directory(model_key: str) -> Path:
+    return ROOT_DIR / "models" / MODEL_DIR_NAMES.get(model_key, MODEL_DIR_NAMES[DEFAULT_MODEL_KEY])
+
+
+def get_model_file_pattern(model_key: str) -> str:
+    return MODEL_FILE_PATTERNS.get(model_key, MODEL_FILE_PATTERNS[DEFAULT_MODEL_KEY])
+
+
+def get_model_mmproj_pattern(model_key: str) -> Optional[str]:
+    return MODEL_MMPROJ_PATTERNS.get(model_key)
+
+
+def get_model_capabilities(model_key: str) -> Dict[str, object]:
+    default = {
+        "display_name": model_key,
+        "supports_images": False,
+        "requires_mmproj": False,
+        "compact_image_context": False,
+    }
+    default.update(MODEL_CAPABILITIES.get(model_key, {}))
+    return default
+
+
+def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
+    return {
+        key: {
+            "displayName": str(get_model_capabilities(key).get("display_name", key)),
+            "supportsImages": bool(get_model_capabilities(key).get("supports_images")),
+            "requiresMmproj": bool(get_model_capabilities(key).get("requires_mmproj")),
+            "compactImageContext": bool(get_model_capabilities(key).get("compact_image_context")),
+        }
+        for key in sorted(SUPPORTED_MODEL_KEYS)
+    }
+
+
+def model_supports_images(model_key: str) -> bool:
+    return bool(get_model_capabilities(model_key).get("supports_images"))
+
+
+def model_prefers_compact_image_context(model_key: str) -> bool:
+    return bool(get_model_capabilities(model_key).get("compact_image_context"))
 
 
 def get_model_endpoint(model_name: str) -> str:
@@ -184,34 +301,41 @@ def get_model_endpoint(model_name: str) -> str:
 
 
 def get_model_context_limit(model_key: str) -> int:
-    return MODEL_DEFAULT_CONTEXT.get(model_key, MODEL_DEFAULT_CONTEXT["qwen"])
+    return MODEL_DEFAULT_CONTEXT.get(model_key, MODEL_DEFAULT_CONTEXT[DEFAULT_MODEL_KEY])
 
 
 def get_chat_history_limit(model_key: str) -> int:
-    return MODEL_HISTORY_LIMIT.get(model_key, MODEL_HISTORY_LIMIT["qwen"])
+    return MODEL_HISTORY_LIMIT.get(model_key, MODEL_HISTORY_LIMIT[DEFAULT_MODEL_KEY])
 
 
 def get_chat_max_tokens(model_key: str) -> int:
-    return MODEL_CHAT_MAX_TOKENS.get(model_key, MODEL_CHAT_MAX_TOKENS["qwen"])
+    return MODEL_CHAT_MAX_TOKENS.get(model_key, MODEL_CHAT_MAX_TOKENS[DEFAULT_MODEL_KEY])
 
 
 def get_analyze_max_tokens(model_key: str) -> int:
-    return MODEL_ANALYZE_MAX_TOKENS.get(model_key, MODEL_ANALYZE_MAX_TOKENS["qwen"])
+    return MODEL_ANALYZE_MAX_TOKENS.get(model_key, MODEL_ANALYZE_MAX_TOKENS[DEFAULT_MODEL_KEY])
 
 
 def get_chat_timeout_seconds(model_key: str) -> int:
-    return MODEL_CHAT_TIMEOUT_SECONDS.get(model_key, MODEL_CHAT_TIMEOUT_SECONDS["qwen"])
+    return MODEL_CHAT_TIMEOUT_SECONDS.get(model_key, MODEL_CHAT_TIMEOUT_SECONDS[DEFAULT_MODEL_KEY])
 
 
 def get_analyze_timeout_seconds(model_key: str) -> int:
-    return MODEL_ANALYZE_TIMEOUT_SECONDS.get(model_key, MODEL_ANALYZE_TIMEOUT_SECONDS["qwen"])
+    return MODEL_ANALYZE_TIMEOUT_SECONDS.get(model_key, MODEL_ANALYZE_TIMEOUT_SECONDS[DEFAULT_MODEL_KEY])
 
 
-def get_context_limits(model_key: str, single_file_focus: bool) -> Dict[str, int]:
-    limits = MODEL_CONTEXT_LIMITS.get(model_key, MODEL_CONTEXT_LIMITS["qwen"]).copy()
+def get_context_limits(model_key: str, single_file_focus: bool, prefer_compact: bool = False) -> Dict[str, int]:
+    limits = MODEL_CONTEXT_LIMITS.get(model_key, MODEL_CONTEXT_LIMITS[DEFAULT_MODEL_KEY]).copy()
     if single_file_focus:
         limits["file_chars"] = limits["single_file_chars"]
         limits["total_chars"] = limits["single_total_chars"]
+    if prefer_compact and model_prefers_compact_image_context(model_key):
+        limits["max_files"] = min(limits.get("max_files", 2), 2)
+        limits["file_chars"] = min(limits.get("file_chars", 3200), 3200)
+        limits["total_chars"] = min(limits.get("total_chars", 9000), 9000)
+        limits["full_max_files"] = 0
+        limits["full_total_chars"] = 0
+        limits["full_file_chars"] = 0
     return limits
 
 
@@ -291,8 +415,8 @@ def get_task(task_id: str) -> Optional[TaskState]:
 def clear_session(ui_state: str = "idle") -> None:
     with STATE_LOCK:
         STATE.project_path = None
-        STATE.model_key = "qwen"
-        STATE.model_alias = "qwen-local"
+        STATE.model_key = DEFAULT_MODEL_KEY
+        STATE.model_alias = DEFAULT_MODEL_ALIAS
         STATE.summary = ""
         STATE.tree = []
         STATE.files = []
@@ -422,9 +546,9 @@ def validate_model_file(model_path: Path) -> None:
         raise ValueError(f"Model file is empty: {model_path}")
 
 
-def check_minimum_memory() -> None:
+def check_minimum_memory() -> Optional[str]:
     if os.name != "nt":
-        return
+        return None
     command = "[int64](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"
     result = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -436,34 +560,197 @@ def check_minimum_memory() -> None:
         timeout=15,
     )
     if result.returncode != 0:
-        return
+        return None
     try:
         total = int(result.stdout.strip())
     except ValueError:
-        return
+        return None
     if total <= 0:
-        return
-    if total < 16 * 1024 * 1024 * 1024:
-        raise RuntimeError(
-            json.dumps(
-                make_error(
-                    "RUNTIME_INVALID",
-                    "Need at least 16GB RAM.",
-                    f"Detected: {total / (1024 * 1024 * 1024):.1f} GB",
-                )
-            )
+        return None
+    if total < 32 * 1024 * 1024 * 1024:
+        return (
+            "Recommended system memory for larger local models is 32GB RAM or above. "
+            f"Detected: {total / (1024 * 1024 * 1024):.1f} GB. "
+            "Integrated graphics may reduce available system memory."
         )
+    return None
 
 
 def resolve_model_details(model_key: str) -> Tuple[Path, str]:
-    if model_key == "gemma4":
-        return ROOT_DIR / "models" / "gemma4-e4b-it-q4", "gemma4-local"
-    return ROOT_DIR / "models" / "qwen2.5-coder-7b-instruct-q4", "qwen-local"
+    return get_model_directory(model_key), get_model_alias(model_key)
 
 
-def find_model_file(model_dir: Path) -> Optional[Path]:
-    matches = sorted(model_dir.glob("*.gguf"))
+def find_model_file(model_dir: Path, pattern: str = "*.gguf") -> Optional[Path]:
+    matches = sorted(
+        path
+        for path in model_dir.glob("*.gguf")
+        if fnmatch.fnmatch(path.name.lower(), pattern.lower())
+    )
     return matches[0] if matches else None
+
+
+def cleanup_image_upload_dir() -> None:
+    if IMAGE_UPLOAD_DIR.exists():
+        shutil.rmtree(IMAGE_UPLOAD_DIR, ignore_errors=True)
+    IMAGE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    with IMAGE_UPLOADS_LOCK:
+        IMAGE_UPLOADS.clear()
+
+
+def decode_image_payload(data: str) -> bytes:
+    raw = str(data or "").strip()
+    if not raw:
+        raise ValueError("Image data is required.")
+    if raw.startswith("data:"):
+        _, _, raw = raw.partition(",")
+    try:
+        return base64.b64decode(raw, validate=True)
+    except Exception as exc:
+        raise ValueError("Image data is not valid base64.") from exc
+
+
+def normalize_uploaded_image(file_path: Path, mime_type: str) -> Dict[str, object]:
+    if mime_type not in {"image/png", "image/jpeg"}:
+        return {"normalized": False}
+    powershell_script = r"""
+Add-Type -AssemblyName System.Drawing
+$ImagePath = $env:CODEWORKER_IMAGE_PATH
+$MimeType = $env:CODEWORKER_IMAGE_MIME
+$MaxEdge = [int]$env:CODEWORKER_IMAGE_MAX_EDGE
+$TempPath = "$ImagePath.resize"
+$source = $null
+$target = $null
+$graphics = $null
+try {
+    $source = [System.Drawing.Image]::FromFile($ImagePath)
+    $width = [int]$source.Width
+    $height = [int]$source.Height
+    if ($width -le $MaxEdge -and $height -le $MaxEdge) {
+        @{ normalized = $false; width = $width; height = $height } | ConvertTo-Json -Compress
+        exit 0
+    }
+    $scale = [Math]::Min($MaxEdge / [double]$width, $MaxEdge / [double]$height)
+    $newWidth = [Math]::Max(1, [int][Math]::Round($width * $scale))
+    $newHeight = [Math]::Max(1, [int][Math]::Round($height * $scale))
+    if (Test-Path $TempPath) {
+        Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+    }
+    $target = New-Object System.Drawing.Bitmap($newWidth, $newHeight)
+    $graphics = [System.Drawing.Graphics]::FromImage($target)
+    $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $graphics.DrawImage($source, 0, 0, $newWidth, $newHeight)
+    if ($MimeType -eq 'image/jpeg') {
+        $target.Save($TempPath, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+    } else {
+        $target.Save($TempPath, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+}
+finally {
+    if ($graphics) { $graphics.Dispose() }
+    if ($target) { $target.Dispose() }
+    if ($source) { $source.Dispose() }
+}
+Move-Item -LiteralPath $TempPath -Destination $ImagePath -Force
+@{ normalized = $true; width = $newWidth; height = $newHeight } | ConvertTo-Json -Compress
+exit 0
+"""
+    try:
+        env = os.environ.copy()
+        env["CODEWORKER_IMAGE_PATH"] = str(file_path)
+        env["CODEWORKER_IMAGE_MIME"] = mime_type
+        env["CODEWORKER_IMAGE_MAX_EDGE"] = str(MAX_MODEL_IMAGE_EDGE)
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                powershell_script,
+            ],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=60,
+            env=env,
+        )
+    except Exception:
+        return {"normalized": False}
+    if result.returncode != 0:
+        return {"normalized": False, "details": (result.stderr or result.stdout).strip()}
+    try:
+        payload = json.loads((result.stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        return {"normalized": False}
+    return {
+        "normalized": bool(payload.get("normalized")),
+        "width": int(payload.get("width", 0) or 0),
+        "height": int(payload.get("height", 0) or 0),
+    }
+
+
+def save_uploaded_image(name: str, mime_type: str, data: str) -> Dict[str, object]:
+    clean_name = Path(str(name or "").strip() or "image").name
+    content_type = str(mime_type or "").strip().lower()
+    extension = SUPPORTED_IMAGE_MIME_TYPES.get(content_type)
+    if not extension:
+        raise ValueError("Unsupported image format. Use PNG, JPEG, or WEBP.")
+    image_bytes = decode_image_payload(data)
+    if not image_bytes:
+        raise ValueError("Uploaded image is empty.")
+    if len(image_bytes) > MAX_IMAGE_UPLOAD_BYTES:
+        raise ValueError(f"Uploaded image is too large. Limit: {MAX_IMAGE_UPLOAD_BYTES // (1024 * 1024)} MB.")
+    image_id = uuid.uuid4().hex
+    file_path = IMAGE_UPLOAD_DIR / f"{image_id}{extension}"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(image_bytes)
+    normalization = normalize_uploaded_image(file_path, content_type)
+    size_bytes = file_path.stat().st_size if file_path.exists() else len(image_bytes)
+    payload = {
+        "id": image_id,
+        "name": clean_name,
+        "mimeType": content_type,
+        "sizeBytes": size_bytes,
+        "path": str(file_path),
+        "kind": "image",
+        "normalizedForModel": bool(normalization.get("normalized")),
+        "width": int(normalization.get("width", 0) or 0),
+        "height": int(normalization.get("height", 0) or 0),
+    }
+    with IMAGE_UPLOADS_LOCK:
+        IMAGE_UPLOADS[image_id] = payload
+    return payload
+
+
+def get_uploaded_image(image_id: str) -> Optional[Dict[str, object]]:
+    if not image_id:
+        return None
+    with IMAGE_UPLOADS_LOCK:
+        image = IMAGE_UPLOADS.get(image_id)
+        return dict(image) if image else None
+
+
+def get_uploaded_image_data_url(image: Dict[str, object]) -> str:
+    file_path = Path(str(image.get("path", "")))
+    if not file_path.exists():
+        raise ValueError("Uploaded image file is no longer available.")
+    encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+    return f"data:{image.get('mimeType', 'image/png')};base64,{encoded}"
+
+
+def build_history_image_attachment(image: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "id": image.get("id"),
+        "kind": "image",
+        "name": image.get("name"),
+        "mimeType": image.get("mimeType"),
+        "sizeBytes": image.get("sizeBytes"),
+    }
 
 
 def query_models(port: int, timeout_sec: int = 2) -> Optional[Dict[str, object]]:
@@ -575,7 +862,7 @@ def try_reclaim_codeworker_port(port: int) -> Optional[str]:
     return f"Port {port} is occupied by PID {pid}: {commandline or 'unknown process'}"
 
 
-def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str]:
+def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str, Optional[Path]]:
     llama_server = ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
     if not llama_server.exists():
         runtime = run_script("bootstrap.cmd", "-SkipModels", timeout_seconds=300)
@@ -591,10 +878,10 @@ def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str]:
             )
 
     model_dir, model_alias = resolve_model_details(model_key)
-    model_file = find_model_file(model_dir)
+    model_file = find_model_file(model_dir, get_model_file_pattern(model_key))
     if model_file is None:
         bootstrap = run_script("bootstrap.cmd", "-SkipRuntime", "-Models", model_key, timeout_seconds=1800)
-        model_file = find_model_file(model_dir)
+        model_file = find_model_file(model_dir, get_model_file_pattern(model_key))
         if bootstrap.returncode != 0 or model_file is None:
             raise RuntimeError(
                 json.dumps(
@@ -607,16 +894,34 @@ def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str]:
                 )
             )
     validate_model_file(model_file)
-    return model_file, model_alias
+    mmproj_file: Optional[Path] = None
+    mmproj_pattern = get_model_mmproj_pattern(model_key)
+    if mmproj_pattern:
+        mmproj_file = find_model_file(model_dir, mmproj_pattern)
+        if mmproj_file is None:
+            raise RuntimeError(
+                json.dumps(
+                    make_error(
+                        "MODEL_MISSING",
+                        "Failed to prepare multimodal projection file.",
+                        f"Missing mmproj in {model_dir}",
+                        extra={"modelKey": model_key},
+                    )
+                )
+            )
+        validate_model_file(mmproj_file)
+    return model_file, model_alias, mmproj_file
 
 
 def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dict[str, object]:
-    if model_key not in {"qwen", "gemma4"}:
+    if model_key not in SUPPORTED_MODEL_KEYS:
         raise RuntimeError(json.dumps(make_error("MODEL_START_FAILED", "Unknown model.", model_key)))
     port = port or get_model_port(model_key)
 
-    check_minimum_memory()
-    model_file, model_alias = ensure_runtime_and_model(model_key)
+    memory_warning = check_minimum_memory()
+    if memory_warning:
+        print(f"[WARN] {memory_warning}")
+    model_file, model_alias, mmproj_file = ensure_runtime_and_model(model_key)
     llama_server = ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
 
     if is_model_ready(model_alias, port):
@@ -649,20 +954,23 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
     ).stdout.strip() or "unknown"
     log_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.log"
     err_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.err.log"
+    launch_args = [
+        sys.executable,
+        str(SCRIPTS_DIR / "launch_llama_server.py"),
+        "--server", str(llama_server),
+        "--host", "127.0.0.1",
+        "--port", str(port),
+        "--alias", model_alias,
+        "--model", str(model_file),
+        "--context", str(get_model_context_limit(model_key)),
+        "--threads", str(os.cpu_count() or 4),
+        "--log", str(log_path),
+        "--err", str(err_path),
+    ]
+    if mmproj_file is not None:
+        launch_args.extend(["--mmproj", str(mmproj_file)])
     subprocess.Popen(
-        [
-            sys.executable,
-            str(SCRIPTS_DIR / "launch_llama_server.py"),
-            "--server", str(llama_server),
-            "--host", "127.0.0.1",
-            "--port", str(port),
-            "--alias", model_alias,
-            "--model", str(model_file),
-            "--context", str(get_model_context_limit(model_key)),
-            "--threads", str(os.cpu_count() or 4),
-            "--log", str(log_path),
-            "--err", str(err_path),
-        ],
+        launch_args,
         cwd=str(ROOT_DIR),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -718,63 +1026,91 @@ def download_model_with_progress(task_id: str, model_key: str) -> Tuple[Path, in
         )
 
     repo = str(model_config.get("repo", "")).strip()
+    file_patterns = model_config.get("filePatterns")
+    if isinstance(file_patterns, list):
+        resolved_patterns = [str(item).strip() for item in file_patterns if str(item).strip()]
+    else:
+        resolved_patterns = []
     file_pattern = str(model_config.get("filePattern", "")).strip()
+    if file_pattern:
+        resolved_patterns.insert(0, file_pattern)
+    seen_patterns = set()
+    required_patterns: List[str] = []
+    for pattern in resolved_patterns:
+        lowered = pattern.lower()
+        if lowered in seen_patterns:
+            continue
+        seen_patterns.add(lowered)
+        required_patterns.append(pattern)
     target_dir = ROOT_DIR / str(model_config.get("targetDir", "")).strip()
-    if not repo or not file_pattern or not str(model_config.get("targetDir", "")).strip():
+    if not repo or not required_patterns or not str(model_config.get("targetDir", "")).strip():
         raise RuntimeError(
             json.dumps(
                 make_error(
                     "MODEL_INVALID",
                     "Model manifest is incomplete.",
-                    f"repo={repo}, filePattern={file_pattern}, targetDir={model_config.get('targetDir', '')}",
+                    f"repo={repo}, filePatterns={required_patterns}, targetDir={model_config.get('targetDir', '')}",
                     extra={"modelKey": model_key},
                 )
             )
         )
 
     update_task(task_id, progress=8, step="解析模型來源", message="正在取得模型檔資訊")
-    filename = resolve_huggingface_filename(repo, file_pattern)
-    download_url = f"https://huggingface.co/{repo}/resolve/main/{urllib.parse.quote(filename)}?download=true"
-
     target_dir.mkdir(parents=True, exist_ok=True)
-    final_path = target_dir / Path(filename).name
-    part_path = final_path.with_suffix(final_path.suffix + ".part")
-    if part_path.exists():
-        part_path.unlink()
+    resolved_filenames = [resolve_huggingface_filename(repo, pattern) for pattern in required_patterns]
+    total_model_bytes = 0
+    downloaded_paths: List[Path] = []
 
-    update_task(task_id, progress=12, step="準備下載", message=f"即將下載 {final_path.name}")
-    request = urllib.request.Request(download_url, headers=HF_API_HEADERS, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            content_length = response.headers.get("Content-Length")
-            total_bytes = int(content_length) if content_length and content_length.isdigit() else 0
-            bytes_written = 0
-            chunk_size = 1024 * 1024
-            with open(part_path, "wb") as handle:
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    bytes_written += len(chunk)
-                    if total_bytes > 0:
-                        progress = 12 + int((bytes_written / total_bytes) * 83)
-                        progress = max(12, min(progress, 95))
-                        message = f"已下載 {human_size(bytes_written)} / {human_size(total_bytes)}"
-                    else:
-                        progress = 12
-                        message = f"已下載 {human_size(bytes_written)}"
-                    update_task(task_id, progress=progress, step="重新下載模型", message=message)
-
-        if final_path.exists():
-            final_path.unlink()
-        os.replace(part_path, final_path)
-        validate_model_file(final_path)
-        return final_path, final_path.stat().st_size
-    except Exception:
+    for index, filename in enumerate(resolved_filenames):
+        final_path = target_dir / Path(filename).name
+        part_path = final_path.with_suffix(final_path.suffix + ".part")
         if part_path.exists():
             part_path.unlink()
-        raise
+
+        segment_start = 12 + int((index / max(len(resolved_filenames), 1)) * 80)
+        segment_end = 12 + int(((index + 1) / max(len(resolved_filenames), 1)) * 80)
+        update_task(task_id, progress=segment_start, step="準備下載", message=f"即將下載 {final_path.name}")
+        download_url = f"https://huggingface.co/{repo}/resolve/main/{urllib.parse.quote(filename)}?download=true"
+        request = urllib.request.Request(download_url, headers=HF_API_HEADERS, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                content_length = response.headers.get("Content-Length")
+                total_bytes = int(content_length) if content_length and content_length.isdigit() else 0
+                bytes_written = 0
+                chunk_size = 1024 * 1024
+                with open(part_path, "wb") as handle:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        bytes_written += len(chunk)
+                        if total_bytes > 0:
+                            local_progress = segment_start + int((bytes_written / total_bytes) * max(segment_end - segment_start, 1))
+                            local_progress = max(segment_start, min(local_progress, segment_end))
+                            message = f"{final_path.name}: 已下載 {human_size(bytes_written)} / {human_size(total_bytes)}"
+                        else:
+                            local_progress = segment_start
+                            message = f"{final_path.name}: 已下載 {human_size(bytes_written)}"
+                        update_task(task_id, progress=local_progress, step="重新下載模型", message=message)
+
+            if final_path.exists():
+                final_path.unlink()
+            os.replace(part_path, final_path)
+            validate_model_file(final_path)
+            downloaded_paths.append(final_path)
+            total_model_bytes += final_path.stat().st_size
+        except Exception:
+            if part_path.exists():
+                part_path.unlink()
+            raise
+
+    primary_path = target_dir / Path(resolve_huggingface_filename(repo, get_model_file_pattern(model_key))).name
+    if not primary_path.exists():
+        if not downloaded_paths:
+            raise RuntimeError("Model download completed but no files were saved.")
+        primary_path = downloaded_paths[0]
+    return primary_path, total_model_bytes
 
 
 def choose_folder() -> Dict[str, object]:
@@ -1383,7 +1719,7 @@ def require_pinned_context(state: SessionState) -> List[str]:
     allowed = {file.path for file in state.files}
     pinned = [path for path in state.pinned_files if path in allowed]
     if not pinned:
-        raise ValueError("請先在檔案樹勾選並套用至少一個檔案，模型才會根據這些檔案分析。")
+        raise ValueError("請先在檔案樹勾選至少一個檔案，模型才會根據這些檔案分析。")
     return pinned
 
 
@@ -1465,7 +1801,7 @@ def build_pending_edit_prompt_block(pending_edit: Optional[Dict[str, object]]) -
     return "\n".join(lines).strip()
 
 
-def normalize_message_roles(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def normalize_message_roles(messages: List[Dict[str, object]]) -> List[Dict[str, str]]:
     normalized: List[Dict[str, str]] = []
     for message in messages:
         role = str(message.get("role", "")).strip()
@@ -1507,20 +1843,20 @@ def sanitize_model_reply(model_alias: str, content: str, raw_mode: bool = False)
 def get_continue_on_length(model_key: str) -> int:
     if model_key == "gemma4":
         return 2
-    if model_key == "qwen":
+    if model_key == "qwen35":
         return 1
     return 0
 
 
 def build_chat_system_prompt(model_key: str) -> str:
-    if model_key == "gemma4":
-        return "請直接回答使用者問題，不要輸出思考過程。"
+    if model_key in {"gemma4", "qwen35"}:
+        return ANSWER_ONLY_SYSTEM_PROMPT
     return ""
 
 
 def build_analyze_system_prompt(model_key: str) -> str:
-    if model_key == "gemma4":
-        return "請直接回答使用者問題，不要輸出思考過程。"
+    if model_key in {"gemma4", "qwen35"}:
+        return ANSWER_ONLY_SYSTEM_PROMPT
     return ""
 
 
@@ -1540,24 +1876,40 @@ def build_raw_analyze_user_message(prompt: str, context: str) -> str:
     )
 
 
-def build_raw_messages(model_key: str, user_content: str, system_prompt: str = "") -> List[Dict[str, str]]:
-    messages: List[Dict[str, str]] = []
-    if model_key == "gemma4" and system_prompt.strip():
+def build_chat_user_content(context: str, message: str, image: Optional[Dict[str, object]] = None) -> object:
+    if not image:
+        return build_raw_chat_user_message(context, message)
+    text_sections: List[str] = []
+    if context.strip():
+        text_sections.append(f"PINNED FILE CONTENT:\n{context}")
+    if message.strip():
+        text_sections.append(f"USER QUESTION:\n{message}")
+    else:
+        text_sections.append("USER QUESTION:\n請根據這張圖片回答。")
+    return [
+        {"type": "text", "text": "\n\n".join(text_sections).strip()},
+        {"type": "image_url", "image_url": {"url": get_uploaded_image_data_url(image)}},
+    ]
+
+
+def build_raw_messages(model_key: str, user_content: object, system_prompt: str = "") -> List[Dict[str, object]]:
+    messages: List[Dict[str, object]] = []
+    if model_key in {"gemma4", "qwen35"} and system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt.strip()})
     messages.append({"role": "user", "content": user_content})
     return messages
 
 
-def build_pinned_file_block(relative_path: str, excerpt: str, max_chars: int) -> str:
-    prefix = f"\n檔案: {relative_path}\nPINNED FILE CONTENT START\n```\n"
+def build_pinned_file_block(relative_path: str, excerpt: str, max_chars: int, mode_label: str = "完整內容") -> Tuple[str, str]:
+    prefix = f"\n檔案: {relative_path} [{mode_label}]\nPINNED FILE CONTENT START\n```\n"
     suffix = "\n```\nPINNED FILE CONTENT END"
     content_budget = max_chars - len(prefix) - len(suffix)
     if content_budget < 160:
-        return ""
+        return "", ""
     content = fit_text_to_limit(excerpt, content_budget)
     if not content:
-        return ""
-    return f"{prefix}{content}{suffix}"
+        return "", ""
+    return f"{prefix}{content}{suffix}", content
 
 
 def build_gemma_locator_messages(
@@ -1672,26 +2024,105 @@ def build_gemma_patch_messages(
     ]
 
 
-def build_project_context(project_root: Path, state: SessionState, message: str) -> str:
+def build_context_coverage(
+    model_key: str,
+    selected_paths: List[str],
+    files: List[Dict[str, object]],
+    char_limit: int,
+    used_chars: int,
+) -> Dict[str, object]:
+    truncated = any(bool(item.get("truncated")) for item in files)
+    return {
+        "modelKey": model_key,
+        "selectedFiles": len(selected_paths),
+        "filesSent": len(files),
+        "fullCount": sum(1 for item in files if str(item.get("mode")) == "full"),
+        "excerptCount": sum(1 for item in files if str(item.get("mode")) == "excerpt"),
+        "truncated": truncated,
+        "omittedFiles": max(0, len(selected_paths) - len(files)),
+        "charLimit": char_limit,
+        "usedChars": used_chars,
+        "files": files,
+    }
+
+
+def build_project_context(
+    project_root: Path,
+    state: SessionState,
+    message: str,
+    prefer_compact: bool = False,
+) -> Tuple[str, Dict[str, object]]:
     selected_paths = rank_paths_for_message(project_root, require_pinned_context(state), message)
     single_file_focus = len(selected_paths) == 1
-    limits = get_context_limits(state.model_key, single_file_focus)
+    limits = get_context_limits(state.model_key, single_file_focus, prefer_compact=prefer_compact)
     selected_paths = selected_paths[: limits["max_files"]]
-    chunks = [
-        "\n".join(
-            [
-                "PINNED FILE CONTENT",
-                "以下是已套用釘選檔案的實際內容，不只是檔名。",
-                "檔案預覽不會自動加入上下文；只有下列 PINNED FILE CONTENT 區塊會提供給模型。",
-                "已套用釘選檔案:",
-                *selected_paths,
-            ]
-        )
+    header_lines = [
+        "PINNED FILE CONTENT",
+        "以下是已套用釘選檔案的實際內容，不只是檔名。",
+        "檔案預覽不會自動加入上下文；只有下列 PINNED FILE CONTENT 區塊會提供給模型。",
+        "若檔案標示為 [節錄模式]，代表模型只收到部分內容，不是完整原始碼。",
+        "已套用釘選檔案:",
+        *selected_paths,
     ]
+    header = "\n".join(header_lines)
+    full_max_files = limits.get("full_max_files", 0)
+    full_total_chars = limits.get("full_total_chars", 0)
+    full_file_chars = limits.get("full_file_chars", 0)
+    if (
+        state.model_key == "qwen35"
+        and selected_paths
+        and len(selected_paths) <= full_max_files
+        and full_total_chars > 0
+        and full_file_chars > 0
+    ):
+        full_chunks: List[str] = [header]
+        full_files: List[Dict[str, object]] = []
+        full_chars = len(header)
+        can_use_full_mode = True
+        for relative_path in selected_paths:
+            try:
+                content = read_file_full(project_root, relative_path)
+            except (OSError, ValueError):
+                can_use_full_mode = False
+                break
+            normalized_content = content.strip()
+            if len(normalized_content) > full_file_chars:
+                can_use_full_mode = False
+                break
+            separator_chars = 2 if full_chunks else 0
+            remaining_chars = full_total_chars - full_chars - separator_chars
+            block, sent_content = build_pinned_file_block(relative_path, content, remaining_chars, mode_label="完整內容")
+            if not block or sent_content != normalized_content:
+                can_use_full_mode = False
+                break
+            full_chunks.append(block)
+            full_chars += len(block) + separator_chars
+            full_files.append(
+                {
+                    "path": relative_path,
+                    "mode": "full",
+                    "truncated": False,
+                    "charsSent": len(sent_content),
+                    "charsTotal": len(normalized_content),
+                }
+            )
+        if can_use_full_mode and len(full_files) == len(selected_paths):
+            return "\n\n".join(full_chunks), build_context_coverage(
+                state.model_key,
+                selected_paths,
+                full_files,
+                full_total_chars,
+                full_chars,
+            )
+
+    chunks = [header]
     total_limit = limits["total_chars"]
-    total_chars = sum(len(chunk) for chunk in chunks)
+    total_chars = len(header)
+    files_coverage: List[Dict[str, object]] = []
     for relative_path in selected_paths:
         try:
+            content = read_file_full(project_root, relative_path)
+            normalized_content = content.strip()
             excerpt = build_excerpt_for_message(
                 project_root,
                 relative_path,
@@ -1703,14 +2134,30 @@ def build_project_context(project_root: Path, state: SessionState, message: str)
             continue
         separator_chars = 2 if chunks else 0
         remaining_chars = total_limit - total_chars - separator_chars
-        block = build_pinned_file_block(relative_path, excerpt, remaining_chars)
+        block, sent_content = build_pinned_file_block(relative_path, excerpt, remaining_chars, mode_label="節錄模式")
         if not block:
             if len(chunks) > 1:
                 break
             continue
         chunks.append(block)
         total_chars += len(block) + separator_chars
-    return "\n\n".join(chunks)
+        is_full_content = sent_content == normalized_content
+        files_coverage.append(
+            {
+                "path": relative_path,
+                "mode": "full" if is_full_content else "excerpt",
+                "truncated": not is_full_content,
+                "charsSent": len(sent_content),
+                "charsTotal": len(normalized_content),
+            }
+        )
+    return "\n\n".join(chunks), build_context_coverage(
+        state.model_key,
+        selected_paths,
+        files_coverage,
+        total_limit,
+        total_chars,
+    )
 
 
 def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
@@ -2264,7 +2711,7 @@ def build_edit_messages(
     allowed_files: List[str],
     pending_edit: Optional[Dict[str, object]] = None,
     refine_mode: bool = False,
-    model_key: str = "qwen",
+    model_key: str = DEFAULT_MODEL_KEY,
 ) -> List[Dict[str, str]]:
     allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無可編輯檔案)"
     forbidden_identifiers = parse_forbidden_identifiers(message)
@@ -2367,7 +2814,7 @@ def build_advisory_edit_messages(
     failure_reason: str = "",
     pending_edit: Optional[Dict[str, object]] = None,
     refine_mode: bool = False,
-    model_key: str = "qwen",
+    model_key: str = DEFAULT_MODEL_KEY,
 ) -> List[Dict[str, str]]:
     allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (無候選檔案)"
     forbidden_identifiers = parse_forbidden_identifiers(message)
@@ -2456,7 +2903,7 @@ def build_advisory_edit_messages(
     ]
 
 
-def prepare_messages_for_model(model_alias: str, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def prepare_messages_for_model(model_alias: str, messages: List[Dict[str, object]]) -> List[Dict[str, object]]:
     if model_alias.startswith("gemma4"):
         return normalize_message_roles(messages)
     return messages
@@ -2909,16 +3356,39 @@ def create_edit_plan(project_root: Path, state: SessionState, message: str) -> D
 
 def call_local_model(
     model_alias: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, object]],
     timeout_seconds: int = 180,
     max_tokens: int = 600,
     continue_on_length: int = 0,
     raw_mode: bool = False,
 ) -> str:
     endpoint = get_model_endpoint(model_alias)
+    model_key = get_model_key_from_alias(model_alias)
     working_messages = list(messages)
     parts: List[str] = []
     remaining_continuations = max(0, continue_on_length)
+    answer_only_retry_used = False
+
+    def raise_model_empty_reply(finish_reason: str, reasoning_content: str = "") -> None:
+        details_parts = []
+        if finish_reason:
+            details_parts.append(f"finish_reason={finish_reason}")
+        if reasoning_content.strip():
+            details_parts.append("reasoning_content_only=true")
+        if answer_only_retry_used:
+            details_parts.append("answer_only_retry_exhausted=true")
+        details = "模型沒有產生可顯示的最終答案。"
+        if details_parts:
+            details = f"{details} {'; '.join(details_parts)}"
+        raise ModelReplyError(
+            make_error(
+                "MODEL_EMPTY_REPLY",
+                "模型沒有產生可顯示的最終答案。",
+                details,
+                extra={"modelKey": model_key},
+            )
+        )
+
     while True:
         prepared_messages = prepare_messages_for_model(model_alias, working_messages)
         payload = json.dumps(
@@ -2928,6 +3398,7 @@ def call_local_model(
                 "temperature": 0.2,
                 "stream": False,
                 "max_tokens": max_tokens,
+                **({"chat_template_kwargs": {"enable_thinking": False}} if model_key == "qwen35" else {}),
             },
             ensure_ascii=False,
         ).encode("utf-8")
@@ -2950,7 +3421,8 @@ def call_local_model(
                 details = exc.read().decode("utf-8", errors="replace")
             except Exception:
                 details = str(exc)
-            if exc.code == 400 and "exceeds the available context size" in details:
+            lowered_details = details.lower()
+            if ("exceeds the available context size" in lowered_details) or ("context size has been exceeded" in lowered_details):
                 raise RuntimeError(
                     "目前送給模型的專案上下文太大，超過這台機器目前可用的 context 上限。請縮小對話歷史、減少釘選檔案，或重新開啟專案後再試。"
                 ) from exc
@@ -2964,10 +3436,18 @@ def call_local_model(
             raise RuntimeError(f"Failed to call local model endpoint: {exc}") from exc
         try:
             choice = body["choices"][0]
-            raw_content = str(choice["message"]["content"])
+            message = choice.get("message") or {}
+            raw_content = str(message.get("content") or "")
+            reasoning_content = str(message.get("reasoning_content") or "")
             finish_reason = str(choice.get("finish_reason", "") or "")
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError("Unexpected model response format.") from exc
+        if not raw_content.strip():
+            if model_key == "qwen35" and not answer_only_retry_used and (reasoning_content.strip() or finish_reason == "length"):
+                answer_only_retry_used = True
+                working_messages.append({"role": "user", "content": ANSWER_ONLY_RETRY_PROMPT})
+                continue
+            raise_model_empty_reply(finish_reason, reasoning_content)
         parts.append(raw_content)
         if finish_reason != "length" or remaining_continuations <= 0:
             break
@@ -3125,7 +3605,7 @@ def open_project_worker(task_id: str, project_path: str, model_key: str) -> None
 def redownload_model_worker(task_id: str, model_key: str) -> None:
     try:
         update_task(task_id, status="running", progress=3, step="驗證模型", message="正在確認模型設定")
-        if model_key not in {"qwen", "gemma4"}:
+        if model_key not in SUPPORTED_MODEL_KEYS:
             raise RuntimeError(json.dumps(make_error("MODEL_INVALID", "Unsupported model.", model_key)))
 
         model_path, model_size = download_model_with_progress(task_id, model_key)
@@ -3195,6 +3675,7 @@ def get_status_payload() -> Dict[str, object]:
             "projectPath": STATE.project_path,
             "modelKey": STATE.model_key,
             "modelAlias": STATE.model_alias,
+            "models": get_public_model_capabilities(),
             "summary": STATE.summary,
             "tree": STATE.tree,
             "entrypoints": STATE.entrypoints,
@@ -3242,6 +3723,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/chat":
             self.handle_chat()
+            return
+        if parsed.path == "/api/uploads/image":
+            self.handle_upload_image()
             return
         if parsed.path == "/api/edit/plan":
             self.handle_edit_plan()
@@ -3292,9 +3776,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             project_path = str(payload.get("projectPath", "")).strip()
-            model_key = str(payload.get("modelKey", "qwen")).strip().lower()
-            if model_key not in {"qwen", "gemma4"}:
-                raise ValueError("Unsupported model. Use qwen or gemma4.")
+            model_key = str(payload.get("modelKey", DEFAULT_MODEL_KEY)).strip().lower()
+            if model_key not in SUPPORTED_MODEL_KEYS:
+                raise ValueError(f"Unsupported model. Use one of: {', '.join(sorted(SUPPORTED_MODEL_KEYS))}.")
             if not project_path:
                 raise ValueError("Project path is required.")
             setattr(self.server, "_pending_edit_internal", None)
@@ -3306,24 +3790,63 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_redownload_model(self) -> None:
         try:
             payload = self.read_json_body()
-            model_key = str(payload.get("modelKey", "qwen")).strip().lower()
+            model_key = str(payload.get("modelKey", DEFAULT_MODEL_KEY)).strip().lower()
+            if model_key not in SUPPORTED_MODEL_KEYS:
+                raise ValueError(f"Unsupported model. Use one of: {', '.join(sorted(SUPPORTED_MODEL_KEYS))}.")
             task = start_background_task(TASK_REDOWNLOAD_MODEL, redownload_model_worker, model_key)
             json_response(self, {"ok": True, "data": {"taskId": task.id, "kind": task.kind}})
         except Exception as exc:
             error_response(self, make_error("MODEL_DOWNLOAD_FAILED", "Failed to start model redownload.", str(exc)))
 
+    def handle_upload_image(self) -> None:
+        try:
+            payload = self.read_json_body()
+            image = save_uploaded_image(
+                str(payload.get("name", "")).strip(),
+                str(payload.get("mimeType", "")).strip(),
+                str(payload.get("data", "")),
+            )
+            json_response(self, {"ok": True, "data": image})
+        except ValueError as exc:
+            error_response(self, make_error("IMAGE_UPLOAD_FAILED", "Image upload failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("IMAGE_UPLOAD_FAILED", "Image upload failed.", str(exc)))
+
     def handle_analyze(self) -> None:
         try:
             payload = self.read_json_body()
             prompt = str(payload.get("prompt", DEFAULT_ANALYSIS_PROMPT)).strip() or DEFAULT_ANALYSIS_PROMPT
+            requested_model_key = str(payload.get("modelKey", "")).strip().lower()
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
                 require_pinned_context(STATE)
+                model_key = requested_model_key or STATE.model_key
+                if model_key not in SUPPORTED_MODEL_KEYS:
+                    raise ValueError("Unsupported model.")
                 project_root = Path(STATE.project_path)
-                context = build_project_context(project_root, STATE, prompt)
-                model_alias = STATE.model_alias
-                model_key = STATE.model_key
+                snapshot = SessionState(
+                    project_path=STATE.project_path,
+                    model_key=model_key,
+                    model_alias=get_model_alias(model_key),
+                    summary=STATE.summary,
+                    tree=list(STATE.tree),
+                    files=list(STATE.files),
+                    entrypoints=list(STATE.entrypoints),
+                    tests=list(STATE.tests),
+                    pinned_files=list(STATE.pinned_files),
+                    current_preview_path=None,
+                    history=list(STATE.history),
+                    pending_edit=STATE.pending_edit,
+                    ui_state=STATE.ui_state,
+                )
+                context, context_coverage = build_project_context(project_root, snapshot, prompt)
+            if requested_model_key and requested_model_key != STATE.model_key:
+                ensure_local_model_server(model_key, port=get_model_port(model_key))
+                with STATE_LOCK:
+                    STATE.model_key = model_key
+                    STATE.model_alias = get_model_alias(model_key)
+            model_alias = get_model_alias(model_key)
             messages = build_raw_messages(
                 model_key,
                 build_raw_analyze_user_message(prompt, context),
@@ -3336,14 +3859,32 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 timeout_seconds=get_analyze_timeout_seconds(model_key),
                 continue_on_length=0,
                 raw_mode=True,
-            )
+            ).strip()
+            if not reply:
+                raise ModelReplyError(
+                    make_error(
+                        "MODEL_EMPTY_REPLY",
+                        "模型沒有產生可顯示的最終答案。",
+                        "",
+                        extra={"modelKey": model_key},
+                    )
+                )
             with STATE_LOCK:
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "analysis"})
-            json_response(self, {"ok": True, "data": {"reply": reply}})
+            json_response(self, {"ok": True, "data": {"reply": reply, "contextCoverage": context_coverage}})
+        except ModelReplyError as exc:
+            error_response(self, exc.error)
         except ValueError as exc:
             details = str(exc)
-            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "PINNED_CONTEXT_REQUIRED"
-            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先套用釘選檔案。"
+            if details == "請先完成開啟專案。":
+                code = "PROJECT_NOT_READY"
+                message = "Project is not ready."
+            elif details.startswith("Unsupported model"):
+                code = "MODEL_INVALID"
+                message = "Model validation failed."
+            else:
+                code = "PINNED_CONTEXT_REQUIRED"
+                message = "請先勾選釘選檔案。"
             error_response(self, make_error(code, message, details))
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Analyze failed.", str(exc)))
@@ -3352,17 +3893,26 @@ class WebUIHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             message = str(payload.get("message", "")).strip()
-            if not message:
-                raise ValueError("message is required.")
+            requested_model_key = str(payload.get("modelKey", "")).strip().lower()
+            image_id = str(payload.get("imageId", "")).strip()
+            image = get_uploaded_image(image_id) if image_id else None
+            if not message and image is None:
+                raise ValueError("message or image is required.")
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
-                require_pinned_context(STATE)
+                model_key = requested_model_key or STATE.model_key
+                if model_key not in SUPPORTED_MODEL_KEYS:
+                    raise ValueError("Unsupported model.")
+                if image is not None and not model_supports_images(model_key):
+                    raise ValueError("Selected model does not support image input. Please switch to qwen35.")
+                if image is None:
+                    require_pinned_context(STATE)
                 project_root = Path(STATE.project_path)
                 snapshot = SessionState(
                     project_path=STATE.project_path,
-                    model_key=STATE.model_key,
-                    model_alias=STATE.model_alias,
+                    model_key=model_key,
+                    model_alias=get_model_alias(model_key),
                     summary=STATE.summary,
                     tree=list(STATE.tree),
                     files=list(STATE.files),
@@ -3374,11 +3924,25 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
-                context = build_project_context(project_root, snapshot, message)
-                model_alias = STATE.model_alias
+                if snapshot.pinned_files:
+                    context, context_coverage = build_project_context(
+                        project_root,
+                        snapshot,
+                        message or "請根據圖片回答。",
+                        prefer_compact=image is not None and model_prefers_compact_image_context(model_key),
+                    )
+                else:
+                    context = ""
+                    context_coverage = None
+            if image_id and image is None:
+                raise ValueError("Uploaded image not found. Please upload the image again.")
+            if model_key != STATE.model_key or image is not None:
+                ensure_local_model_server(model_key, port=get_model_port(model_key))
+            model_alias = get_model_alias(model_key)
+            user_content = build_chat_user_content(context, message, image)
             messages = build_raw_messages(
                 snapshot.model_key,
-                build_raw_chat_user_message(context, message),
+                user_content,
                 build_chat_system_prompt(snapshot.model_key),
             )
             reply = call_local_model(
@@ -3388,15 +3952,44 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
                 continue_on_length=0,
                 raw_mode=True,
-            )
+            ).strip()
+            if not reply:
+                raise ModelReplyError(
+                    make_error(
+                        "MODEL_EMPTY_REPLY",
+                        "模型沒有產生可顯示的最終答案。",
+                        "",
+                        extra={"modelKey": model_key},
+                    )
+                )
             with STATE_LOCK:
-                STATE.history.append({"role": "user", "content": message, "kind": "chat"})
+                STATE.model_key = model_key
+                STATE.model_alias = model_alias
+                user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat"}
+                if image is not None:
+                    user_record["attachments"] = [build_history_image_attachment(image)]
+                STATE.history.append(user_record)
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "chat"})
-            json_response(self, {"ok": True, "data": {"reply": reply}})
+            json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "contextCoverage": context_coverage}})
+        except ModelReplyError as exc:
+            error_response(self, exc.error)
         except ValueError as exc:
             details = str(exc)
-            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "PINNED_CONTEXT_REQUIRED"
-            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先套用釘選檔案。"
+            if details == "請先完成開啟專案。":
+                code = "PROJECT_NOT_READY"
+                message = "Project is not ready."
+            elif details.startswith("Selected model does not support image input"):
+                code = "IMAGE_MODEL_UNSUPPORTED"
+                message = "Selected model does not support image input."
+            elif details.startswith("Uploaded image not found"):
+                code = "IMAGE_UPLOAD_FAILED"
+                message = "Uploaded image is not available."
+            elif details.startswith("Unsupported model"):
+                code = "MODEL_INVALID"
+                message = "Model validation failed."
+            else:
+                code = "PINNED_CONTEXT_REQUIRED"
+                message = "請先勾選釘選檔案。"
             error_response(self, make_error(code, message, details))
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Chat failed.", str(exc)))
@@ -3439,7 +4032,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             details = str(exc)
             code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "PINNED_CONTEXT_REQUIRED"
-            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先套用釘選檔案。"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先勾選釘選檔案。"
             error_response(self, make_error(code, message, details))
         except RuntimeError as exc:
             try:
@@ -3506,6 +4099,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8764, type=int)
     args = parser.parse_args()
+    cleanup_image_upload_dir()
     server = ThreadingHTTPServer((args.host, args.port), WebUIHandler)
     print(f"CodeWorker Web UI running at http://{args.host}:{args.port}")
     server.serve_forever()

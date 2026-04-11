@@ -24,13 +24,6 @@
     }
   },
   "models": {
-    "qwen": {
-      "enabled": true,
-      "provider": "huggingface",
-      "repo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-      "filePattern": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-      "targetDir": "models/qwen2.5-coder-7b-instruct-q4"
-    },
     "gemma4": {
       "enabled": true,
       "provider": "huggingface",
@@ -38,6 +31,18 @@
       "filePattern": "gemma-4-e4b-it-Q4_K_M.gguf",
       "targetDir": "models/gemma4-e4b-it-q4",
       "note": "Official GGUF route for Gemma 4 E4B Instruct via ggml-org."
+    },
+    "qwen35": {
+      "enabled": true,
+      "provider": "huggingface",
+      "repo": "unsloth/Qwen3.5-9B-GGUF",
+      "filePattern": "Qwen3.5-9B-Q4_K_M.gguf",
+      "filePatterns": [
+        "Qwen3.5-9B-Q4_K_M.gguf",
+        "mmproj-BF16.gguf"
+      ],
+      "targetDir": "models/qwen3.5-9b-q4-mmproj",
+      "note": "Qwen 3.5 multimodal GGUF with BF16 mmproj for llama.cpp OpenAI-compatible /v1."
     }
   }
 }
