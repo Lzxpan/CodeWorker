@@ -131,6 +131,18 @@ The full docs include:
 
 ---
 
+## GitHub About
+
+Recommended Chinese About description:
+
+`離線 Windows 本地 LLM 程式碼助理，提供 Qwen 3.5 圖文分析、釘選檔案上下文與隱私優先的專案理解。`
+
+Recommended topics:
+
+`offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
+
+---
+
 ## Important Notes
 
 - First-time download size is **over 5GB** and may take time depending on network speed and USB / disk write speed.

@@ -272,6 +272,11 @@ scripts\code-chat.cmd C:\path\to\project qwen35
   - air-gapped environment
   - privacy-first
 
+### GitHub About 建議文案
+
+- Description：`離線 Windows 本地 LLM 程式碼助理，提供 Qwen 3.5 圖文分析、釘選檔案上下文與隱私優先的專案理解。`
+- Topics：`offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
+
 ---
 
 ## 11. 已知限制
