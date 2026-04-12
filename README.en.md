@@ -1,48 +1,49 @@
 # CodeWorker V0.98b
 
-> A privacy-first, offline AI code assistant for Windows, built for local LLM workflows and USB portable deployment.
+> A privacy-first offline Windows code assistant built around local LLM workflows.
 
-[繁體中文](README.zh-TW.md) | [Landing page](README.md)
-
-`CodeWorker` packages `llama.cpp`, `WinPython`, `PortableGit`, GGUF models, and a local Web UI into a portable workspace. It is designed for:
-
-- **offline AI**
-- **local LLM**
-- **USB portable**
-- **secure code analysis**
-- **on-premise**
-- **air-gapped environment**
-- **privacy-first** development
+[README 首頁](README.md) | [繁體中文](README.zh-TW.md)
 
 ---
 
-## 1. System Requirements
+## 1. Features
 
-- Windows 10 / 11 x64
-- 32GB RAM is the more reliable target for larger local models
-- If the machine uses integrated graphics, shared memory can reduce the system RAM actually available to the model
-- Whether the machine is sufficient still depends on the user's real hardware and runtime load
-- AVX2-capable CPU recommended
-- Internet access is required for the first runtime / model download
-- The initial download is **over 5GB**, so expect some waiting time depending on network speed and USB / disk write speed
-- The new default two-model layout is roughly **11.6 GB** after removing `Qwen 2.5` from the packaged route
-- Older upgraded workspaces that still keep the removed `qwen25` model files can remain near the previous **16.6 GB** footprint
-- Reclaiming that space still requires deleting the old local `qwen2.5` model directory
-- After setup completes, the tool can run offline
+`CodeWorker` packages `llama.cpp`, `WinPython`, `PortableGit`, GGUF models, and a local Web UI into one portable workspace for Windows. It is designed for:
 
----
+- offline or air-gapped environments
+- source code that cannot leave the machine
+- privacy-first local project analysis
+- USB portable on-site support workflows
 
-## 2. Model Positioning
+Current model positioning:
 
 - `Qwen 3.5 9B Vision`
   - default and primary model
-  - handles both text and image input
-  - now used as the main code-analysis and project-chat model
+  - supports both text and image input
+  - used for project analysis, code explanation, and screenshot understanding
 - `Gemma 4 E4B`
-  - secondary optional model
-  - validated for the `llama.cpp + GGUF + Windows local + USB` architecture
-  - currently treated as a text-analysis model in this project; image input is not yet a formally supported path in the current local `llama.cpp` GGUF route
-  - can start and localize target code regions, but is still less stable than `Qwen 3.5` for edit suggestions
+  - secondary model
+  - currently treated as a text-analysis model in this project
+  - not yet a formally supported image model in the current local `llama.cpp` route
+
+---
+
+## 2. Important Notes
+
+- `32GB RAM` is the more reliable target, but it is **not** a hard execution gate
+- integrated graphics can reduce the RAM actually available to the model
+- the first runtime / model download requires internet access and is **over 5GB**
+- the new default two-model layout is about **11.6 GB**
+- older upgraded workspaces can still stay near **16.6 GB** if the removed `qwen25` files are still present
+- `File preview` is read-only and does not automatically become model context
+- the model answers only from the **synced pinned files**
+- `Qwen 3.5` now tries to send small-to-medium pinned code sets as full files; if it has to fall back to excerpts, the UI shows `context coverage`
+- image input is currently a formally supported path for `Qwen 3.5 9B Vision`
+
+Recommended GitHub About:
+
+- Description: `離線 Windows 本地 LLM 程式碼助理，支援 Qwen 3.5 圖文分析、釘選檔案上下文與隱私優先的本機專案理解。`
+- Topics: `offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
 
 ---
 
@@ -69,7 +70,7 @@ scripts\install-aider.cmd
 
 ---
 
-## 4. Quick Start
+## 4. Usage and Tutorial
 
 ### Launch the Web UI
 
@@ -77,201 +78,137 @@ scripts\install-aider.cmd
 scripts\launch-webui.cmd
 ```
 
-Then open:
+Open:
 
 ```text
 http://127.0.0.1:8764
 ```
 
-### Web UI screenshots
+### Screenshot
 
-![CodeWorker V0.98b English Web UI overview](docs/screenshots/webui-overview-en-v097b.png)
+![CodeWorker V0.98b English Web UI overview](docs/screenshots/webui-overview-en-v098b.png)
 
----
+### Basic workflow
 
-## 5. Web UI Workflow
-
-1. Click the project path field and choose the project root
+1. Choose the project root in `Project path`
 2. Confirm the model selection
 3. Click `Open project`
-4. Check the files you want in the file tree
-5. The pin state syncs immediately when you check or uncheck files
-6. Ask questions or describe change requests in the main chat
+4. Check files in the `File tree`
+5. The pinned state syncs immediately when you check or uncheck files
+6. Ask questions or describe changes in the main chat
 
-For image understanding:
+### Image input workflow
 
-7. Click `Attach image`, or paste a screenshot into the chat box
-8. Make sure the currently selected model actually supports images; the formally supported image model in this build is `Qwen 3.5 9B Vision`
-9. Ask about the image alone, or combine it with the current project context
+1. Click `Attach image`, or paste a screenshot into the chat box
+2. If the current model supports images, the request uses that model directly
+3. If the current model does not support images, the UI shows a clear error instead of silently switching models
+4. Larger screenshots are automatically downscaled before being sent to `Qwen 3.5`
 
-### Important context rules
+### Suggested tutorial prompts
 
-- `File preview` is read-only and **does not** automatically become model context
-- The model only answers from the **synced pinned files**
-- Small to medium pinned code sets are sent to `Qwen 3.5` as full files whenever the local context budget allows it
-- If the request falls back to excerpt mode, the Web UI now clearly says the model only received excerpts
-- If the last suggestion is wrong, continue in the same main chat and explain what is wrong
-
----
-
-## 6. Main Web UI Features
-
-### Project path
-
-- Chooses the project root
-- Clicking the input opens the native Windows folder picker
-
-### Model
-
-- Switches the local model for the current session
-- Reopen the project after changing the model
-
-### Response behavior
-
-- Main chat and `Analyze project` now stay closer to the model's original output
-- The system no longer applies heavy reply cleanup or style compression
-- Answers still use only the **synced pinned files** as trusted context
-
-### Open project
-
-- validates the path
-- prepares the Git workspace
-- starts the local model
-- scans files, entry points, and test locations
-
-### Project summary
-
-- shows project path, file count, major languages, likely entry points, and test locations
-- also shows the currently synced pinned files
-
-### File tree
-
-- the only place where model context is selected
-- checking or unchecking files syncs the pinned state immediately
-
-### File preview
-
-- read-only preview
-- helps you inspect a single file before deciding whether to pin it
-
-### Chat
-
-- all analysis, explanation, and iterative code-suggestion work happens in the main chat panel
-- if an image is attached while the selected model does not support image input, the Web UI now shows a clear error instead of silently switching models
-- images can be added either by file upload or by pasting a screenshot
-- larger screenshots are automatically downscaled before they are sent to `Qwen 3.5`, reducing the chance that image tokens consume too much multimodal context
-- the chat panel shows `context coverage` so you can tell whether the model received full files or excerpts
+- `Please explain the project entry flow.`
+- `Compare Program.cs, Form1.cs, and AudioManager.cs.`
+- `Explain this API based on the pinned files.`
+- `Read this screenshot and summarize the code behavior.`
 
 ---
 
-## 7. CLI Usage
+## 5. File Structure
 
-### Start the local model server
-
-```cmd
-scripts\start-server.cmd
+```text
+CodeWorker/
+├─ config/        # bootstrap, model, and aider settings
+├─ docs/          # screenshots and internal docs
+├─ downloads/     # first-run download cache
+├─ logs/          # runtime logs
+├─ models/        # GGUF models and mmproj
+├─ runtime/       # WinPython, PortableGit, llama.cpp
+├─ scripts/       # bootstrap, model server, Web UI, and CLI entry scripts
+├─ webui/         # Python backend and static frontend assets
+├─ README.md
+├─ README.zh-TW.md
+└─ README.en.md
 ```
 
-Switch model:
+Key files:
 
-```cmd
-scripts\start-server.cmd gemma4
-```
-
-Start `Qwen 3.5`:
-
-```cmd
-scripts\start-server.cmd qwen35
-```
-
-### Start project-level chat
-
-```cmd
-scripts\code-chat.cmd C:\path\to\project
-```
-
-Use Gemma 4:
-
-```cmd
-scripts\code-chat.cmd C:\path\to\project gemma4
-```
-
-Use `Qwen 3.5`:
-
-```cmd
-scripts\code-chat.cmd C:\path\to\project qwen35
-```
+- `webui/server.py`: API routes, context assembly, image preprocessing, model calls
+- `webui/static/app.js`: frontend chat flow, instant pin sync, image attachments
+- `webui/static/styles.css`: layout and bilingual UI styling
+- `scripts\start-server.cmd`: local model server entry
+- `scripts\code-chat.cmd`: project-level CLI chat entry
+- `config\bootstrap.manifest.json`: bootstrap and default-model configuration
 
 ---
 
-## 8. Typical Use Cases
+## 6. Workflow Architecture
 
-- understanding a codebase in an offline or air-gapped environment
-- secure code analysis where source code cannot leave the machine
-- carrying a USB portable AI assistant to multiple Windows machines
-- evaluating `Qwen` and `Gemma 4 E4B` side by side on the same pinned files
+```mermaid
+flowchart LR
+    U["User"] --> W["Web UI"]
+    W --> O["Open project"]
+    O --> S["Scan files / entry points / tests"]
+    W --> P["Check or uncheck file tree items"]
+    P --> A["Sync pinned files"]
+    W --> C["Chat / analyze / image request"]
+    C --> B["webui/server.py"]
+    A --> B
+    S --> B
+    B --> X["Assemble system prompt / pinned context / images"]
+    X --> M["Local model server"]
+    M --> R["Model reply"]
+    R --> W
+```
+
+Behavior summary:
+
+- `Open project` prepares the workspace and scans metadata, but does not send the whole project to the model
+- the `File tree` is the only context-selection entry point
+- `File preview` is for reading only
+- images go through the backend together with the text request
+- when the context budget is too small for full files, the UI explicitly shows excerpt mode through `context coverage`
 
 ---
 
-## 9. Version History
+## 7. Version History
 
 ### V0.98b
 
-- updated the Web UI and README version strings to `V0.98b`
-- moved the image-attachment hint and `Attach image` / `Remove image` controls into the same row to reduce chat form height
-- replaced `Qwen 2.5` with `Qwen 3.5` as the default model in the Web UI and CLI
-- expanded the `Qwen 3.5` pinned-file context budget so small C# project analysis can use full files instead of short excerpts
-- added `context coverage` so excerpt-mode requests are visible in the UI
-- aligned the current `llama.cpp` request flow with Ollama-style concepts such as answer-only output, image-capable model checks, and explicit completion-state handling
-- added automatic screenshot downscaling to reduce `failed to process image` errors on larger `Qwen 3.5` image inputs
-- updated the storage note to distinguish the new default footprint of about `11.6 GB` from older upgraded machines that may still stay near `16.6 GB` until `qwen25` files are deleted
+- replaced `Qwen 2.5` with `Qwen 3.5` as the default model
+- merged the image hint and `Attach image` / `Remove image` controls into the same row
+- increased the pinned-file context budget so small projects are more likely to use full files
+- added `context coverage` to show whether the model received full files or excerpts
+- updated the README to reflect the two-model layout, the `11.6 GB / 16.6 GB` storage note, and the latest multimodal behavior
 
 ### V0.97b
 
-- updated the Web UI and README version strings to `V0.97b`
-- fixed a Qwen and Gemma4 pinned-file context issue where a single large pinned file could degrade to filename-only context
-- aligned main chat and `Analyze project` with a raw-first prompt flow: keep the required `PINNED FILE CONTENT` blocks, but do not auto-route feature requests into edit plans
-- improved Qwen and Gemma4 responses for feature-planning questions such as adding TCP/IP connectivity
-- extended Qwen and Gemma4 chat, analysis, and edit suggestion timeouts to reduce early interruption of long responses
-- updated the GitHub README screenshots with `V0.97b` Traditional Chinese Qwen and English Gemma4 smoke-test views
+- aligned main chat and `Analyze project` with a more raw-first response path
+- fixed large pinned-file cases that could degrade to filename-only context
+- refreshed the bilingual README screenshots
 
 ### V0.96b
 
-- updated the Web UI and README version strings to `V0.96b`
-- aligned main chat and `Analyze project` with a response flow closer to the models' original output
-- synchronized the landing page and bilingual docs with the current model positioning and response behavior
+- aligned the landing page, bilingual docs, and Web UI positioning
+- moved responses closer to the models' original output
 
 ### V0.95b
 
-- promoted the repo state at that time to a formal `V0.95b` baseline
-- added the README landing page plus split `README.zh-TW.md` and `README.en.md`
-- added a full `繁中 / EN` language switch to the Web UI
+- added the README landing page and split bilingual docs
+- added `繁中 / EN` language switching in the Web UI
 
 ### V0.94b
 
-- removed the edit-plan modal
-- moved all analysis and suggestion iterations back into the main chat
-- added `Gemma 4 E4B` as an evaluation model
+- removed the old edit-plan modal
+- moved analysis and suggestion iterations back into the main chat
 
 ---
 
-## 10. Important Notes
+## 8. Copyright and License
 
-- `Qwen 3.5 9B Vision` is now the default model
-- `Gemma 4 E4B` remains the secondary model, not the primary default
-- `Gemma 4 E4B` should still be treated as a text model in this project unless the local `llama.cpp` GGUF route is separately verified for image input
-- The new default packaged layout is about `11.6 GB`, but upgraded workspaces can still remain near the old `16.6 GB` footprint if `qwen25` files are still present
+This project is licensed under [MIT](LICENSE).
 
----
+If you use CodeWorker inside customer environments or air-gapped networks, you should still verify:
 
-## 11. Known Limitations
-
-- Windows-first workflow
-- large first-time download size
-- `Gemma 4 E4B` is still weaker than `Qwen` for structured code-edit suggestions
-
----
-
-## 12. License
-
-[MIT](LICENSE)
+- the licenses of the local models and bundled runtimes
+- local rules for USB tools and offline AI
+- whether the target project data is allowed to be read by a local model

@@ -1,161 +1,213 @@
 # CodeWorker V0.98b
 
-Offline AI code assistant for **Windows local LLM**, **USB portable** deployment, and **privacy-first secure code analysis**.
+> 離線、可攜、以隱私與資安為優先的 Windows 本地 LLM 程式碼助理。
 
-[English](README.en.md) | [繁體中文](README.zh-TW.md)
-
-`CodeWorker` is built for environments where source code cannot leave the machine:
-
-- **offline AI**
-- **local LLM**
-- **USB portable**
-- **secure code analysis**
-- **offline coding assistant**
-- **on-premise**
-- **air-gapped environment**
-- **Windows local AI**
-
-It packages `llama.cpp`, `WinPython`, `PortableGit`, GGUF models, and a local Web UI into one portable workspace that can be carried on a USB drive and used on different Windows machines.
+[繁體中文完整說明](README.zh-TW.md) | [English documentation](README.en.md)
 
 ---
 
-## Why CodeWorker
+## 1. 功能說明
 
-Many real projects cannot use cloud AI tools:
+`CodeWorker` 將 `llama.cpp`、`WinPython`、`PortableGit`、GGUF 模型與本地 Web UI 整合成可攜式工作目錄，適合以下情境：
 
-- customer environments with no internet access
-- air-gapped or internal-only networks
-- source code that cannot be uploaded
-- privacy-first or compliance-heavy development
-- on-site maintenance where you need a local AI code assistant immediately
+- 原始碼不能上傳到雲端
+- 客戶端或內網環境無法連外
+- 需要在 Windows 本機做 `offline AI` / `local LLM` 專案分析
+- 需要帶著整套工具在 USB 隨身碟或外接碟上移動使用
 
-CodeWorker is designed for exactly those cases.
+目前產品定位：
 
----
-
-## Highlights
-
-- Analyze a **whole project folder**, not just a single file
-- Chat in **Traditional Chinese**
-- Use pinned files as the only trusted model context
-- Run as a **local LLM** on Windows without sending code to cloud services
-- Carry the whole tool as a **USB portable** workspace
-- Support offline project analysis, code explanation, and change suggestions
-
-Current model positioning:
-
-- `Qwen 3.5 9B Vision`: default and recommended, supports both text and image input
-- `Gemma 4 E4B`: secondary optional model for text analysis in the current `llama.cpp + GGUF` route
+- `Qwen 3.5 9B Vision`
+  - 預設與主力模型
+  - 支援文字與圖片輸入
+  - 主要用於專案分析、程式碼解釋與圖文問答
+- `Gemma 4 E4B`
+  - 第二模型
+  - 目前在本專案中定位為文字分析模型
+  - 尚未列為本專案正式支援的圖片模型
 
 ---
 
-## Web UI Screenshots
+## 2. 重點注意事項
 
-Traditional Chinese UI with `Qwen 3.5 9B Vision`:
+- 建議以 `32GB RAM` 作為較穩妥的使用目標，但**不是硬性門檻**
+- 若使用內顯，共用記憶體會影響模型實際可用 RAM，是否足夠仍需依本機配置自行判斷
+- 第一次下載 runtime 與模型時需要網路，且下載量會超過 `5GB`
+- 新版預設兩模型組合約為 **11.6 GB**
+- 若舊環境仍保留已移除的 `qwen25` 模型檔，整體工作區仍可能接近 **16.6 GB**
+- `檔案預覽` 只是閱讀區，不會自動成為模型上下文
+- 模型只會根據**已同步釘選檔案**回答
+- 小到中型 pinned code 組合，`Qwen 3.5` 會優先送完整檔案；若超出預算改用節錄模式，UI 會顯示 `context coverage`
+- 圖片問答目前正式支援 `Qwen 3.5 9B Vision`；若目前所選模型不支援圖片，Web UI 會明確提示
 
-![CodeWorker V0.98b Traditional Chinese Web UI overview](docs/screenshots/webui-overview-zh-v097b.png)
+GitHub About 建議文案：
 
-English UI with `Gemma 4 E4B`:
-
-![CodeWorker V0.98b English Web UI overview](docs/screenshots/webui-overview-en-v097b.png)
+- Description：`離線 Windows 本地 LLM 程式碼助理，支援 Qwen 3.5 圖文分析、釘選檔案上下文與隱私優先的本機專案理解。`
+- Topics：`offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
 
 ---
 
-## Quick Start
+## 3. 安裝方式
 
-### 1. Clone or copy the project
-
-Put the entire `CodeWorker` folder on your local disk or USB drive.
-
-### 2. Bootstrap runtime and models
+### 方式 A：第一次完整準備
 
 ```cmd
 scripts\bootstrap.cmd
 ```
 
-### 3. Launch the Web UI
+這會自動處理：
+
+- 下載 `llama.cpp`
+- 下載 `PortableGit`
+- 下載 `WinPython`
+- 下載預設模型
+
+### 方式 B：如果你要用 CLI agent
+
+```cmd
+scripts\install-aider.cmd
+```
+
+---
+
+## 4. 使用方式與教學
+
+### 啟動 Web UI
 
 ```cmd
 scripts\launch-webui.cmd
 ```
 
-Open:
+開啟：
 
 ```text
 http://127.0.0.1:8764
 ```
 
-### 4. Use the workspace
+### 畫面範例
 
-1. Click the project path field and choose a project folder
-2. Open the project
-3. Check files in the file tree
-4. The pin state syncs immediately when you check or uncheck files
-5. Ask questions in the main chat
+![CodeWorker V0.98b 繁中 Web UI 畫面](docs/screenshots/webui-overview-zh-v098b.png)
 
-### Response behavior
+### 基本操作流程
 
-- General chat and `Analyze project` use a raw-first prompt flow
-- CodeWorker keeps the pinned-file content delimiters, but does not auto-route feature requests into edit plans
-- The synced pinned files are still the only trusted context source
-- Small to medium pinned code sets are sent to `Qwen 3.5` as full files whenever the local context budget allows it
-- If the request falls back to excerpt mode, the Web UI now shows that the model only received excerpts instead of full files
+1. 在 `專案路徑` 選擇你的專案根目錄
+2. 在 `模型` 保持 `Qwen 3.5 9B Vision`，或切換成 `Gemma 4 E4B`
+3. 點 `開啟專案`
+4. 在 `檔案樹` 直接勾選要加入上下文的檔案
+5. 勾選或取消勾選後，釘選狀態會立即同步
+6. 在主對話框輸入問題、需求或修改方向
 
----
+### 圖片問答
 
-## Typical Use Cases
+1. 點 `上傳圖片`，或直接把截圖貼到聊天輸入區
+2. 若目前所選模型支援圖片，請求會直接使用目前模型
+3. 若目前所選模型不支援圖片，Web UI 會顯示明確錯誤，不再默默切換模型
+4. 大型截圖會先自動縮圖，再送入 `Qwen 3.5`，降低多模態圖片 token 失敗機率
 
-- Understand an unfamiliar codebase in an offline or air-gapped environment
-- Investigate a customer project that cannot be uploaded to cloud AI tools
-- Use a **local LLM** for secure code analysis on a Windows machine
-- Carry a **USB portable** AI assistant for on-site support, maintenance, and debugging
-- Compare `Qwen 3.5` and `Gemma 4 E4B` behavior on the same pinned files
+### 建議教學題目
 
----
-
-## Documentation
-
-- [繁體中文完整說明](README.zh-TW.md)
-- [English documentation](README.en.md)
-
-The full docs include:
-
-- installation guide
-- system requirements
-- Web UI walkthrough
-- CLI usage
-- feature explanation
-- version history
-- important notes
-- known limitations
+- 「請說明這個專案的入口流程」
+- 「請比較 `Form1.cs` 與 `AudioManager.cs` 的職責」
+- 「請依照已釘選檔案，說明這段 API 的功能」
+- 「請閱讀這張截圖並翻譯成繁體中文」
 
 ---
 
-## GitHub About
+## 5. 檔案結構說明
 
-Recommended Chinese About description:
+主要目錄如下：
 
-`離線 Windows 本地 LLM 程式碼助理，提供 Qwen 3.5 圖文分析、釘選檔案上下文與隱私優先的專案理解。`
+```text
+CodeWorker/
+├─ config/        # bootstrap、模型與 aider 設定
+├─ docs/          # 截圖與內部文件
+├─ downloads/     # 初次下載暫存
+├─ logs/          # 啟動與執行記錄
+├─ models/        # GGUF 模型與 mmproj
+├─ runtime/       # WinPython、PortableGit、llama.cpp
+├─ scripts/       # bootstrap、啟動 server、啟動 Web UI、CLI 入口
+├─ webui/         # 後端 server.py 與前端 static 資源
+├─ README.md
+├─ README.zh-TW.md
+└─ README.en.md
+```
 
-Recommended topics:
+關鍵檔案：
 
-`offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
+- `webui/server.py`：Web UI API、模型請求、上下文組裝、圖片預處理
+- `webui/static/app.js`：前端互動、釘選同步、聊天與圖片附件流程
+- `scripts\start-server.cmd`：本地模型啟動入口
+- `scripts\code-chat.cmd`：專案級 CLI 對話入口
+- `config\bootstrap.manifest.json`：bootstrap 下載與預設模型配置
 
 ---
 
-## Important Notes
+## 6. 流程架構說明
 
-- First-time download size is **over 5GB** and may take time depending on network speed and USB / disk write speed.
-- The new default two-model layout is roughly **11.6 GB** after removing `Qwen 2.5` from the packaged route.
-- Older machines that still keep the removed `qwen25` files can remain near the previous **16.6 GB** footprint until those old model files are actually deleted.
-- The current default product direction is `Qwen 3.5` first, `Gemma 4 E4B` second.
-- `Gemma 4 E4B` in this project should still be treated as a text model unless the local `llama.cpp` GGUF route is explicitly verified for image input; a successful Ollama Desktop screenshot does not automatically prove parity here.
-- The request flow now aligns more closely with Ollama-style concepts such as image-capable models, answer-only output, and explicit completion-state handling, while still staying on the existing `llama.cpp` backend.
-- Larger screenshots are automatically downscaled before they are sent to `Qwen 3.5`, reducing the chance of `failed to process image` errors on high-resolution inputs.
-- This project focuses on **offline AI**, **local LLM**, and **privacy-first** project understanding.
+```mermaid
+flowchart LR
+    U["使用者"] --> W["Web UI"]
+    W --> O["開啟專案 / 掃描檔案"]
+    W --> P["勾選檔案樹並同步釘選"]
+    W --> C["聊天或分析請求"]
+    C --> S["webui/server.py"]
+    P --> S
+    O --> S
+    S --> X["整理 pinned files / 圖片 / system prompt"]
+    X --> M["本地模型 server"]
+    M --> R["模型回覆"]
+    R --> W
+```
+
+實際行為重點：
+
+- `開啟專案` 會掃描檔案、入口點與測試位置
+- `檔案樹` 是唯一的上下文選擇入口
+- `檔案預覽` 只負責閱讀，不會自動加入模型上下文
+- 圖片會與文字請求一起送入後端，再依模型能力決定是否可執行
+- 若上下文不足以送完整檔案，後端會改為節錄模式，前端顯示 `context coverage`
 
 ---
 
-## License
+## 7. 版本歷程
 
-[MIT](LICENSE)
+### V0.98b
+
+- `Qwen 3.5` 正式取代 `Qwen 2.5` 成為預設模型
+- Web UI 的圖片附件提示與按鈕整併到同一列，減少版面高度
+- pinned file context 預算上調，小型 C# 專案更容易送完整檔案
+- 新增 `context coverage` 顯示，避免使用者誤以為模型看過完整原始碼
+- README 與產品定位更新為兩模型組合與新版容量說明
+
+### V0.97b
+
+- 回應流程收斂為較接近模型原始輸出的 `raw-first` 路線
+- 改善大型 pinned file 只剩檔名、缺少內容的問題
+- 更新中英文 Web UI 截圖與雙語 README
+
+### V0.96b
+
+- README 首頁、繁中、英文文件同步更新
+- Web UI 與說明文件對齊當時的雙模型定位
+
+### V0.95b
+
+- 新增 README landing page
+- 新增繁中 / EN Web UI 語言切換
+
+### V0.94b
+
+- 移除舊的修改建議 modal
+- 所有分析與迭代回到主對話框
+
+---
+
+## 8. 版權宣告
+
+本專案採用 [MIT](LICENSE) 授權。
+
+若你在客戶端、內網或 air-gapped environment 使用本工具，仍需自行確認：
+
+- 本地模型與第三方 runtime 的授權條件
+- 客戶環境對可攜式工具、USB 與離線 AI 的使用規範
+- 你的專案與資料是否允許被本機模型讀取
