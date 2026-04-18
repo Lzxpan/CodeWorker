@@ -43,6 +43,7 @@
 - 圖片與其他附件會先嘗試交給目前模型；若目前模型或 `llama.cpp` 設定無法處理，CodeWorker 會降級為文字說明，讓模型明確回覆限制
 - 對話改用 streaming 顯示；`reasoning_content` 或 `<think>` 內容會保留在可展開的思考區，展開時會自動跟隨最新輸出
 - 一般聊天會帶入壓縮記憶摘要與最近多輪原文對話，讓「上一題」、「剛剛那個檔案」這類追問可以連貫，同時降低 token 使用量
+- 長回答若觸發 `finish_reason=length`，續寫時只帶上一段回答末尾，不會重送大型 RAG context；若 streaming 中途失敗，已輸出的部分會保存為可續寫歷史
 
 GitHub About 建議文案：
 
@@ -175,6 +176,7 @@ flowchart LR
 - 圖片會和文字請求一起進後端，再依模型能力直接處理或降級為文字附件狀態
 - 若上下文不足以送完整檔案，前端會顯示本次是節錄模式
 - 較舊對話會壓縮成 `COMPRESSED CONVERSATION MEMORY`，最近幾輪保留原文；若本輪 RAG / pinned context 與記憶衝突，以本輪專案內容為準
+- 長回答自動續寫會改用上一段回答末尾接續，避免把同一份大型 `PROJECT RAG CONTEXT` 重複送給模型
 - Agent 的 write、patch、delete、command 類動作必須先產生 pending action，使用者確認後才會執行；audit log 存在 `data/agent-actions.jsonl`
 
 ---
@@ -189,6 +191,7 @@ flowchart LR
 - 移除右側檔案預覽面板，對話區改為單欄寬版；檔案樹點檔名會切換釘選上下文
 - 修正長回覆續寫流程：模型只輸出 thinking/reasoning 時會自動要求 final answer，使用者要求「繼續」時會沿用最近對話歷史而不是重新塞入全專案 RAG
 - 新增壓縮式對話記憶：所有模型都會收到較舊對話摘要與最近多輪原文，改善追問與上下文連貫並節省 tokens
+- 修正 streaming 中途失敗後無法「請繼續」的問題：已輸出的部分會進入 history，下一輪續寫不會再重塞全專案 RAG
 - 強化 RAG 程式碼定位：中文查詢會展開常見程式命名，例如「遊戲速度」會搜尋 `speed`、`Timer`、`Interval`、`Tick`、`gameSpeed`
 - 思考區展開時會自動捲到最新輸出，避免本地模型長時間輸出時畫面停在舊內容
 - 影片 metadata-only fallback 會明確禁止模型根據檔名、網址或 metadata 猜測內容
