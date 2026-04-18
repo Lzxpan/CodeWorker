@@ -180,6 +180,19 @@ def test_history_continuation_uses_previous_answer_tail():
     assert_true("第一段答案" in message and "hidden reasoning" not in message, "continuation should use visible answer text, not reasoning")
 
 
+def test_chat_messages_include_recent_history():
+    history = [
+        {"role": "user", "content": "上一題：想更新遊戲速度要怎麼修改？"},
+        {"role": "assistant", "content": "<think>internal</think>\n\n請修改 Form1.cs 的 timer.Interval。"},
+    ]
+    messages = server.build_raw_messages("gemma4", "那上一題的檔案是哪個？", "system prompt", history=history)
+    roles = [item["role"] for item in messages]
+    assert_true(roles == ["system", "user", "assistant", "user"], "chat messages should include recent user/assistant history before the current user message")
+    combined = "\n".join(str(item["content"]) for item in messages)
+    assert_true("上一題" in combined and "timer.Interval" in combined, "recent history content should be visible to the model")
+    assert_true("internal" not in combined, "history should strip reasoning blocks")
+
+
 def test_stream_reasoning_only_length_retries_for_final_answer():
     class FakeResponse:
         def __init__(self, lines):
@@ -407,6 +420,42 @@ def test_rag_model_loading_locator_prefers_source_chunks():
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_rag_chinese_game_speed_query_finds_code():
+    root = ROOT / ".tmp" / "regression-game-speed"
+    data_dir = ROOT / ".tmp" / "regression-game-speed-index"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "README.md").write_text(
+        "# Game\n主要遊戲邏輯在 Form1.cs，速度可調整。\n",
+        encoding="utf-8",
+    )
+    (root / "Form1.cs").write_text(
+        "using System.Windows.Forms;\n\n"
+        "public partial class Form1 : Form {\n"
+        "    private Timer gameTimer = new Timer();\n"
+        "    private int gameSpeed = 120;\n\n"
+        "    private void StartGame() {\n"
+        "        gameTimer.Interval = gameSpeed;\n"
+        "        gameTimer.Tick += GameLoop;\n"
+        "    }\n\n"
+        "    private void GameLoop(object sender, System.EventArgs e) {\n"
+        "        UpdatePlayer();\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    try:
+        rebuild_index(root, data_dir)
+        matches = search_index(root, data_dir, "想更新遊戲速度要怎麼修改？", limit=3)["matches"]
+        assert_true(matches, "Chinese game-speed query should return matches")
+        assert_true(matches[0]["path"] == "Form1.cs", "game-speed query should prefer implementation code over README")
+        assert_true("gameTimer.Interval" in matches[0]["content"] or "gameSpeed" in matches[0]["content"], "top match should include speed implementation")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def test_project_rag_context_without_pins():
     root = ROOT / ".tmp" / "regression-chat-project"
     data_dir = ROOT / ".tmp" / "regression-chat-index"
@@ -445,6 +494,7 @@ def main():
         test_http_error_body_is_preserved,
         test_rag_manifest_search_and_stale,
         test_rag_model_loading_locator_prefers_source_chunks,
+        test_rag_chinese_game_speed_query_finds_code,
         test_project_rag_context_without_pins,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
@@ -453,6 +503,7 @@ def main():
         test_media_assessment_exposes_local_limits,
         test_transcribe_media_attachment_updates_text_preview,
         test_history_continuation_uses_previous_answer_tail,
+        test_chat_messages_include_recent_history,
         test_stream_reasoning_only_length_retries_for_final_answer,
         test_gemma_native_image_payload_with_mmproj,
         test_prepare_attachments_does_not_use_qwen_helper,

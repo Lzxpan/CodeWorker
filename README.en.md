@@ -17,14 +17,14 @@
 
 Current model positioning:
 
-- `Qwen 3.5 9B Vision`
-  - default and primary model
-  - supports both text and image input
-  - used for project analysis, code explanation, and screenshot understanding
 - `Gemma 4 26B`
-  - secondary model
+  - default primary model
   - served by CodeWorker's bundled `llama.cpp` service, with no Ollama dependency
-  - defaults to a `Q4_K_M` GGUF; if the current setup has no vision projection, image input is downgraded to a text attachment note so the model can explain the limitation
+  - defaults to the Unsloth `UD-Q4_K_M` GGUF; if `mmproj` is available, images use native vision, otherwise they are downgraded to text attachment status so the model can explain the limitation
+- `Qwen 3.5 9B Vision`
+  - optional backup model
+  - supports both text and image input
+  - can be used for project analysis, code explanation, and screenshot understanding
 
 ---
 
@@ -32,19 +32,21 @@ Current model positioning:
 
 - `32GB RAM` is the more reliable target, but it is **not** a hard execution gate
 - integrated graphics can reduce the RAM actually available to the model
-- the first runtime / model download requires internet access; `Gemma 4 26B Q4_K_M` is roughly in the `17GB` class, depending on the selected Hugging Face GGUF file
+- the first runtime / model download requires internet access; `Gemma 4 26B UD-Q4_K_M` is roughly in the `17GB` class, depending on the selected Hugging Face GGUF file
 - the new default two-model layout is significantly larger than the older **11.6 GB** layout, so reserve enough disk space
 - older upgraded workspaces can still stay near **16.6 GB** if the removed `qwen25` files are still present
 - general chat no longer requires opening a project or pinning files; without project context it behaves as normal Q&A
-- the `File tree` can manually pin focused context; when nothing is pinned, normal chat uses the full-project search cache
+- the `File tree` can manually pin focused context; when nothing is pinned and a project is open, normal chat uses the full-project search cache and RAG
 - project analysis, edit suggestions, RAG, and Agent actions use the opened project and index content
-- `Qwen 3.5` now tries to send small-to-medium pinned code sets as full files; if it has to fall back to excerpts, the UI shows `context coverage`
+- RAG prioritizes real source code chunks, file paths, and line ranges; for questions such as "which file", "which section", or "how should I change this", README / summary hits are ranked lower
+- small-to-medium pinned code sets are sent as full files where possible; if CodeWorker has to fall back to excerpts, the UI shows `context coverage`
 - image and attachment requests are attempted with the current model first; if the selected model or `llama.cpp` setup cannot process them, CodeWorker downgrades the attachment into a text note and lets the model explain the limitation
-- chat now uses streaming output and no longer intentionally strips `reasoning_content` or `<think>` blocks
+- chat now uses streaming output; `reasoning_content` or `<think>` blocks are preserved in an expandable reasoning panel that auto-scrolls when opened
+- normal chat includes recent turns as short-term memory so follow-up questions such as "the previous one" or "that file" remain connected
 
 Recommended GitHub About:
 
-- Description: `離線 Windows 本地 LLM 程式碼助理，支援 Qwen 3.5 圖文分析、釘選檔案上下文與隱私優先的本機專案理解。`
+- Description: `離線 Windows 本地 LLM 程式碼助理，支援 Gemma 4 26B、全專案 RAG、附件分析與隱私優先的本機專案理解。`
 - Topics: `offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
 
 ---
@@ -110,6 +112,7 @@ http://127.0.0.1:8764
 
 - `Please explain the project entry flow.`
 - `Compare Program.cs, Form1.cs, and AudioManager.cs.`
+- `How should I change the game speed? Please list file paths, line ranges, and reasons.`
 - `Explain this API based on the pinned files.`
 - `Read this screenshot and summarize the code behavior.`
 
@@ -168,9 +171,10 @@ flowchart LR
 Behavior summary:
 
 - `Open project` prepares the workspace and scans metadata, but does not send the whole project to the model
-- the `File tree` is the manual context-selection entry point; the RAG index provides retrieval-based context separately
+- the `File tree` is the manual context-selection entry point; when nothing is pinned, the RAG index automatically provides retrieval-based context
 - images go through the backend together with the text request, then are either handled directly or downgraded into a text attachment note
 - when the context budget is too small for full files, the UI explicitly shows excerpt mode through `context coverage`
+- recent chat turns are included as short-term memory in chat requests; if that memory conflicts with the current RAG / pinned context, the current project context wins
 - write, patch, delete, and command Agent actions must become pending actions first; they only run after user confirmation, and the audit log is written to `data/agent-actions.jsonl`
 
 ---
@@ -184,6 +188,9 @@ Behavior summary:
 - added a bundled `whisper.cpp` speech-to-text pipeline for audio files and video audio tracks; when no local STT backend is available, the UI and prompt expose an explicit status
 - removed the right-side file preview panel and changed the chat workspace to a wider single-column layout; clicking a filename in the file tree now toggles pinned context
 - fixed long-answer continuation so reasoning-only responses trigger an answer-only retry, and user "continue" requests reuse recent chat history instead of re-injecting full-project RAG
+- added short-term memory for normal chat: all models receive recent user/assistant turns to improve follow-up questions
+- strengthened RAG code location: Chinese queries expand common implementation terms, so "game speed" searches for `speed`, `Timer`, `Interval`, `Tick`, and `gameSpeed`
+- reasoning panels now auto-scroll to the newest streamed text when expanded
 - tightened video metadata-only fallback so the model must not infer content from file names, URLs, or metadata
 - strengthened Gemma4 startup checks by validating the live `model_path` and vision `mmproj` state before treating a server as ready
 - cleaned up obsolete Gemma4 model directories while keeping the active Unsloth `UD-Q4_K_M` model and Qwen backup model
@@ -194,7 +201,7 @@ Behavior summary:
 - removed the project/pinned-file requirement for general chat
 - added `/api/chat/stream` with full streaming content and reasoning/thinking display
 - added local RAG index, Agent v1 APIs, pending action confirmation, and audit logging
-- replaced `Qwen 2.5` with `Qwen 3.5` as the default model
+- replaced `Qwen 2.5` with `Qwen 3.5` as the default model at that time; starting from `V1.00.000`, the default model is `Gemma 4 26B`
 - merged the file attachment hint and `Attach file` / `Remove attachments` controls into the same row
 - increased the pinned-file context budget so small projects are more likely to use full files
 - added `context coverage` to show whether the model received full files or excerpts

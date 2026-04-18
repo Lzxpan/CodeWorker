@@ -52,7 +52,9 @@ MAX_FOCUSED_CHAT_FILE_CHARS = 22000
 MAX_FOCUSED_CHAT_TOTAL_CHARS = 22000
 MAX_PREVIEW_CHAT_CHARS = 22000
 MAX_TREE_CONTEXT_ITEMS = 30
-MAX_CHAT_HISTORY_ITEMS = 4
+MAX_CHAT_HISTORY_ITEMS = 8
+MAX_CHAT_HISTORY_ITEM_CHARS = 1800
+MAX_CHAT_HISTORY_TOTAL_CHARS = 7200
 ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
 DEFAULT_MODEL_KEY = "gemma4"
@@ -82,8 +84,8 @@ MODEL_ANALYZE_TIMEOUT_SECONDS = {
     "qwen35": 1200,
 }
 MODEL_HISTORY_LIMIT = {
-    "gemma4": 1,
-    "qwen35": 2,
+    "gemma4": 4,
+    "qwen35": 6,
 }
 MODEL_CONTEXT_LIMITS = {
     "gemma4": {"max_files": 2, "file_chars": 2600, "total_chars": 9000, "single_file_chars": 18000, "single_total_chars": 18000},
@@ -3200,9 +3202,10 @@ def call_local_model_with_attachment_fallback(
     max_tokens: int,
     timeout_seconds: int,
     continue_on_length: int,
+    history: Optional[List[Dict[str, object]]] = None,
 ) -> Tuple[str, Optional[Dict[str, object]], Dict[str, object]]:
     user_content, attachment_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=False)
-    messages = build_raw_messages(model_key, user_content, system_prompt)
+    messages = build_raw_messages(model_key, user_content, system_prompt, history=history)
     try:
         reply = call_local_model(
             model_alias,
@@ -3217,7 +3220,7 @@ def call_local_model_with_attachment_fallback(
         if not attachment_meta.get("nativeImages") or not is_multimodal_transport_error(exc):
             raise
         fallback_content, fallback_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=True)
-        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt)
+        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt, history=history)
         reply = call_local_model(
             model_alias,
             fallback_messages,
@@ -3244,9 +3247,10 @@ def stream_local_model_with_attachment_fallback(
     max_tokens: int,
     timeout_seconds: int,
     continue_on_length: int,
+    history: Optional[List[Dict[str, object]]] = None,
 ):
     user_content, attachment_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=False)
-    messages = build_raw_messages(model_key, user_content, system_prompt)
+    messages = build_raw_messages(model_key, user_content, system_prompt, history=history)
     emitted_model_output = False
     try:
         for event in stream_local_model_events(
@@ -3270,7 +3274,7 @@ def stream_local_model_with_attachment_fallback(
             "fallbackKinds": fallback_meta.get("fallbackKinds", []),
             "retried": True,
         }
-        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt)
+        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt, history=history)
         for event in stream_local_model_events(
             model_alias,
             fallback_messages,
@@ -3281,10 +3285,55 @@ def stream_local_model_with_attachment_fallback(
             yield event
 
 
-def build_raw_messages(model_key: str, user_content: object, system_prompt: str = "") -> List[Dict[str, object]]:
+def build_history_messages(history: Optional[List[Dict[str, object]]], model_key: str) -> List[Dict[str, object]]:
+    if not history:
+        return []
+    limit = max(0, min(MAX_CHAT_HISTORY_ITEMS, get_chat_history_limit(model_key) * 2))
+    if limit <= 0:
+        return []
+    selected = list(history)[-limit:]
+    collected: List[Dict[str, object]] = []
+    total_chars = 0
+    for item in reversed(selected):
+        role = str(item.get("role", "")).strip()
+        if role not in {"user", "assistant"}:
+            continue
+        content = strip_think_blocks(str(item.get("content", "")).strip())
+        if role == "user" and not content:
+            attachments = item.get("attachments", [])
+            if isinstance(attachments, list) and attachments:
+                names = ", ".join(str(entry.get("name", "attachment")) for entry in attachments if isinstance(entry, dict))
+                content = f"[上一輪使用者上傳附件: {names}]"
+        if not content:
+            continue
+        content = truncate_middle(content, MAX_CHAT_HISTORY_ITEM_CHARS)
+        if total_chars + len(content) > MAX_CHAT_HISTORY_TOTAL_CHARS:
+            continue
+        total_chars += len(content)
+        collected.append({"role": role, "content": content})
+    collected.reverse()
+    return collected
+
+
+def build_raw_messages(
+    model_key: str,
+    user_content: object,
+    system_prompt: str = "",
+    history: Optional[List[Dict[str, object]]] = None,
+) -> List[Dict[str, object]]:
     messages: List[Dict[str, object]] = []
-    if model_key in {"gemma4", "qwen35"} and system_prompt.strip():
-        messages.append({"role": "system", "content": system_prompt.strip()})
+    base_prompt = system_prompt.strip()
+    history_messages = build_history_messages(history, model_key)
+    if history_messages:
+        memory_note = (
+            "你會收到最近幾輪對話作為短期記憶。"
+            "請用它理解代名詞、上一題、延續問題與修改上下文；"
+            "但若本輪 PROJECT RAG CONTEXT 或 PINNED FILE CONTENT 與歷史衝突，請以本輪提供的專案內容為準。"
+        )
+        base_prompt = f"{base_prompt}\n\n{memory_note}".strip()
+    if model_key in {"gemma4", "qwen35"} and base_prompt:
+        messages.append({"role": "system", "content": base_prompt})
+    messages.extend(history_messages)
     messages.append({"role": "user", "content": user_content})
     return messages
 
@@ -3611,7 +3660,7 @@ def build_project_rag_context(
                 "PROJECT RAG CONTEXT",
                 "未勾選 pinned files；本次使用 CodeWorker 的全專案搜尋快取與 RAG 檢索結果。",
                 "這不是把整個專案原始碼完整丟給模型，而是使用快取的 skeleton、summary、symbols、imports 與相關 chunks。",
-                "若使用者問「哪個檔案」、「哪一段」、「在哪裡」或類似定位問題，請優先使用 RAG MATCHES 的檔案路徑與行號回答。",
+                "若使用者問「哪個檔案」、「哪一段」、「在哪裡」、「怎麼修改」、「如何調整」或類似定位/修改問題，請優先使用 RAG MATCHES 的檔案路徑、行號與程式碼片段回答。",
                 f"專案路徑: {project_root}",
                 f"快取狀態: {'本次重建' if index_rebuilt else '沿用既有快取'}",
                 f"快取檔案數: {index_result.get('files', len(skeleton))}",
@@ -5822,6 +5871,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 max_tokens=max_tokens,
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
                 continue_on_length=get_continue_on_length(snapshot.model_key),
+                history=[] if continuation_message else snapshot.history,
             )
             if not reply:
                 raise ModelReplyError(
@@ -5960,6 +6010,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 max_tokens=max_tokens,
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
                 continue_on_length=get_continue_on_length(snapshot.model_key),
+                history=[] if continuation_message else snapshot.history,
             ):
                 event_type = event.get("type", "content")
                 text = str(event.get("text", ""))
