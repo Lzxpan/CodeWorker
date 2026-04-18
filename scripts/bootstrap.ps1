@@ -2,6 +2,7 @@
 param(
     [switch]$SkipRuntime,
     [switch]$SkipModels,
+    [switch]$SkipWinPython,
     [switch]$Force,
     [switch]$ForceWinPython,
     [string[]]$Models
@@ -268,13 +269,21 @@ function Download-HuggingFaceModel {
     $targetDir = Join-Path $RootDir $Config.targetDir
     Ensure-Directory -Path $targetDir
     $requiredPatterns = @()
+    $mmprojPatterns = @()
     if ($Config.PSObject.Properties.Name -contains "filePatterns" -and $Config.filePatterns) {
         $requiredPatterns += @($Config.filePatterns | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     }
     if ($Config.PSObject.Properties.Name -contains "filePattern" -and -not [string]::IsNullOrWhiteSpace($Config.filePattern)) {
         $requiredPatterns = @("$($Config.filePattern)".Trim()) + $requiredPatterns
     }
+    if ($Config.PSObject.Properties.Name -contains "mmprojPatterns" -and $Config.mmprojPatterns) {
+        $mmprojPatterns += @($Config.mmprojPatterns | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    }
+    if ($Config.PSObject.Properties.Name -contains "mmprojPattern" -and -not [string]::IsNullOrWhiteSpace($Config.mmprojPattern)) {
+        $mmprojPatterns += @("$($Config.mmprojPattern)".Trim())
+    }
     $requiredPatterns = $requiredPatterns | Select-Object -Unique
+    $mmprojPatterns = $mmprojPatterns | Select-Object -Unique
     if (-not $requiredPatterns) {
         throw "Model manifest is incomplete for '$($Config.repo)': filePattern/filePatterns is empty."
     }
@@ -289,6 +298,19 @@ function Download-HuggingFaceModel {
             if (-not ($healthyExisting | Where-Object { $wildcard.IsMatch($_.Name) } | Select-Object -First 1)) {
                 $allRequiredPresent = $false
                 break
+            }
+        }
+        if ($allRequiredPresent -and $mmprojPatterns) {
+            $hasMmproj = $false
+            foreach ($pattern in $mmprojPatterns) {
+                $wildcard = [System.Management.Automation.WildcardPattern]::new($pattern, [System.Management.Automation.WildcardOptions]::IgnoreCase)
+                if ($healthyExisting | Where-Object { $wildcard.IsMatch($_.Name) } | Select-Object -First 1) {
+                    $hasMmproj = $true
+                    break
+                }
+            }
+            if (-not $hasMmproj) {
+                $allRequiredPresent = $false
             }
         }
     }
@@ -317,6 +339,43 @@ function Download-HuggingFaceModel {
             if ($downloaded.Length -le 0) {
                 throw "Downloaded model file is empty: $destination"
             }
+        }
+    }
+    if ($mmprojPatterns) {
+        $downloadedMmproj = $false
+        $lastMmprojError = $null
+        $existingAfterModelDownload = Get-ChildItem -LiteralPath $targetDir -Filter *.gguf -ErrorAction SilentlyContinue
+        foreach ($pattern in $mmprojPatterns) {
+            $wildcard = [System.Management.Automation.WildcardPattern]::new($pattern, [System.Management.Automation.WildcardOptions]::IgnoreCase)
+            if ($existingAfterModelDownload | Where-Object { $_.Length -gt 0 -and $wildcard.IsMatch($_.Name) } | Select-Object -First 1) {
+                $downloadedMmproj = $true
+                break
+            }
+        }
+        foreach ($pattern in $mmprojPatterns) {
+            if ($downloadedMmproj) {
+                break
+            }
+            try {
+                $files = Get-HuggingFaceFiles -Repo $Config.repo -Pattern $pattern -Token $Token
+                foreach ($file in $files) {
+                    $destination = Join-Path $targetDir ([System.IO.Path]::GetFileName($file.Name))
+                    Write-Step "Downloading $($file.Name)"
+                    Download-File -Url $file.Url -Destination $destination -Headers $headers
+                    $downloaded = Get-Item -LiteralPath $destination -ErrorAction Stop
+                    if ($downloaded.Length -le 0) {
+                        throw "Downloaded mmproj file is empty: $destination"
+                    }
+                }
+                $downloadedMmproj = $true
+                break
+            } catch {
+                $lastMmprojError = $_
+                Write-Step "mmproj pattern '$pattern' was not available in $($Config.repo). Trying next candidate."
+            }
+        }
+        if (-not $downloadedMmproj) {
+            throw "No model mmproj file could be downloaded for '$($Config.repo)': $lastMmprojError"
         }
     }
 
@@ -375,6 +434,21 @@ function Install-RuntimePackage {
                 }
             }
         }
+        "ffmpeg" {
+            if ((Test-Path -LiteralPath (Join-Path $targetDir "bin\ffmpeg.exe")) -and (Test-Path -LiteralPath (Join-Path $targetDir "bin\ffprobe.exe")) -and -not $Force) {
+                $skip = $true
+            }
+        }
+        "whisperCpp" {
+            $candidates = @(
+                (Join-Path $targetDir "bin\whisper-cli.exe"),
+                (Join-Path $targetDir "whisper-cli.exe"),
+                (Join-Path $targetDir "build\bin\Release\whisper-cli.exe")
+            )
+            if (($candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1) -and -not $Force) {
+                $skip = $true
+            }
+        }
     }
 
     if ($skip) {
@@ -407,6 +481,74 @@ function Install-RuntimePackage {
     Write-Ok "Runtime '$Name' is ready."
 }
 
+function Install-DirectRuntimeFile {
+    param(
+        [string]$Name,
+        [pscustomobject]$Config,
+        [string]$RootDir
+    )
+
+    if (-not $Config -or [string]::IsNullOrWhiteSpace($Config.url) -or [string]::IsNullOrWhiteSpace($Config.targetFile)) {
+        Write-Step "Skipping runtime file '$Name' because config is missing."
+        return
+    }
+
+    $destination = Join-Path $RootDir $Config.targetFile
+    if ((Test-Path -LiteralPath $destination) -and (Get-Item -LiteralPath $destination).Length -gt 0 -and -not $Force) {
+        Write-Step "Skipping runtime file '$Name' because it already exists."
+        return
+    }
+
+    Write-Step "Downloading runtime file '$Name'"
+    Download-File -Url $Config.url -Destination $destination
+    $downloaded = Get-Item -LiteralPath $destination -ErrorAction Stop
+    if ($downloaded.Length -le 0) {
+        throw "Downloaded runtime file is empty: $destination"
+    }
+    Write-Ok "Runtime file '$Name' is ready."
+}
+
+function Install-PythonPackages {
+    param(
+        [string[]]$Packages
+    )
+
+    $pythonExe = Get-PortablePythonExe
+    if (-not $pythonExe) {
+        Write-Step "Skipping Python package install because portable Python is not available."
+        return
+    }
+
+    $missing = @()
+    foreach ($package in $Packages) {
+        $importName = $package
+        if ($package -eq "python-docx") {
+            $importName = "docx"
+        }
+        $checkCode = "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$importName') else 1)"
+        & $pythonExe -c $checkCode
+        if ($LASTEXITCODE -ne 0) {
+            $missing += $package
+        }
+    }
+
+    if (-not $missing) {
+        Write-Step "Skipping Python document parser packages because they are already installed."
+        return
+    }
+
+    Write-Step "Installing Python document parser packages: $($missing -join ', ')"
+    & $pythonExe -m ensurepip --upgrade
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to ensure pip in portable Python."
+    }
+    & $pythonExe -m pip install --upgrade $missing
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install Python packages: $($missing -join ', ')"
+    }
+    Write-Ok "Python document parser packages are ready."
+}
+
 $rootDir = Get-RootDir
 $manifestPath = Join-Path $rootDir "config\bootstrap.manifest.json"
 if (-not (Test-Path -LiteralPath $manifestPath)) {
@@ -424,7 +566,20 @@ if ($Models) {
 if (-not $SkipRuntime) {
     Install-RuntimePackage -Name "llamaCpp" -Config $manifest.runtime.llamaCpp -RootDir $rootDir
     Install-RuntimePackage -Name "portableGit" -Config $manifest.runtime.portableGit -RootDir $rootDir
-    Install-RuntimePackage -Name "winPython" -Config $manifest.runtime.winPython -RootDir $rootDir
+    if (-not $SkipWinPython) {
+        Install-RuntimePackage -Name "winPython" -Config $manifest.runtime.winPython -RootDir $rootDir
+    } else {
+        Write-Step "Skipping WinPython runtime because -SkipWinPython was provided."
+    }
+    Install-RuntimePackage -Name "ffmpeg" -Config $manifest.runtime.ffmpeg -RootDir $rootDir
+    Install-RuntimePackage -Name "whisperCpp" -Config $manifest.runtime.whisperCpp -RootDir $rootDir
+    Install-DirectRuntimeFile -Name "whisperModel" -Config $manifest.runtime.whisperModel -RootDir $rootDir
+}
+
+if (-not $SkipWinPython) {
+    Install-PythonPackages -Packages @("pypdf", "python-docx")
+} else {
+    Write-Step "Skipping Python document parser packages because -SkipWinPython was provided."
 }
 
 if (-not $SkipModels) {

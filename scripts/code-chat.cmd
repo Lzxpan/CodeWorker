@@ -13,7 +13,7 @@ if not exist "%PROJECT_DIR%\" (
     exit /b 1
 )
 
-set "MODEL_KEY=qwen35"
+set "MODEL_KEY=gemma4"
 set "USE_BROWSER=0"
 
 :parse_optional_args

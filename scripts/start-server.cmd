@@ -3,19 +3,13 @@ setlocal EnableExtensions
 call "%~dp0_env.cmd"
 
 set "MODEL_KEY=%~1"
-if "%MODEL_KEY%"=="" set "MODEL_KEY=qwen35"
+if "%MODEL_KEY%"=="" set "MODEL_KEY=gemma4"
 
 set "PORT=%~2"
 set "CONTEXT_SIZE=%~3"
 
 for /f %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "[DateTime]::Now.ToString('yyyyMMdd-HHmmss')"' ) do set "STAMP=%%I"
 if not defined STAMP set "STAMP=unknown"
-
-call :resolve_model "%MODEL_KEY%"
-if errorlevel 1 exit /b 1
-
-if "%PORT%"=="" set "PORT=%MODEL_PORT%"
-if "%CONTEXT_SIZE%"=="" set "CONTEXT_SIZE=%MODEL_CONTEXT%"
 
 set "LOG_FILE=%LOGS_DIR%\llama-server-%MODEL_KEY%-%STAMP%.log"
 set "ERR_FILE=%LOGS_DIR%\llama-server-%MODEL_KEY%-%STAMP%.err.log"
@@ -35,6 +29,12 @@ if not exist "%LLAMA_SERVER%" (
     exit /b 1
 )
 
+call :resolve_model "%MODEL_KEY%"
+if errorlevel 1 exit /b 1
+
+if "%PORT%"=="" set "PORT=%MODEL_PORT%"
+if "%CONTEXT_SIZE%"=="" set "CONTEXT_SIZE=%MODEL_CONTEXT%"
+
 call :check_memory
 if errorlevel 1 exit /b 1
 
@@ -46,7 +46,12 @@ if errorlevel 1 (
 )
 
 set "NEED_MODEL_BOOTSTRAP=0"
-if not exist "%MODEL_FILE%" set "NEED_MODEL_BOOTSTRAP=1"
+if "%MODEL_FILE%"=="" (
+    set "NEED_MODEL_BOOTSTRAP=1"
+) else (
+    if not exist "%MODEL_FILE%" set "NEED_MODEL_BOOTSTRAP=1"
+)
+if defined MODEL_MMPROJ_PATTERNS if "%MODEL_MMPROJ%"=="" set "NEED_MODEL_BOOTSTRAP=1"
 if defined MODEL_MMPROJ if not exist "%MODEL_MMPROJ%" set "NEED_MODEL_BOOTSTRAP=1"
 if "%NEED_MODEL_BOOTSTRAP%"=="1" (
     echo [INFO] Model file not found. Running bootstrap for model "%MODEL_KEY%"...
@@ -55,6 +60,17 @@ if "%NEED_MODEL_BOOTSTRAP%"=="1" (
         call :emit_error MODEL_MISSING "Bootstrap failed while preparing model." "%MODEL_DIR%"
         exit /b 1
     )
+    call :resolve_model "%MODEL_KEY%"
+    if errorlevel 1 exit /b 1
+)
+
+if "%MODEL_FILE%"=="" (
+    call :emit_error MODEL_MISSING "Model file not found after bootstrap." "%MODEL_DIR% patterns=%MODEL_FILE_PATTERNS%"
+    exit /b 1
+)
+if defined MODEL_MMPROJ_PATTERNS if "%MODEL_MMPROJ%"=="" (
+    call :emit_error MODEL_MISSING "Model mmproj file not found after bootstrap." "%MODEL_DIR% patterns=%MODEL_MMPROJ_PATTERNS%"
+    exit /b 1
 )
 
 if defined MODEL_MMPROJ (
@@ -112,31 +128,33 @@ if exist "%ERR_FILE%" echo [INFO] Error log: "%ERR_FILE%"
 exit /b 0
 
 :resolve_model
-set "MODEL_INPUT=%~1"
 set "MODEL_MMPROJ="
-if /I "%MODEL_INPUT%"=="qwen" (
-    call :emit_error MODEL_REMOVED "Model 'qwen' has been removed." "Use 'qwen35' instead."
+set "MODEL_MMPROJ_PATTERNS="
+set "MODEL_FILE_PATTERNS="
+set "RESOLVE_PYTHON=%WINPY_PYTHON%"
+if not exist "%RESOLVE_PYTHON%" set "RESOLVE_PYTHON=python"
+set "MODEL_ENV_FILE=%TEMP%\codeworker-model-env-%RANDOM%-%RANDOM%.cmd"
+"%RESOLVE_PYTHON%" "%~dp0resolve_model_env.py" "%~1" > "%MODEL_ENV_FILE%"
+if errorlevel 1 (
+    type "%MODEL_ENV_FILE%" 2>nul
+    del "%MODEL_ENV_FILE%" >nul 2>nul
+    call :emit_error MODEL_START_FAILED "Unknown model." "%~1"
     exit /b 1
 )
-if /I "%MODEL_INPUT%"=="gemma4" (
-    set "MODEL_DIR=%MODELS_DIR%\gemma4-e4b-it-q4"
-    set "MODEL_ALIAS=gemma4-local"
-    set "MODEL_PORT=8081"
-    set "MODEL_CONTEXT=4096"
-    set "MODEL_FILE=%MODELS_DIR%\gemma4-e4b-it-q4\gemma-4-e4b-it-Q4_K_M.gguf"
-    exit /b 0
+findstr /b /c:"[ERROR_" "%MODEL_ENV_FILE%" >nul
+if not errorlevel 1 (
+    type "%MODEL_ENV_FILE%"
+    del "%MODEL_ENV_FILE%" >nul 2>nul
+    call :emit_error MODEL_START_FAILED "Unknown model." "%~1"
+    exit /b 1
 )
-if /I "%MODEL_INPUT%"=="qwen35" (
-    set "MODEL_DIR=%MODELS_DIR%\qwen3.5-9b-q4-mmproj"
-    set "MODEL_ALIAS=qwen35-local"
-    set "MODEL_PORT=8082"
-    set "MODEL_CONTEXT=12288"
-    set "MODEL_FILE=%MODELS_DIR%\qwen3.5-9b-q4-mmproj\Qwen3.5-9B-Q4_K_M.gguf"
-    set "MODEL_MMPROJ=%MODELS_DIR%\qwen3.5-9b-q4-mmproj\mmproj-BF16.gguf"
-    exit /b 0
+call "%MODEL_ENV_FILE%"
+del "%MODEL_ENV_FILE%" >nul 2>nul
+if "%MODEL_DIR%"=="" (
+    call :emit_error MODEL_START_FAILED "Unknown model." "%~1"
+    exit /b 1
 )
-call :emit_error MODEL_START_FAILED "Unknown model." "%MODEL_INPUT%"
-exit /b 1
+exit /b 0
 
 :check_memory
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $recommended = 32GB; $total = [int64](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; if ($total -gt 0 -and $total -lt $recommended) { Write-Host ('[WARN] Recommended system memory for larger local models is 32GB RAM or above. Detected: {0:N1} GB' -f ($total / 1GB)); Write-Host '[WARN] Integrated graphics may reduce available system memory.' }; exit 0 } catch { Write-Host '[WARN] Unable to determine total physical memory; skipping RAM check.'; exit 0 }"

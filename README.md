@@ -1,4 +1,4 @@
-# CodeWorker V0.98b
+# CodeWorker V1.00.000
 
 > 離線、可攜、以隱私與資安為優先的 Windows 本地 LLM 程式碼助理。
 
@@ -21,10 +21,10 @@
   - 預設與主力模型
   - 支援文字與圖片輸入
   - 主要用於專案分析、程式碼解釋與圖文問答
-- `Gemma 4 E4B`
+- `Gemma 4 26B`
   - 第二模型
-  - 目前在本專案中定位為文字分析模型
-  - 尚未列為本專案正式支援的圖片模型
+  - 由 CodeWorker 內建 `llama.cpp` service 啟動，不依賴 Ollama
+  - 預設使用 `Q4_K_M` GGUF；若目前設定沒有 vision projection，圖片會降級為文字附件狀態並交由模型回覆限制
 
 ---
 
@@ -32,13 +32,15 @@
 
 - 建議以 `32GB RAM` 作為較穩妥的使用目標，但**不是硬性門檻**
 - 若使用內顯，共用記憶體會影響模型實際可用 RAM，是否足夠仍需依本機配置自行判斷
-- 第一次下載 runtime 與模型時需要網路，且下載量會超過 `5GB`
-- 新版預設兩模型組合約為 **11.6 GB**
+- 第一次下載 runtime 與模型時需要網路；`Gemma 4 26B Q4_K_M` 約為 `17GB` 等級，實際大小依 Hugging Face GGUF 檔案而定
+- 新版預設兩模型組合會明顯大於舊版 **11.6 GB**，請預留足夠磁碟空間
 - 若舊環境仍保留已移除的 `qwen25` 模型檔，整體工作區仍可能接近 **16.6 GB**
-- `檔案預覽` 只是閱讀區，不會自動成為模型上下文
-- 模型只會根據**已同步釘選檔案**回答
+- 一般聊天不需要先開啟專案，也不需要釘選檔案；沒有專案上下文時會作為一般問答處理
+- 專案分析、修改建議、RAG 與 Agent 動作仍會使用已開啟專案與索引內容
+- `檔案樹` 可用來手動釘選精準上下文；未釘選時一般聊天會走全專案搜尋快取
 - 小到中型 pinned code 組合，`Qwen 3.5` 會優先送完整檔案；若超出預算改用節錄模式，UI 會顯示 `context coverage`
-- 圖片問答目前正式支援 `Qwen 3.5 9B Vision`；若目前所選模型不支援圖片，Web UI 會明確提示
+- 圖片與其他附件會先嘗試交給目前模型；若目前模型或 `llama.cpp` 設定無法處理，CodeWorker 會降級為文字說明，讓模型明確回覆限制
+- 對話改用 streaming 顯示，模型回傳的 `reasoning_content` 或 `<think>` 內容不再被刻意截掉
 
 GitHub About 建議文案：
 
@@ -86,23 +88,23 @@ http://127.0.0.1:8764
 
 ### 畫面範例
 
-![CodeWorker V0.98b 繁中 Web UI 畫面](docs/screenshots/webui-overview-zh-v098b.png)
+![CodeWorker V1.00.000 繁中 Web UI 畫面](docs/screenshots/webui-overview-zh-v100000.png)
 
 ### 基本操作流程
 
 1. 在 `專案路徑` 選擇你的專案根目錄
-2. 在 `模型` 保持 `Qwen 3.5 9B Vision`，或切換成 `Gemma 4 E4B`
+2. 在 `模型` 保持 `Qwen 3.5 9B Vision`，或切換成 `Gemma 4 26B`
 3. 點 `開啟專案`
 4. 在 `檔案樹` 直接勾選要加入上下文的檔案
 5. 勾選或取消勾選後，釘選狀態會立即同步
-6. 在主對話框輸入問題、需求或修改方向
+6. 在主對話框輸入問題、需求或修改方向；若尚未開啟專案，也可以直接作一般問答
 
 ### 圖片問答
 
-1. 點 `上傳圖片`，或直接把截圖貼到聊天輸入區
+1. 點 `上傳檔案`，或直接把截圖貼到聊天輸入區
 2. 若目前所選模型支援圖片，請求會直接使用目前模型
-3. 若目前所選模型不支援圖片，Web UI 會顯示明確錯誤，不再默默切換模型
-4. 大型截圖會先自動縮圖，再送入 `Qwen 3.5`，降低多模態圖片 token 失敗機率
+3. 若目前所選模型不支援圖片，CodeWorker 會把附件狀態轉成文字提示，讓模型自行回覆限制
+4. 大型截圖會先自動縮圖；支援 vision projection 的模型可直接接收圖片
 
 ### 建議教學題目
 
@@ -126,7 +128,7 @@ CodeWorker/
 ├─ models/        # GGUF 模型與 mmproj
 ├─ runtime/       # WinPython、PortableGit、llama.cpp
 ├─ scripts/       # bootstrap、啟動 server、啟動 Web UI、CLI 入口
-├─ webui/         # 後端 server.py 與前端 static 資源
+├─ webui/         # 後端 server.py、RAG/Agent 模組與前端 static 資源
 ├─ README.md
 ├─ README.zh-TW.md
 └─ README.en.md
@@ -134,8 +136,11 @@ CodeWorker/
 
 關鍵檔案：
 
-- `webui/server.py`：Web UI API、模型請求、上下文組裝、圖片預處理
-- `webui/static/app.js`：前端互動、釘選同步、聊天與圖片附件流程
+- `webui/server.py`：Web UI API、模型請求、streaming chat、上下文組裝、圖片預處理
+- `webui/core/models.py`：模型 registry、manifest 解析、模型能力與狀態資訊
+- `webui/rag/index.py`：本機 hierarchical RAG index、SQLite FTS5 fallback、impact analysis
+- `webui/agent/runtime.py`：ReAct-style Agent v1、受控工具呼叫、pending action 與 audit log
+- `webui/static/app.js`：前端互動、釘選同步、聊天與檔案附件流程
 - `scripts\start-server.cmd`：本地模型啟動入口
 - `scripts\code-chat.cmd`：專案級 CLI 對話入口
 - `config\bootstrap.manifest.json`：bootstrap 下載與預設模型配置
@@ -149,11 +154,11 @@ flowchart LR
     U["使用者"] --> W["Web UI"]
     W --> O["開啟專案 / 掃描檔案"]
     W --> P["勾選檔案樹並同步釘選"]
-    W --> C["聊天或分析請求"]
+    W --> C["一般聊天 / 專案分析 / Agent 請求"]
     C --> S["webui/server.py"]
     P --> S
     O --> S
-    S --> X["整理 pinned files / 圖片 / system prompt"]
+    S --> X["整理 pinned files / RAG / 圖片 / tool events"]
     X --> M["本地模型 server"]
     M --> R["模型回覆"]
     R --> W
@@ -162,19 +167,34 @@ flowchart LR
 實際行為重點：
 
 - `開啟專案` 會掃描檔案、入口點與測試位置
-- `檔案樹` 是唯一的上下文選擇入口
-- `檔案預覽` 只負責閱讀，不會自動加入模型上下文
-- 圖片會與文字請求一起送入後端，再依模型能力決定是否可執行
+- `檔案樹` 是手動上下文選擇入口；RAG index 會另外提供檢索式上下文
+- 圖片會與文字請求一起送入後端，再依模型能力直接處理或降級為文字附件狀態
 - 若上下文不足以送完整檔案，後端會改為節錄模式，前端顯示 `context coverage`
+- Agent 的 write、patch、delete、command 類動作必須先產生 pending action，使用者確認後才會執行；audit log 存在 `data/agent-actions.jsonl`
 
 ---
 
 ## 7. 版本歷程
 
+### V1.00.000
+
+- 預設模型改為 `Gemma 4 26B`，`Qwen 3.5 9B Vision` 保留為可選備用模型
+- 新增 bundled FFmpeg runtime，用於影片上傳後依本機硬體評估抽取 keyframes，再交給支援圖片的模型分析
+- 新增 bundled `whisper.cpp` speech-to-text pipeline，音訊與影片音軌會先嘗試產生 transcript；若本機沒有 STT backend，UI 與 prompt 會顯示明確狀態
+- 移除右側檔案預覽面板，對話區改為單欄寬版；檔案樹點檔名會切換釘選上下文
+- 修正長回覆續寫流程：模型只輸出 thinking/reasoning 時會自動要求 final answer，使用者要求「繼續」時會沿用最近對話歷史而不是重新塞入全專案 RAG
+- 影片 metadata-only fallback 會明確禁止模型根據檔名、網址或 metadata 猜測內容
+- Gemma4 啟動檢查會確認實際 `model_path` 與 vision `mmproj` 狀態，避免誤用舊模型服務
+- 清理舊 Gemma4 模型目錄，保留目前有效的 Unsloth `UD-Q4_K_M` 與 Qwen 備用模型
+
 ### V0.98b
 
+- `Gemma 4` 從 E4B 更新為 26B GGUF，改由 CodeWorker 內建 `llama.cpp` service 服務，不依賴 Ollama
+- 一般聊天解除「必須開啟專案 / 必須釘選檔案」限制
+- 新增 `/api/chat/stream`，完整顯示模型 streaming content 與 reasoning/thinking 輸出
+- 新增本機 RAG index、Agent v1 API、pending action 確認與 audit log
 - `Qwen 3.5` 正式取代 `Qwen 2.5` 成為預設模型
-- Web UI 的圖片附件提示與按鈕整併到同一列，減少版面高度
+- Web UI 的檔案附件提示與按鈕整併到同一列，減少版面高度
 - pinned file context 預算上調，小型 C# 專案更容易送完整檔案
 - 新增 `context coverage` 顯示，避免使用者誤以為模型看過完整原始碼
 - README 與產品定位更新為兩模型組合與新版容量說明

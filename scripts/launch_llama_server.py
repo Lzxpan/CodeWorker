@@ -60,6 +60,11 @@ def main() -> int:
             str(args.context),
             "--threads",
             str(args.threads),
+            "--parallel",
+            "1",
+            "--cache-ram",
+            "0",
+            "--no-warmup",
             "--n-gpu-layers",
             "0",
         ])
