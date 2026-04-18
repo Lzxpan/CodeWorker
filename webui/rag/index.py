@@ -40,7 +40,8 @@ GENERATED_PATH_PREFIXES = {
 }
 CODE_LOCATION_HINTS = (
     "在哪", "哪個檔案", "哪一段", "哪裡", "位置", "第幾行", "line", "section",
-    "code", "程式碼", "函式", "function", "class", "方法",
+    "code", "程式碼", "函式", "function", "class", "方法", "怎麼修改", "如何修改",
+    "修改", "更新", "調整", "change", "update", "modify",
 )
 MODEL_LOAD_HINTS = (
     "model", "模型", "加載", "載入", "加载", "load", "loading", "啟動", "启动",
@@ -62,6 +63,21 @@ MODEL_LOAD_EXPANSIONS = {
     "bootstrap.manifest",
     "get_model_config",
     "MODEL_PORTS",
+}
+SEMANTIC_QUERY_EXPANSIONS = {
+    "速度": {
+        "speed", "velocity", "interval", "timer", "tick", "fps", "frame", "delta", "deltatime",
+        "delay", "rate", "gameSpeed", "moveSpeed", "fallSpeed", "dropSpeed", "gravity",
+    },
+    "遊戲": {"game", "player", "enemy", "level", "score", "timer", "tick", "update", "loop"},
+    "游戏": {"game", "player", "enemy", "level", "score", "timer", "tick", "update", "loop"},
+    "音量": {"volume", "audio", "sound", "music", "sfx", "mute"},
+    "聲音": {"audio", "sound", "music", "sfx", "volume"},
+    "图片": {"image", "picture", "bitmap", "png", "jpg", "vision"},
+    "圖片": {"image", "picture", "bitmap", "png", "jpg", "vision"},
+    "影片": {"video", "frame", "keyframe", "ffmpeg", "duration"},
+    "登入": {"login", "signin", "auth", "authenticate", "password"},
+    "登錄": {"login", "signin", "auth", "authenticate", "password"},
 }
 CODE_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".go", ".rs", ".cs", ".cpp", ".cc", ".cxx",
@@ -412,9 +428,13 @@ def normalize_fts_query(query: str) -> str:
 def query_tokens(query: str) -> List[str]:
     tokens = [
         token.lower()
-        for token in re.findall(r"[A-Za-z_][\w.\-/]*|\d+", query, flags=re.UNICODE)
+        for token in re.findall(r"[A-Za-z_][\w.\-/]*|\d+|[\u4e00-\u9fff]{2,}", query, flags=re.UNICODE)
         if len(token.strip()) >= 2
     ]
+    for cjk_run in re.findall(r"[\u4e00-\u9fff]{3,}", query):
+        for size in (2, 3, 4):
+            for index in range(0, max(0, len(cjk_run) - size + 1)):
+                tokens.append(cjk_run[index:index + size].lower())
     return list(dict.fromkeys(tokens))
 
 
@@ -432,7 +452,10 @@ def expand_query_terms(query: str) -> List[str]:
     terms = query_tokens(query)
     lowered = query.lower()
     if is_model_loading_query(query):
-        terms.extend(term.lower() for term in MODEL_LOAD_EXPANSIONS)
+        terms = [*(term.lower() for term in MODEL_LOAD_EXPANSIONS), *terms]
+    for marker, additions in SEMANTIC_QUERY_EXPANSIONS.items():
+        if marker in query:
+            terms = [*(term.lower() for term in additions), *terms]
     if "開啟專案" in lowered or "open project" in lowered:
         terms.extend(["open_project", "handle_open_project", "collect_project_files", "analyze"])
     if "rag" in lowered or "檢索" in lowered or "搜尋" in lowered:

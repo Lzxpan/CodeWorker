@@ -1251,12 +1251,14 @@ function appendLiveMessage(role, content = "", attachments = [], meta = {}) {
   `;
   elements.chatLog.appendChild(item);
   elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
-  return {
+  const live = {
     content: item.querySelector(".chat-content"),
     reasoning: item.querySelector(".reasoning-block"),
     reasoningBody: item.querySelector(".reasoning-block pre"),
     role: item.querySelector(".chat-role"),
   };
+  live.reasoning?.addEventListener("toggle", () => scrollLiveReasoningToBottom(live));
+  return live;
 }
 
 function appendLiveText(target, text) {
@@ -1265,11 +1267,19 @@ function appendLiveText(target, text) {
   elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
 }
 
+function scrollLiveReasoningToBottom(live) {
+  if (!live?.reasoningBody) return;
+  if (live.reasoning?.open) {
+    live.reasoningBody.scrollTop = live.reasoningBody.scrollHeight;
+  }
+  elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
+}
+
 function appendLiveReasoning(live, text) {
   if (!live?.reasoningBody || !text) return;
   live.reasoning?.classList.remove("hidden");
   live.reasoningBody.textContent += text;
-  elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
+  scrollLiveReasoningToBottom(live);
 }
 
 async function streamChat(payload, onEvent) {

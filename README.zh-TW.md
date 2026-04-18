@@ -17,14 +17,14 @@
 
 目前模型定位：
 
-- `Qwen 3.5 9B Vision`
-  - 預設與主力模型
-  - 支援文字與圖片輸入
-  - 主要負責專案分析、程式碼問答、圖像理解與截圖翻譯
 - `Gemma 4 26B`
-  - 第二模型
+  - 預設主力模型
   - 由 CodeWorker 內建 `llama.cpp` service 啟動，不依賴 Ollama
-  - 預設使用 `Q4_K_M` GGUF；若目前設定沒有 vision projection，圖片會降級為文字附件狀態並交由模型回覆限制
+  - 預設使用 Unsloth `UD-Q4_K_M` GGUF；若 `mmproj` 可用，圖片會直接走 native vision，否則降級為文字附件狀態並交由模型回覆限制
+- `Qwen 3.5 9B Vision`
+  - 可選備用模型
+  - 支援文字與圖片輸入
+  - 可用於專案分析、程式碼問答、圖像理解與截圖翻譯
 
 ---
 
@@ -32,19 +32,21 @@
 
 - `32GB RAM` 是較穩妥的建議目標，但**不是硬性門檻**
 - 若機器使用內顯，共用記憶體會壓縮模型實際可用 RAM
-- 第一次下載 runtime / 模型時需要網路；`Gemma 4 26B Q4_K_M` 約為 `17GB` 等級，實際大小依 Hugging Face GGUF 檔案而定
+- 第一次下載 runtime / 模型時需要網路；`Gemma 4 26B UD-Q4_K_M` 約為 `17GB` 等級，實際大小依 Hugging Face GGUF 檔案而定
 - 新版預設兩模型組合會明顯大於舊版 **11.6 GB**，請預留足夠磁碟空間
 - 舊機器若還留有已移除的 `qwen25` 模型檔，整體工作區仍可能接近 **16.6 GB**
 - 一般聊天不需要先開啟專案，也不需要釘選檔案；沒有專案上下文時會作為一般問答處理
-- `檔案樹` 可用來手動釘選精準上下文；未釘選時一般聊天會走全專案搜尋快取
+- `檔案樹` 可用來手動釘選精準上下文；未釘選時，只要已開啟專案，一般聊天會走全專案搜尋快取與 RAG
 - 專案分析、修改建議、RAG 與 Agent 動作會使用已開啟專案與索引內容
-- `Qwen 3.5` 對小到中型 pinned code 組合會優先送完整檔案；若超出預算改用節錄，UI 會顯示 `context coverage`
+- RAG 會優先回傳實際 source code chunk、檔案路徑與行號；對「哪個檔案」、「哪一段」、「怎麼修改」類問題會降低 README / summary 的優先權
+- 小到中型 pinned code 組合會優先送完整檔案；若超出預算改用節錄，UI 會顯示 `context coverage`
 - 圖片與其他附件會先嘗試交給目前模型；若目前模型或 `llama.cpp` 設定無法處理，CodeWorker 會降級為文字說明，讓模型明確回覆限制
-- 對話改用 streaming 顯示，模型回傳的 `reasoning_content` 或 `<think>` 內容不再被刻意截掉
+- 對話改用 streaming 顯示；`reasoning_content` 或 `<think>` 內容會保留在可展開的思考區，展開時會自動跟隨最新輸出
+- 一般聊天會帶入最近多輪對話作為短期記憶，讓「上一題」、「剛剛那個檔案」這類追問可以連貫
 
 GitHub About 建議文案：
 
-- Description：`離線 Windows 本地 LLM 程式碼助理，支援 Qwen 3.5 圖文分析、釘選檔案上下文與隱私優先的本機專案理解。`
+- Description：`離線 Windows 本地 LLM 程式碼助理，支援 Gemma 4 26B、全專案 RAG、附件分析與隱私優先的本機專案理解。`
 - Topics：`offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
 
 ---
@@ -110,6 +112,7 @@ http://127.0.0.1:8764
 
 - 「請說明這個專案的入口流程」
 - 「請比較 `Program.cs`、`Form1.cs`、`AudioManager.cs` 的職責」
+- 「想更新遊戲速度要怎麼修改？請列出檔案路徑、行號與原因」
 - 「請依照已釘選檔案，說明這段 API 的功能」
 - 「請閱讀這張截圖並翻譯成繁體中文」
 
@@ -168,9 +171,10 @@ flowchart LR
 重點行為：
 
 - `開啟專案` 會做初始化與掃描，但不會自動把整個專案送進模型
-- `檔案樹` 是手動上下文選擇入口；RAG index 會另外提供檢索式上下文
+- `檔案樹` 是手動上下文選擇入口；未釘選時，RAG index 會自動提供檢索式上下文
 - 圖片會和文字請求一起進後端，再依模型能力直接處理或降級為文字附件狀態
 - 若上下文不足以送完整檔案，前端會顯示本次是節錄模式
+- 最近多輪對話會作為短期記憶放入 chat request；若本輪 RAG / pinned context 與歷史衝突，以本輪專案內容為準
 - Agent 的 write、patch、delete、command 類動作必須先產生 pending action，使用者確認後才會執行；audit log 存在 `data/agent-actions.jsonl`
 
 ---
@@ -184,6 +188,9 @@ flowchart LR
 - 新增 bundled `whisper.cpp` speech-to-text pipeline，音訊與影片音軌會先嘗試產生 transcript；若本機沒有 STT backend，UI 與 prompt 會顯示明確狀態
 - 移除右側檔案預覽面板，對話區改為單欄寬版；檔案樹點檔名會切換釘選上下文
 - 修正長回覆續寫流程：模型只輸出 thinking/reasoning 時會自動要求 final answer，使用者要求「繼續」時會沿用最近對話歷史而不是重新塞入全專案 RAG
+- 新增一般聊天短期記憶：所有模型都會收到最近多輪對話，改善追問與上下文連貫
+- 強化 RAG 程式碼定位：中文查詢會展開常見程式命名，例如「遊戲速度」會搜尋 `speed`、`Timer`、`Interval`、`Tick`、`gameSpeed`
+- 思考區展開時會自動捲到最新輸出，避免本地模型長時間輸出時畫面停在舊內容
 - 影片 metadata-only fallback 會明確禁止模型根據檔名、網址或 metadata 猜測內容
 - Gemma4 啟動檢查會確認實際 `model_path` 與 vision `mmproj` 狀態，避免誤用舊模型服務
 - 清理舊 Gemma4 模型目錄，保留目前有效的 Unsloth `UD-Q4_K_M` 與 Qwen 備用模型
@@ -194,7 +201,7 @@ flowchart LR
 - 一般聊天解除「必須開啟專案 / 必須釘選檔案」限制
 - 新增 `/api/chat/stream`，完整顯示模型 streaming content 與 reasoning/thinking 輸出
 - 新增本機 RAG index、Agent v1 API、pending action 確認與 audit log
-- `Qwen 3.5` 完全取代 `Qwen 2.5` 成為預設模型
+- `Qwen 3.5` 在當時取代 `Qwen 2.5` 成為預設模型；`V1.00.000` 起預設模型已改為 `Gemma 4 26B`
 - Web UI 的檔案附件提示與 `上傳檔案` / `移除附件` 控制整併到同一列
 - pinned file context 預算上調，小型專案更容易送完整檔案
 - 新增 `context coverage` 顯示，明確標示完整檔案或節錄模式
