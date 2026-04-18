@@ -8,74 +8,58 @@
 
 ## 1. Features
 
-`CodeWorker` packages `llama.cpp`, `WinPython`, `PortableGit`, GGUF models, and a local Web UI into one portable workspace for Windows. It is designed for:
+`CodeWorker` packages `llama.cpp`, `WinPython`, `PortableGit`, GGUF models, and a local Web UI into one Windows workspace. It is meant for projects where source code cannot be uploaded, cloud models cannot be used, or the tool must be carried to a customer machine on USB or an external drive.
 
-- offline or air-gapped environments
-- source code that cannot leave the machine
-- privacy-first local project analysis
-- USB portable on-site support workflows
+Core capabilities:
+
+- Local model service: `Gemma 4 26B` is the default model and is served by CodeWorker's bundled `llama.cpp` service. Ollama is not required.
+- Backup model: `Qwen 3.5 9B Vision` remains available as an optional model.
+- General chat: you can ask normal questions before opening a project, and no project data is sent.
+- Full-project retrieval: after a project is opened, chat can use the local RAG index to find relevant files and snippets even when no files are pinned.
+- Focused context: checked files in the `File tree` become pinned context and take priority over broad project retrieval.
+- File attachments: code, config, documents, images, audio, and video can be attached. CodeWorker sends extracted text, keyframes, or transcripts when available, otherwise it falls back to metadata.
+- Long answers and memory: streaming replies support automatic continuation, partial-output history, compressed conversation memory, and recent raw turns for follow-up questions.
+- Agent safety: writes, patches, deletes, and commands become pending actions and only run after user confirmation.
 
 Current model positioning:
 
 - `Gemma 4 26B`
   - default primary model
-  - served by CodeWorker's bundled `llama.cpp` service, with no Ollama dependency
-  - defaults to the Unsloth `UD-Q4_K_M` GGUF; if `mmproj` is available, images use native vision, otherwise they are downgraded to text attachment status so the model can explain the limitation
+  - uses Unsloth GGUF with bundled `llama.cpp`
+  - if `mmproj` is available, images and video keyframes use native vision; otherwise CodeWorker sends text, transcript, or metadata fallback
 - `Qwen 3.5 9B Vision`
   - optional backup model
-  - supports both text and image input
-  - can be used for project analysis, code explanation, and screenshot understanding
+  - useful for text, image, project Q&A, and screenshot understanding
 
 ---
 
 ## 2. Important Notes
 
-- `32GB RAM` is the more reliable target, but it is **not** a hard execution gate
-- integrated graphics can reduce the RAM actually available to the model
-- the first runtime / model download requires internet access; `Gemma 4 26B UD-Q4_K_M` is roughly in the `17GB` class, depending on the selected Hugging Face GGUF file
-- the new default two-model layout is significantly larger than the older **11.6 GB** layout, so reserve enough disk space
-- older upgraded workspaces can still stay near **16.6 GB** if the removed `qwen25` files are still present
-- general chat no longer requires opening a project or pinning files; without project context it behaves as normal Q&A
-- the `File tree` can manually pin focused context; when nothing is pinned and a project is open, normal chat uses the full-project search cache and RAG
-- project analysis, edit suggestions, RAG, and Agent actions use the opened project and index content
-- RAG prioritizes real source code chunks, file paths, and line ranges; for questions such as "which file", "which section", or "how should I change this", README / summary hits are ranked lower
-- small-to-medium pinned code sets are sent as full files where possible; if CodeWorker has to fall back to excerpts, the UI shows `context coverage`
-- image and attachment requests are attempted with the current model first; if the selected model or `llama.cpp` setup cannot process them, CodeWorker downgrades the attachment into a text note and lets the model explain the limitation
-- chat now uses streaming output; `reasoning_content` or `<think>` blocks are preserved in an expandable reasoning panel that auto-scrolls when opened
-- normal chat includes compressed memory plus recent raw turns, so follow-up questions such as "the previous one" or "that file" remain connected while using fewer tokens
-- when long answers hit `finish_reason=length`, continuation only sends the previous answer tail instead of resending large RAG context; if streaming fails mid-answer, the partial output is saved for manual continuation
-
-Recommended GitHub About:
-
-- Description: `離線 Windows 本地 LLM 程式碼助理，支援 Gemma 4 26B、全專案 RAG、附件分析與隱私優先的本機專案理解。`
-- Topics: `offline-ai`, `local-llm`, `windows`, `code-assistant`, `privacy-first`, `llama-cpp`
+- The first run needs internet access to download runtimes and models; later use can be offline.
+- Reserve enough disk space and memory around the `32GB RAM` class when possible. Actual performance depends on GPU, integrated graphics memory sharing, and the selected quantization file.
+- CodeWorker does not depend on Ollama; models are served by the bundled `llama.cpp` service.
+- Without an opened project, chat behaves as normal Q&A. With an opened project and no pinned files, chat uses full-project RAG. With pinned files, pinned context takes priority.
+- Attachments are best-effort: CodeWorker tries native model payload first, then text extraction, video keyframes, speech transcript, or metadata fallback.
+- Agent writes, patches, deletes, and commands require user confirmation and are written to the audit log.
 
 ---
 
 ## 3. Installation
 
-### Full bootstrap
+### First full bootstrap
 
 ```cmd
 scripts\bootstrap.cmd
 ```
 
-This prepares:
+This prepares the components defined in `config\bootstrap.manifest.json`:
 
 - `llama.cpp`
-- `PortableGit`
 - `WinPython`
-- default model files
-
-### Optional CLI agent setup
-
-```cmd
-scripts\install-aider.cmd
-```
-
----
-
-## 4. Usage and Tutorial
+- `PortableGit`
+- `FFmpeg`
+- `whisper.cpp` runtime when enabled by the manifest
+- default models and `mmproj`
 
 ### Launch the Web UI
 
@@ -89,33 +73,55 @@ Open:
 http://127.0.0.1:8764
 ```
 
+### Optional CLI agent setup
+
+```cmd
+scripts\install-aider.cmd
+```
+
+---
+
+## 4. Usage and Tutorial
+
 ### Screenshot
 
 ![CodeWorker V1.00.000 English Web UI overview](docs/screenshots/webui-overview-en-v100000.png)
 
-### Basic workflow
+### General Q&A
 
-1. Choose the project root in `Project path`
-2. Confirm the model selection
-3. Click `Open project`
-4. When project context is needed, check files in the `File tree`
-5. The pinned state syncs immediately when you check or uncheck files
-6. Ask questions or describe changes in the main chat; you can also ask general questions before opening a project
+1. Launch the Web UI.
+2. Ask directly in the main chat without opening a project.
+3. This mode does not add `PROJECT RAG CONTEXT`, pinned files, or file tree data.
 
-### File attachment workflow
+### Project search and Q&A
 
-1. Click `Attach file`, or paste a screenshot into the chat box
-2. If the current model supports images, the request uses that model directly
-3. If the current model does not support images, CodeWorker converts the attachment state into a text note and lets the model answer with the limitation
-4. Larger screenshots are automatically downscaled; models with a usable vision projection can receive the image directly
+1. Choose the project root in `Project path`.
+2. Click `Open project`.
+3. Click `Analyze project` when you want CodeWorker to build or refresh the index.
+4. Ask about file locations, flows, changes, or errors. If no files are pinned, CodeWorker uses full-project RAG.
+5. Check file names in the `File tree` to focus the model on specific files. The checked state syncs immediately as pinned context.
 
-### Suggested tutorial prompts
+Suggested prompts:
 
-- `Please explain the project entry flow.`
-- `Compare Program.cs, Form1.cs, and AudioManager.cs.`
-- `How should I change the game speed? Please list file paths, line ranges, and reasons.`
-- `Explain this API based on the pinned files.`
-- `Read this screenshot and summarize the code behavior.`
+- `Where is the code that loads the model? Include file path, section, and why.`
+- `How should I change the game speed? List file paths, line ranges, and reasons.`
+- `Which files are likely related to this error?`
+- `Explain the login flow based on the current project.`
+
+### File attachment analysis
+
+1. Click `Attach file`, or paste a screenshot into the chat input.
+2. You can attach code, config, documents, images, audio, and video.
+3. Text and code are extracted when possible. PDF / DOCX text is extracted when the local extractor is available.
+4. Images try native vision first. Videos try `FFmpeg` keyframe extraction first. Audio files and video audio tracks try speech-to-text first.
+5. If the local extractor is missing or the model cannot receive a modality, CodeWorker sends metadata and a limitation note instead of pretending the content was seen.
+
+### Long answers and follow-ups
+
+- Reasoning is collapsed by default and can be expanded fully. When expanded, it auto-scrolls to the latest output.
+- If the model stops because of `finish_reason=length`, CodeWorker continues from the previous answer tail instead of resending large RAG context.
+- If streaming fails mid-answer, the partial output is kept in history so a manual "continue" can resume.
+- Older turns are compressed into a memory summary, while recent turns remain raw to preserve follow-up context and reduce token use.
 
 ---
 
@@ -123,14 +129,15 @@ http://127.0.0.1:8764
 
 ```text
 CodeWorker/
-├─ config/        # bootstrap, model, and aider settings
-├─ docs/          # screenshots and internal docs
-├─ downloads/     # first-run download cache
-├─ logs/          # runtime logs
+├─ config/        # bootstrap, model registry, and aider settings
+├─ data/          # RAG indexes, Agent audit log, and local state
+├─ docs/          # screenshots, internal docs, and test notes
+├─ downloads/     # bootstrap download cache
+├─ logs/          # Web UI and model server logs
 ├─ models/        # GGUF models and mmproj
-├─ runtime/       # WinPython, PortableGit, llama.cpp
-├─ scripts/       # bootstrap, model server, Web UI, and CLI entry scripts
-├─ webui/         # Python backend, RAG/Agent modules, and static frontend assets
+├─ runtime/       # WinPython, PortableGit, llama.cpp, FFmpeg, whisper.cpp
+├─ scripts/       # bootstrap, model resolution, server launch, and regression tests
+├─ webui/         # Python backend, RAG/Agent modules, and frontend assets
 ├─ README.md
 ├─ README.zh-TW.md
 └─ README.en.md
@@ -138,15 +145,17 @@ CodeWorker/
 
 Key files:
 
-- `webui/server.py`: API routes, streaming chat, context assembly, image preprocessing, model calls
-- `webui/core/models.py`: model registry, manifest parsing, model capability and status data
-- `webui/rag/index.py`: local hierarchical RAG index, SQLite FTS5 fallback, impact analysis
-- `webui/agent/runtime.py`: ReAct-style Agent v1, controlled tool calls, pending actions, audit log
-- `webui/static/app.js`: frontend chat flow, instant pin sync, file attachments
-- `webui/static/styles.css`: layout and bilingual UI styling
-- `scripts\start-server.cmd`: local model server entry
-- `scripts\code-chat.cmd`: project-level CLI chat entry
-- `config\bootstrap.manifest.json`: bootstrap and default-model configuration
+- `config\bootstrap.manifest.json`: runtime, model source, model path, `mmproj`, and defaults.
+- `scripts\resolve_model_env.py`: resolves model file, port, context, and `mmproj` from the manifest.
+- `scripts\launch_llama_server.py`: launches the bundled `llama.cpp` model server.
+- `scripts\launch-webui.cmd`: starts the Web UI.
+- `scripts\run_webui_regression.py`: Web UI, attachment, and RAG regression tests.
+- `webui\server.py`: API routes, streaming chat, context assembly, attachment handling, memory, and model calls.
+- `webui\core\models.py`: model registry, status, health checks, and OpenAI-compatible endpoint data.
+- `webui\rag\index.py`: hierarchical project index, SQLite FTS5 fallback, chunk search, and impact hints.
+- `webui\agent\runtime.py`: ReAct-style Agent, tool calls, pending actions, and audit log.
+- `webui\static\app.js`: frontend chat, streaming, attachments, file tree, and model switching.
+- `webui\static\styles.css`: 450px sidebar and single-column chat layout.
 
 ---
 
@@ -155,29 +164,31 @@ Key files:
 ```mermaid
 flowchart LR
     U["User"] --> W["Web UI"]
-    W --> O["Open project"]
-    O --> S["Scan files / entry points / tests"]
-    W --> P["Check or uncheck file tree items"]
-    P --> A["Sync pinned files"]
-    W --> C["General chat / project analysis / Agent request"]
-    C --> B["webui/server.py"]
-    A --> B
-    S --> B
-    B --> X["Assemble pinned context / RAG / images / tool events"]
-    X --> M["Local model server"]
-    M --> R["Model reply"]
-    R --> W
+    W --> G["General chat"]
+    W --> O["Open project / Analyze project"]
+    O --> I["Local RAG index / cache"]
+    W --> P["File tree pinned files"]
+    W --> F["File upload / screenshot / audio / video"]
+    G --> S["webui/server.py"]
+    I --> S
+    P --> S
+    F --> S
+    S --> C["Assemble memory / RAG / pinned context / attachments"]
+    C --> M["llama.cpp local model server"]
+    M --> R["Streaming reply / reasoning panel"]
+    S --> A["Agent pending actions"]
+    A --> Q["User confirmation"]
+    Q --> T["Write files / patch / command"]
 ```
 
-Behavior summary:
+Workflow rules:
 
-- `Open project` prepares the workspace and scans metadata, but does not send the whole project to the model
-- the `File tree` is the manual context-selection entry point; when nothing is pinned, the RAG index automatically provides retrieval-based context
-- images go through the backend together with the text request, then are either handled directly or downgraded into a text attachment note
-- when the context budget is too small for full files, the UI explicitly shows excerpt mode through `context coverage`
-- older turns are compressed into `COMPRESSED CONVERSATION MEMORY`, while the latest turns stay raw; if memory conflicts with the current RAG / pinned context, the current project context wins
-- automatic long-answer continuation uses the previous answer tail, avoiding repeated submission of the same large `PROJECT RAG CONTEXT`
-- write, patch, delete, and command Agent actions must become pending actions first; they only run after user confirmation, and the audit log is written to `data/agent-actions.jsonl`
+- Without an opened project, the chat payload only contains the user question, attachments, and conversation memory.
+- With an opened project and no pinned files, the RAG index searches paths, symbols, summaries, and chunks based on the question.
+- With pinned files, pinned context takes priority so unrelated project content is not mixed in.
+- Attachments use native multimodal payload first, then extractor or metadata fallback.
+- Long-answer continuation uses the previous answer tail and avoids resending large `PROJECT RAG CONTEXT`.
+- The Agent can read and search directly. Write and command actions require pending confirmation.
 
 ---
 
@@ -185,51 +196,48 @@ Behavior summary:
 
 ### V1.00.000
 
-- changed the default model to `Gemma 4 26B`; `Qwen 3.5 9B Vision` remains available as a backup model
-- added a bundled FFmpeg runtime so uploaded videos can be converted into hardware-budgeted keyframes for image-capable model analysis
-- added a bundled `whisper.cpp` speech-to-text pipeline for audio files and video audio tracks; when no local STT backend is available, the UI and prompt expose an explicit status
-- removed the right-side file preview panel and changed the chat workspace to a wider single-column layout; clicking a filename in the file tree now toggles pinned context
-- fixed long-answer continuation so reasoning-only responses trigger an answer-only retry, and user "continue" requests reuse recent chat history instead of re-injecting full-project RAG
-- added compressed conversation memory for normal chat: all models receive older-turn summaries plus recent raw turns to improve follow-ups while saving tokens
-- fixed manual continuation after streaming failures: partial output is stored in history, so the next "continue" request does not re-inject full-project RAG
-- strengthened RAG code location: Chinese queries expand common implementation terms, so "game speed" searches for `speed`, `Timer`, `Interval`, `Tick`, and `gameSpeed`
-- reasoning panels now auto-scroll to the newest streamed text when expanded
-- tightened video metadata-only fallback so the model must not infer content from file names, URLs, or metadata
-- strengthened Gemma4 startup checks by validating the live `model_path` and vision `mmproj` state before treating a server as ready
-- cleaned up obsolete Gemma4 model directories while keeping the active Unsloth `UD-Q4_K_M` model and Qwen backup model
+- changed the default model to `Gemma 4 26B`; `Qwen 3.5 9B Vision` remains available as an optional backup model.
+- moved Gemma4 to Unsloth GGUF with bundled `llama.cpp`, and validates the live `model_path` plus vision `mmproj` state.
+- added full-project RAG search so opened projects can be searched for relevant files, snippets, and line ranges without pinned files.
+- strengthened Chinese query expansion for natural-language code location questions such as game speed and model loading.
+- added universal attachment handling: document text extraction, image native vision, video keyframes, audio / video speech-to-text, and metadata fallback.
+- added bundled `FFmpeg` and `whisper.cpp` speech-to-text pipeline.
+- added compressed conversation memory plus recent raw turns to improve follow-up questions while reducing token use.
+- fixed long-answer truncation and manual continuation: automatic continuation sends only the answer tail, and streaming failures keep partial output.
+- changed reasoning to collapsed-by-default with auto-scroll when expanded.
+- removed the right-side file preview panel and moved to a 450px sidebar with a single-column chat workspace.
+- changed Agent write, patch, delete, and command actions to pending action + confirmation + audit log.
+- refreshed README, workflow diagrams, file structure, and usage guidance for V1.00.000.
 
 ### V0.98b
 
-- updated `Gemma 4` from E4B to 26B GGUF, served by CodeWorker's bundled `llama.cpp` service without Ollama
-- removed the project/pinned-file requirement for general chat
-- added `/api/chat/stream` with full streaming content and reasoning/thinking display
-- added local RAG index, Agent v1 APIs, pending action confirmation, and audit logging
-- replaced `Qwen 2.5` with `Qwen 3.5` as the default model at that time; starting from `V1.00.000`, the default model is `Gemma 4 26B`
-- merged the file attachment hint and `Attach file` / `Remove attachments` controls into the same row
-- increased the pinned-file context budget so small projects are more likely to use full files
-- added `context coverage` to show whether the model received full files or excerpts
-- updated the README to reflect the two-model layout, the `11.6 GB / 16.6 GB` storage note, and the latest multimodal behavior
+- updated `Gemma 4` from E4B to 26B GGUF, served by CodeWorker's bundled `llama.cpp` service without Ollama.
+- removed the project/pinned-file requirement for general chat.
+- added `/api/chat/stream` with streaming content and reasoning/thinking display.
+- added local RAG index, Agent v1 APIs, pending action confirmation, and audit logging.
+- replaced `Qwen 2.5` with `Qwen 3.5` as the default model at that time; starting from `V1.00.000`, the default model is `Gemma 4 26B`.
+- merged attachment hints and controls, and added `context coverage`.
 
 ### V0.97b
 
-- aligned main chat and `Analyze project` with a more raw-first response path
-- fixed large pinned-file cases that could degrade to filename-only context
-- refreshed the bilingual README screenshots
+- aligned main chat and `Analyze project` with a more raw-first response path.
+- fixed large pinned-file cases that could degrade to filename-only context.
+- refreshed the bilingual README screenshots.
 
 ### V0.96b
 
-- aligned the landing page, bilingual docs, and Web UI positioning
-- moved responses closer to the models' original output
+- aligned the landing page, bilingual docs, and Web UI positioning.
+- moved responses closer to the models' original output.
 
 ### V0.95b
 
-- added the README landing page and split bilingual docs
-- added `繁中 / EN` language switching in the Web UI
+- added the README landing page and split bilingual docs.
+- added `繁中 / EN` language switching in the Web UI.
 
 ### V0.94b
 
-- removed the old edit-plan modal
-- moved analysis and suggestion iterations back into the main chat
+- removed the old edit-plan modal.
+- moved analysis and suggestion iterations back into the main chat.
 
 ---
 
@@ -239,6 +247,6 @@ This project is licensed under [MIT](LICENSE).
 
 If you use CodeWorker inside customer environments or air-gapped networks, you should still verify:
 
-- the licenses of the local models and bundled runtimes
-- local rules for USB tools and offline AI
-- whether the target project data is allowed to be read by a local model
+- the licenses of the local models and third-party runtimes.
+- local rules for USB tools, portable software, and offline AI.
+- whether the target project data is allowed to be read by a local model.
