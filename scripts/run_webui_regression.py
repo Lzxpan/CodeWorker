@@ -193,6 +193,44 @@ def test_chat_messages_include_recent_history():
     assert_true("internal" not in combined, "history should strip reasoning blocks")
 
 
+def test_chat_messages_include_compressed_memory_summary():
+    summary = "使用者目標 / 待辦:\n- 想調整遊戲速度\n\n已提到檔案 / 符號:\n- Form1.cs\n- gameTimer.Interval"
+    messages = server.build_raw_messages(
+        "gemma4",
+        "上一題要改哪裡？",
+        "system prompt",
+        history=[],
+        memory_summary=summary,
+    )
+    assert_true(messages[0]["role"] == "system", "compressed memory should be added to the system prompt")
+    assert_true("COMPRESSED CONVERSATION MEMORY" in messages[0]["content"], "system prompt should include compressed memory heading")
+    assert_true("gameTimer.Interval" in messages[0]["content"], "compressed memory should preserve important implementation references")
+
+
+def test_compact_session_memory_keeps_ui_history_and_builds_summary():
+    old_values = (
+        list(server.STATE.history),
+        server.STATE.memory_summary,
+        server.STATE.memory_compacted_count,
+    )
+    try:
+        with server.STATE_LOCK:
+            server.STATE.history = []
+            server.STATE.memory_summary = ""
+            server.STATE.memory_compacted_count = 0
+            for index in range(8):
+                server.STATE.history.append({"role": "user", "content": f"第 {index} 題：想更新遊戲速度，請看 Form1.cs"})
+                server.STATE.history.append({"role": "assistant", "content": f"第 {index} 答：修改 gameTimer.Interval 與 gameSpeed。"})
+            original_len = len(server.STATE.history)
+            server.compact_session_memory_locked("gemma4")
+            assert_true(len(server.STATE.history) == original_len, "memory compaction should not remove visible UI history")
+            assert_true(server.STATE.memory_compacted_count > 0, "memory compaction should record the compacted boundary")
+            assert_true("Form1.cs" in server.STATE.memory_summary and "gameTimer.Interval" in server.STATE.memory_summary, "memory summary should preserve important file and symbol references")
+    finally:
+        with server.STATE_LOCK:
+            server.STATE.history, server.STATE.memory_summary, server.STATE.memory_compacted_count = old_values
+
+
 def test_stream_reasoning_only_length_retries_for_final_answer():
     class FakeResponse:
         def __init__(self, lines):
@@ -504,6 +542,8 @@ def main():
         test_transcribe_media_attachment_updates_text_preview,
         test_history_continuation_uses_previous_answer_tail,
         test_chat_messages_include_recent_history,
+        test_chat_messages_include_compressed_memory_summary,
+        test_compact_session_memory_keeps_ui_history_and_builds_summary,
         test_stream_reasoning_only_length_retries_for_final_answer,
         test_gemma_native_image_payload_with_mmproj,
         test_prepare_attachments_does_not_use_qwen_helper,

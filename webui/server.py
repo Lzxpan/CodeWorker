@@ -55,6 +55,9 @@ MAX_TREE_CONTEXT_ITEMS = 30
 MAX_CHAT_HISTORY_ITEMS = 8
 MAX_CHAT_HISTORY_ITEM_CHARS = 1800
 MAX_CHAT_HISTORY_TOTAL_CHARS = 7200
+MAX_MEMORY_SUMMARY_CHARS = 3200
+MAX_MEMORY_SUMMARY_LINE_CHARS = 360
+MEMORY_COMPACT_TRIGGER_ITEMS = 4
 ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
 DEFAULT_MODEL_KEY = "gemma4"
@@ -250,6 +253,8 @@ class SessionState:
     pinned_files: List[str] = field(default_factory=list)
     current_preview_path: Optional[str] = None
     history: List[Dict[str, object]] = field(default_factory=list)
+    memory_summary: str = ""
+    memory_compacted_count: int = 0
     pending_edit: Optional[Dict[str, object]] = None
     ui_state: str = "idle"
 
@@ -557,6 +562,8 @@ def clear_session(ui_state: str = "idle") -> None:
         STATE.pinned_files = []
         STATE.current_preview_path = None
         STATE.history = []
+        STATE.memory_summary = ""
+        STATE.memory_compacted_count = 0
         STATE.pending_edit = None
         STATE.ui_state = ui_state
 
@@ -2928,6 +2935,105 @@ def strip_think_blocks(content: str) -> str:
     return re.sub(r"<think>\s*[\s\S]*?\s*</think>", "", str(content or ""), flags=re.IGNORECASE).strip()
 
 
+def normalize_memory_line(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip(" -\t\r\n")
+
+
+def append_unique_memory_line(target: List[str], text: str, max_items: int) -> None:
+    line = normalize_memory_line(text)
+    if not line:
+        return
+    line = truncate_middle(line, MAX_MEMORY_SUMMARY_LINE_CHARS)
+    lowered = line.lower()
+    existing = {item.lower() for item in target}
+    if lowered in existing:
+        return
+    target.append(line)
+    if len(target) > max_items:
+        del target[0:len(target) - max_items]
+
+
+def extract_memory_summary_sections(summary: str) -> Dict[str, List[str]]:
+    sections = {"goals": [], "refs": [], "decisions": [], "attachments": []}
+    current = ""
+    heading_map = {
+        "使用者目標": "goals",
+        "已提到檔案": "refs",
+        "已確認結論": "decisions",
+        "附件": "attachments",
+    }
+    for raw_line in str(summary or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        matched_heading = next((value for key, value in heading_map.items() if line.startswith(key)), "")
+        if matched_heading:
+            current = matched_heading
+            continue
+        if current and line.startswith("- "):
+            append_unique_memory_line(sections[current], line[2:], 12)
+    return sections
+
+
+def extract_referenced_names(content: str) -> List[str]:
+    text = str(content or "")
+    patterns = [
+        r"\b[\w./\\-]+\.(?:py|cs|js|jsx|ts|tsx|json|yaml|yml|md|cmd|ps1|bat|html|css|scss|xml|toml|ini)\b",
+        r"\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b",
+        r"\b[A-Za-z_][\w]*(?:Interval|Timer|Speed|Manager|Controller|Service|Handler|Provider|Config)\b",
+    ]
+    refs: List[str] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, text):
+            append_unique_memory_line(refs, str(match).replace("\\", "/"), 20)
+    return refs[:20]
+
+
+def build_compressed_memory_summary(existing_summary: str, history_items: List[Dict[str, object]]) -> str:
+    sections = extract_memory_summary_sections(existing_summary)
+    for item in history_items:
+        role = str(item.get("role", "")).strip()
+        content = strip_think_blocks(str(item.get("content", "")).strip())
+        if role == "user":
+            attachments = item.get("attachments", [])
+            if isinstance(attachments, list) and attachments:
+                names = ", ".join(str(entry.get("name", "attachment")) for entry in attachments if isinstance(entry, dict))
+                append_unique_memory_line(sections["attachments"], f"使用者上傳附件: {names}", 8)
+            if content:
+                append_unique_memory_line(sections["goals"], content, 10)
+        elif role == "assistant" and content:
+            append_unique_memory_line(sections["decisions"], content, 12)
+        for ref in extract_referenced_names(content):
+            append_unique_memory_line(sections["refs"], ref, 18)
+
+    lines = [
+        "使用者目標 / 待辦:",
+        *[f"- {item}" for item in sections["goals"][-10:]],
+        "",
+        "已提到檔案 / 符號:",
+        *[f"- {item}" for item in sections["refs"][-18:]],
+        "",
+        "已確認結論 / 建議:",
+        *[f"- {item}" for item in sections["decisions"][-12:]],
+    ]
+    if sections["attachments"]:
+        lines.extend(["", "附件 / 輸入狀態:", *[f"- {item}" for item in sections["attachments"][-8:]]])
+    summary = "\n".join(line for line in lines if line is not None).strip()
+    return fit_text_to_limit(summary, MAX_MEMORY_SUMMARY_CHARS)
+
+
+def compact_session_memory_locked(model_key: str) -> None:
+    raw_keep = max(0, min(MAX_CHAT_HISTORY_ITEMS, get_chat_history_limit(model_key) * 2))
+    cutoff = max(0, len(STATE.history) - raw_keep)
+    if cutoff <= STATE.memory_compacted_count + MEMORY_COMPACT_TRIGGER_ITEMS:
+        return
+    to_compact = STATE.history[STATE.memory_compacted_count:cutoff]
+    if not to_compact:
+        return
+    STATE.memory_summary = build_compressed_memory_summary(STATE.memory_summary, to_compact)
+    STATE.memory_compacted_count = cutoff
+
+
 def build_answer_only_retry_messages(messages: List[Dict[str, object]]) -> List[Dict[str, object]]:
     retry_messages: List[Dict[str, object]] = []
     inserted = False
@@ -3203,9 +3309,10 @@ def call_local_model_with_attachment_fallback(
     timeout_seconds: int,
     continue_on_length: int,
     history: Optional[List[Dict[str, object]]] = None,
+    memory_summary: str = "",
 ) -> Tuple[str, Optional[Dict[str, object]], Dict[str, object]]:
     user_content, attachment_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=False)
-    messages = build_raw_messages(model_key, user_content, system_prompt, history=history)
+    messages = build_raw_messages(model_key, user_content, system_prompt, history=history, memory_summary=memory_summary)
     try:
         reply = call_local_model(
             model_alias,
@@ -3220,7 +3327,7 @@ def call_local_model_with_attachment_fallback(
         if not attachment_meta.get("nativeImages") or not is_multimodal_transport_error(exc):
             raise
         fallback_content, fallback_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=True)
-        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt, history=history)
+        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt, history=history, memory_summary=memory_summary)
         reply = call_local_model(
             model_alias,
             fallback_messages,
@@ -3248,9 +3355,10 @@ def stream_local_model_with_attachment_fallback(
     timeout_seconds: int,
     continue_on_length: int,
     history: Optional[List[Dict[str, object]]] = None,
+    memory_summary: str = "",
 ):
     user_content, attachment_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=False)
-    messages = build_raw_messages(model_key, user_content, system_prompt, history=history)
+    messages = build_raw_messages(model_key, user_content, system_prompt, history=history, memory_summary=memory_summary)
     emitted_model_output = False
     try:
         for event in stream_local_model_events(
@@ -3274,7 +3382,7 @@ def stream_local_model_with_attachment_fallback(
             "fallbackKinds": fallback_meta.get("fallbackKinds", []),
             "retried": True,
         }
-        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt, history=history)
+        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt, history=history, memory_summary=memory_summary)
         for event in stream_local_model_events(
             model_alias,
             fallback_messages,
@@ -3320,17 +3428,21 @@ def build_raw_messages(
     user_content: object,
     system_prompt: str = "",
     history: Optional[List[Dict[str, object]]] = None,
+    memory_summary: str = "",
 ) -> List[Dict[str, object]]:
     messages: List[Dict[str, object]] = []
     base_prompt = system_prompt.strip()
     history_messages = build_history_messages(history, model_key)
-    if history_messages:
+    compressed_memory = str(memory_summary or "").strip()
+    if history_messages or compressed_memory:
         memory_note = (
-            "你會收到最近幾輪對話作為短期記憶。"
+            "你會收到壓縮記憶摘要與最近幾輪原文對話。"
             "請用它理解代名詞、上一題、延續問題與修改上下文；"
             "但若本輪 PROJECT RAG CONTEXT 或 PINNED FILE CONTENT 與歷史衝突，請以本輪提供的專案內容為準。"
         )
         base_prompt = f"{base_prompt}\n\n{memory_note}".strip()
+    if compressed_memory:
+        base_prompt = f"{base_prompt}\n\nCOMPRESSED CONVERSATION MEMORY:\n{compressed_memory}".strip()
     if model_key in {"gemma4", "qwen35"} and base_prompt:
         messages.append({"role": "system", "content": base_prompt})
     messages.extend(history_messages)
@@ -5207,6 +5319,8 @@ def build_session_payload(
     _, model_alias = resolve_model_details(model_key)
     with STATE_LOCK:
         existing_history = list(STATE.history)
+        existing_memory_summary = STATE.memory_summary
+        existing_memory_compacted_count = STATE.memory_compacted_count
         existing_pins = [path for path in STATE.pinned_files if path in file_paths]
         existing_preview = STATE.current_preview_path if STATE.current_preview_path in file_paths else None
         STATE.project_path = str(project_root)
@@ -5220,6 +5334,8 @@ def build_session_payload(
         STATE.pinned_files = existing_pins if preserve_pins else []
         STATE.current_preview_path = existing_preview if preserve_history or preserve_pins else None
         STATE.history = existing_history if preserve_history else []
+        STATE.memory_summary = existing_memory_summary if preserve_history else ""
+        STATE.memory_compacted_count = existing_memory_compacted_count if preserve_history else 0
         STATE.pending_edit = None
         STATE.ui_state = "ready"
     return {
@@ -5386,6 +5502,8 @@ def get_status_payload() -> Dict[str, object]:
             "pinnedFiles": STATE.pinned_files,
             "currentPreviewPath": STATE.current_preview_path,
             "history": STATE.history[-20:],
+            "memorySummary": STATE.memory_summary,
+            "memoryCompactedCount": STATE.memory_compacted_count,
             "pendingEdit": STATE.pending_edit,
             "uiState": STATE.ui_state,
             "mediaAssessment": get_media_analysis_assessment(),
@@ -5737,6 +5855,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pinned_files=list(STATE.pinned_files),
                     current_preview_path=None,
                     history=list(STATE.history),
+                    memory_summary=STATE.memory_summary,
+                    memory_compacted_count=STATE.memory_compacted_count,
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
@@ -5783,6 +5903,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)),
                     "contextUsed": bool(context.strip()),
                 })
+                compact_session_memory_locked(model_key)
             json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage}})
         except ModelReplyError as exc:
             error_response(self, exc.error)
@@ -5834,6 +5955,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pinned_files=list(STATE.pinned_files),
                     current_preview_path=None,
                     history=list(STATE.history),
+                    memory_summary=STATE.memory_summary,
+                    memory_compacted_count=STATE.memory_compacted_count,
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
@@ -5872,6 +5995,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
                 continue_on_length=get_continue_on_length(snapshot.model_key),
                 history=[] if continuation_message else snapshot.history,
+                memory_summary="" if continuation_message else snapshot.memory_summary,
             )
             if not reply:
                 raise ModelReplyError(
@@ -5890,6 +6014,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     user_record["attachments"] = [build_history_attachment(item) for item in attachments]
                 STATE.history.append(user_record)
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "chat", "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextUsed": bool(context.strip())})
+                compact_session_memory_locked(model_key)
             json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "contextCoverage": context_coverage, "attachmentFallback": fallback_info}})
         except ModelReplyError as exc:
             error_response(self, exc.error)
@@ -5950,6 +6075,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pinned_files=list(STATE.pinned_files),
                     current_preview_path=None,
                     history=list(STATE.history),
+                    memory_summary=STATE.memory_summary,
+                    memory_compacted_count=STATE.memory_compacted_count,
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
@@ -6011,6 +6138,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
                 continue_on_length=get_continue_on_length(snapshot.model_key),
                 history=[] if continuation_message else snapshot.history,
+                memory_summary="" if continuation_message else snapshot.memory_summary,
             ):
                 event_type = event.get("type", "content")
                 text = str(event.get("text", ""))
@@ -6064,6 +6192,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     user_record["attachments"] = [build_history_attachment(item) for item in attachments]
                 STATE.history.append(user_record)
                 STATE.history.append({"role": "assistant", "content": reply, "kind": "chat", "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextUsed": bool(context.strip())})
+                compact_session_memory_locked(model_key)
             write_sse_event(self, "done", {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage})
         except ModelReplyError as exc:
             write_sse_event(self, "error", exc.error)
@@ -6093,6 +6222,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pinned_files=list(STATE.pinned_files),
                     current_preview_path=None,
                     history=list(STATE.history),
+                    memory_summary=STATE.memory_summary,
+                    memory_compacted_count=STATE.memory_compacted_count,
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
@@ -6103,6 +6234,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 STATE.pending_edit = public_plan
                 STATE.history.append({"role": "user", "content": message, "kind": "edit-request"})
                 STATE.history.append({"role": "assistant", "content": reply_text, "kind": "edit-plan"})
+                compact_session_memory_locked(STATE.model_key)
             setattr(self.server, "_pending_edit_internal", plan)
             json_response(self, {"ok": True, "data": {"plan": public_plan}})
         except ValueError as exc:
@@ -6147,6 +6279,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_reset_history(self) -> None:
         with STATE_LOCK:
             STATE.history = []
+            STATE.memory_summary = ""
+            STATE.memory_compacted_count = 0
             STATE.pending_edit = None
         setattr(self.server, "_pending_edit_internal", None)
         json_response(self, {"ok": True, "data": {"history": [], "pendingEdit": None}})
