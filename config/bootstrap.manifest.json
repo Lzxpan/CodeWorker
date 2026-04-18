@@ -21,27 +21,78 @@
       "assetPattern": "^WinPython64-3\\.12\\..*dot\\.zip$",
       "targetDir": "runtime/WinPython",
       "extract": "zip"
+    },
+    "ffmpeg": {
+      "provider": "github-release",
+      "repo": "BtbN/FFmpeg-Builds",
+      "releaseTag": "latest",
+      "assetPattern": "^ffmpeg-master-latest-win64-gpl\\.zip$",
+      "targetDir": "runtime/ffmpeg",
+      "extract": "zip"
+    },
+    "whisperCpp": {
+      "provider": "github-release",
+      "repo": "ggml-org/whisper.cpp",
+      "assetPattern": "^whisper-bin-x64\\.zip$",
+      "targetDir": "runtime/whisper",
+      "extract": "zip"
+    },
+    "whisperModel": {
+      "provider": "direct-file",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true",
+      "targetFile": "runtime/whisper/models/ggml-base.bin"
     }
   },
   "models": {
     "gemma4": {
       "enabled": true,
       "provider": "huggingface",
-      "repo": "ggml-org/gemma-4-E4B-it-GGUF",
-      "filePattern": "gemma-4-e4b-it-Q4_K_M.gguf",
-      "targetDir": "models/gemma4-e4b-it-q4",
-      "note": "Official GGUF route for Gemma 4 E4B Instruct via ggml-org."
+      "serviceProvider": "llama.cpp",
+      "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+      "modelId": "google_gemma-4-26B-A4B-it",
+      "alias": "gemma4-local",
+      "displayName": "Gemma 4 26B",
+      "port": 8081,
+      "contextWindow": 4096,
+      "defaultQuant": "UD-Q4_K_M",
+      "filePattern": "*gemma-4-26B-A4B-it*UD-Q4_K_M*.gguf",
+      "filePatterns": [
+        "*gemma-4-26B-A4B-it*UD-Q4_K_M*.gguf"
+      ],
+      "mmprojPatterns": [
+        "*mmproj-BF16*.gguf",
+        "*mmproj-F16*.gguf"
+      ],
+      "targetDir": "models/gemma4-26b-unsloth-ud-q4-k-m",
+      "supportsImages": true,
+      "compactImageContext": true,
+      "temperature": 1.0,
+      "topP": 0.95,
+      "topK": 64,
+      "note": "Unsloth Gemma 4 26B GGUF + mmproj served by CodeWorker's bundled llama.cpp runtime. No Ollama dependency and no secondary vision model."
     },
     "qwen35": {
       "enabled": true,
       "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
       "repo": "unsloth/Qwen3.5-9B-GGUF",
+      "modelId": "Qwen3.5-9B",
+      "alias": "qwen35-local",
+      "displayName": "Qwen 3.5 9B Vision",
+      "port": 8082,
+      "contextWindow": 12288,
+      "defaultQuant": "Q4_K_M",
       "filePattern": "Qwen3.5-9B-Q4_K_M.gguf",
       "filePatterns": [
         "Qwen3.5-9B-Q4_K_M.gguf",
         "mmproj-BF16.gguf"
       ],
+      "mmprojPatterns": [
+        "mmproj-BF16.gguf"
+      ],
       "targetDir": "models/qwen3.5-9b-q4-mmproj",
+      "supportsImages": true,
+      "compactImageContext": true,
       "note": "Qwen 3.5 multimodal GGUF with BF16 mmproj for llama.cpp OpenAI-compatible /v1."
     }
   }

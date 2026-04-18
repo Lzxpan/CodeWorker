@@ -1,10 +1,14 @@
 import argparse
 import base64
+import ctypes
 import difflib
 import fnmatch
+import hashlib
+import importlib.util
 import json
 import mimetypes
 import os
+import platform
 import re
 import shutil
 import socket
@@ -22,13 +26,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from core.models import (
+    get_model_config as get_registry_model_config,
+    get_model_configs,
+    match_first_model_file,
+    public_model_capabilities,
+)
+from agent.runtime import confirm_action as confirm_agent_action
+from agent.runtime import run_agent
+from rag.index import impact_analysis, index_dir as rag_index_dir, index_is_stale, rebuild_index, search_index
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = ROOT_DIR / "scripts"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONFIG_DIR = ROOT_DIR / "config"
 BOOTSTRAP_MANIFEST_PATH = CONFIG_DIR / "bootstrap.manifest.json"
-MAX_SCAN_FILES = 800
+DATA_DIR = ROOT_DIR / "data"
+MAX_SCAN_FILES = 8000
 MAX_TREE_ITEMS = 400
 MAX_CONTEXT_FILES = 4
 MAX_FILE_CHARS = 3600
@@ -40,8 +55,8 @@ MAX_TREE_CONTEXT_ITEMS = 30
 MAX_CHAT_HISTORY_ITEMS = 4
 ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
-DEFAULT_MODEL_KEY = "qwen35"
-DEFAULT_MODEL_ALIAS = "qwen35-local"
+DEFAULT_MODEL_KEY = "gemma4"
+DEFAULT_MODEL_ALIAS = "gemma4-local"
 MODEL_PORTS = {
     "gemma4": 8081,
     "qwen35": 8082,
@@ -51,8 +66,8 @@ MODEL_DEFAULT_CONTEXT = {
     "qwen35": 12288,
 }
 MODEL_CHAT_MAX_TOKENS = {
-    "gemma4": 3200,
-    "qwen35": 1024,
+    "gemma4": 4096,
+    "qwen35": 2048,
 }
 MODEL_ANALYZE_MAX_TOKENS = {
     "gemma4": 2800,
@@ -88,22 +103,27 @@ MODEL_ALIASES = {
     "qwen35": "qwen35-local",
 }
 MODEL_DIR_NAMES = {
-    "gemma4": "gemma4-e4b-it-q4",
+    "gemma4": "gemma4-26b-unsloth-ud-q4-k-m",
     "qwen35": "qwen3.5-9b-q4-mmproj",
 }
 MODEL_FILE_PATTERNS = {
-    "gemma4": "gemma-4-e4b-it-Q4_K_M.gguf",
+    "gemma4": "*gemma-4-26B-A4B-it*UD-Q4_K_M*.gguf",
     "qwen35": "Qwen3.5-9B-Q4_K_M.gguf",
 }
 MODEL_MMPROJ_PATTERNS = {
+    "gemma4": "*mmproj-BF16*.gguf",
     "qwen35": "mmproj-BF16.gguf",
+}
+MODEL_GENERATION_OPTIONS = {
+    "gemma4": {"temperature": 1.0, "top_p": 0.95, "top_k": 64},
+    "qwen35": {"temperature": 0.2},
 }
 MODEL_CAPABILITIES = {
     "gemma4": {
-        "display_name": "Gemma 4 E4B",
-        "supports_images": False,
-        "requires_mmproj": False,
-        "compact_image_context": False,
+        "display_name": "Gemma 4 26B",
+        "supports_images": True,
+        "requires_mmproj": True,
+        "compact_image_context": True,
     },
     "qwen35": {
         "display_name": "Qwen 3.5 9B Vision",
@@ -112,23 +132,52 @@ MODEL_CAPABILITIES = {
         "compact_image_context": True,
     },
 }
-SUPPORTED_MODEL_KEYS = set(MODEL_PORTS.keys())
-IMAGE_UPLOAD_DIR = ROOT_DIR / ".tmp" / "chat-images"
-MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+try:
+    SUPPORTED_MODEL_KEYS = {
+        key for key, config in get_model_configs(ROOT_DIR).items()
+        if config.enabled
+    } or set(MODEL_PORTS.keys())
+except Exception:
+    SUPPORTED_MODEL_KEYS = set(MODEL_PORTS.keys())
+UPLOAD_DIR = ROOT_DIR / ".tmp" / "chat-uploads"
+IMAGE_UPLOAD_DIR = UPLOAD_DIR
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_IMAGE_UPLOAD_BYTES = MAX_UPLOAD_BYTES
+MAX_TEXT_ATTACHMENT_CHARS = 18000
 MAX_MODEL_IMAGE_EDGE = 896
+MAX_AUDIO_TRANSCRIPT_CHARS = 12000
+DEFAULT_STT_MAX_SECONDS = 900
 SUPPORTED_IMAGE_MIME_TYPES = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
 }
+TEXT_UPLOAD_EXTENSIONS = {
+    ".pas", ".dfm", ".dpr", ".dproj", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp",
+    ".java", ".kt", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rust",
+    ".swift", ".lua", ".sql", ".sh", ".bat", ".cmd", ".ps1", ".cs", ".html",
+    ".css", ".scss", ".vue", ".svelte", ".json", ".yaml", ".yml", ".xml",
+    ".toml", ".ini", ".csv", ".env", ".txt", ".md", ".tex", ".rtf",
+}
+DOCUMENT_UPLOAD_EXTENSIONS = {".pdf", ".doc", ".docx"}
+AUDIO_UPLOAD_EXTENSIONS = {".mp3", ".wav", ".aac", ".flac", ".m4a", ".ogg"}
+VIDEO_UPLOAD_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
+IMAGE_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".svg", ".gif", ".ico"}
+SUPPORTED_FILE_EXTENSIONS = (
+    TEXT_UPLOAD_EXTENSIONS
+    | DOCUMENT_UPLOAD_EXTENSIONS
+    | AUDIO_UPLOAD_EXTENSIONS
+    | VIDEO_UPLOAD_EXTENSIONS
+    | IMAGE_UPLOAD_EXTENSIONS
+)
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     "dist", "build", "target", "out", ".idea", ".vscode", ".next", ".nuxt", ".cache", "coverage",
 }
 IGNORED_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".pdf", ".zip", ".7z", ".gz",
+    ".zip", ".7z", ".gz",
     ".tar", ".rar", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".pyc", ".pyo", ".db",
-    ".sqlite", ".mp3", ".mp4", ".mov", ".avi",
+    ".sqlite",
 }
 LANGUAGE_BY_EXTENSION = {
     ".py": "Python", ".js": "JavaScript", ".jsx": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript",
@@ -137,7 +186,11 @@ LANGUAGE_BY_EXTENSION = {
     ".swift": "Swift", ".m": "Objective-C", ".mm": "Objective-C++", ".scala": "Scala", ".sql": "SQL",
     ".html": "HTML", ".css": "CSS", ".scss": "SCSS", ".vue": "Vue", ".svelte": "Svelte", ".json": "JSON",
     ".yml": "YAML", ".yaml": "YAML", ".toml": "TOML", ".xml": "XML", ".sh": "Shell", ".bat": "Batch",
-    ".cmd": "Batch", ".ps1": "PowerShell", ".md": "Markdown",
+    ".cmd": "Batch", ".ps1": "PowerShell", ".md": "Markdown", ".txt": "Text",
+    ".pdf": "PDF", ".doc": "Word", ".docx": "Word", ".rtf": "RTF", ".png": "Image", ".jpg": "Image",
+    ".jpeg": "Image", ".webp": "Image", ".bmp": "Image", ".svg": "SVG", ".gif": "Image",
+    ".mp3": "Audio", ".wav": "Audio", ".aac": "Audio", ".flac": "Audio", ".mp4": "Video",
+    ".mov": "Video", ".avi": "Video", ".webm": "Video", ".mkv": "Video",
 }
 DEFAULT_ANALYSIS_PROMPT = (
     "請先分析這個專案架構，說明入口、核心模組、主要流程、設定檔、測試位置，"
@@ -208,6 +261,7 @@ class TaskState:
 
 STATE = SessionState()
 TASKS: Dict[str, TaskState] = {}
+AGENT_RUNS: Dict[str, Dict[str, object]] = {}
 STATE_LOCK = threading.Lock()
 TASK_LOCK = threading.Lock()
 HF_API_HEADERS = {
@@ -217,8 +271,10 @@ HF_API_HEADERS = {
 DETACHED_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 MODEL_SERVER_PROCESSES: Dict[Tuple[str, int], subprocess.Popen] = {}
 MODEL_SERVER_LOG_HANDLES: Dict[Tuple[str, int], Tuple[object, object]] = {}
-IMAGE_UPLOADS: Dict[str, Dict[str, object]] = {}
-IMAGE_UPLOADS_LOCK = threading.Lock()
+FILE_UPLOADS: Dict[str, Dict[str, object]] = {}
+FILE_UPLOADS_LOCK = threading.Lock()
+IMAGE_UPLOADS = FILE_UPLOADS
+IMAGE_UPLOADS_LOCK = FILE_UPLOADS_LOCK
 ANSWER_ONLY_SYSTEM_PROMPT = (
     "請只輸出最終答案，不要輸出 thinking、推理過程、分析步驟或 reasoning。"
     "若需要整理，直接給結論與可執行重點。"
@@ -226,6 +282,10 @@ ANSWER_ONLY_SYSTEM_PROMPT = (
 ANSWER_ONLY_RETRY_PROMPT = (
     "上一輪只產生了 reasoning，沒有產生可顯示的 final answer。"
     "請重新回答同一個問題，只輸出最終答案，不要輸出 thinking、推理過程、分析步驟或 reasoning。"
+)
+CONTINUE_TOKENS = (
+    "繼續", "續寫", "上一句", "剛剛", "前面", "接著", "未完成", "沒了",
+    "continue", "go on", "keep going", "previous answer", "last answer",
 )
 
 
@@ -237,6 +297,9 @@ class ModelReplyError(RuntimeError):
 
 def get_model_key_from_alias(model_alias: str) -> str:
     lowered = (model_alias or "").lower()
+    for key, config in get_model_configs(ROOT_DIR).items():
+        if lowered == config.alias.lower() or lowered == config.model_id.lower() or lowered.startswith(key):
+            return key
     if lowered.startswith("qwen35"):
         return "qwen35"
     if lowered.startswith("gemma4"):
@@ -246,23 +309,44 @@ def get_model_key_from_alias(model_alias: str) -> str:
 
 def get_model_port(model_name: str) -> int:
     model_key = get_model_key_from_alias(model_name)
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config and config.port:
+        return config.port
     return MODEL_PORTS.get(model_key, MODEL_PORTS[DEFAULT_MODEL_KEY])
 
 
 def get_model_alias(model_key: str) -> str:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config and config.alias:
+        return config.alias
     return MODEL_ALIASES.get(model_key, MODEL_ALIASES[DEFAULT_MODEL_KEY])
 
 
 def get_model_directory(model_key: str) -> Path:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config and config.target_dir:
+        return ROOT_DIR / config.target_dir
     return ROOT_DIR / "models" / MODEL_DIR_NAMES.get(model_key, MODEL_DIR_NAMES[DEFAULT_MODEL_KEY])
 
 
 def get_model_file_pattern(model_key: str) -> str:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config and config.file_pattern:
+        return config.file_pattern
     return MODEL_FILE_PATTERNS.get(model_key, MODEL_FILE_PATTERNS[DEFAULT_MODEL_KEY])
 
 
 def get_model_mmproj_pattern(model_key: str) -> Optional[str]:
-    return MODEL_MMPROJ_PATTERNS.get(model_key)
+    patterns = get_model_mmproj_patterns(model_key)
+    return patterns[0] if patterns else None
+
+
+def get_model_mmproj_patterns(model_key: str) -> List[str]:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config and config.mmproj_patterns:
+        return config.mmproj_patterns
+    pattern = MODEL_MMPROJ_PATTERNS.get(model_key)
+    return [pattern] if pattern else []
 
 
 def get_model_capabilities(model_key: str) -> Dict[str, object]:
@@ -273,16 +357,32 @@ def get_model_capabilities(model_key: str) -> Dict[str, object]:
         "compact_image_context": False,
     }
     default.update(MODEL_CAPABILITIES.get(model_key, {}))
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config:
+        default.update({
+            "display_name": config.display_name,
+            "supports_images": config.supports_images,
+            "requires_mmproj": bool(config.mmproj_patterns),
+            "compact_image_context": config.compact_image_context,
+        })
     return default
 
 
 def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
+    manifest_payload = public_model_capabilities(ROOT_DIR)
+    if manifest_payload:
+        return manifest_payload
     return {
         key: {
             "displayName": str(get_model_capabilities(key).get("display_name", key)),
             "supportsImages": bool(get_model_capabilities(key).get("supports_images")),
             "requiresMmproj": bool(get_model_capabilities(key).get("requires_mmproj")),
             "compactImageContext": bool(get_model_capabilities(key).get("compact_image_context")),
+            "provider": "llama.cpp",
+            "modelId": get_model_alias(key),
+            "port": get_model_port(key),
+            "contextWindow": get_model_context_limit(key),
+            "targetDir": str(get_model_directory(key).relative_to(ROOT_DIR)),
         }
         for key in sorted(SUPPORTED_MODEL_KEYS)
     }
@@ -290,6 +390,15 @@ def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
 
 def model_supports_images(model_key: str) -> bool:
     return bool(get_model_capabilities(model_key).get("supports_images"))
+
+
+def model_has_native_image_transport(model_key: str) -> bool:
+    if not model_supports_images(model_key):
+        return False
+    if bool(get_model_capabilities(model_key).get("requires_mmproj")):
+        patterns = get_model_mmproj_patterns(model_key)
+        return bool(patterns and match_first_model_file(get_model_directory(model_key), patterns))
+    return True
 
 
 def model_prefers_compact_image_context(model_key: str) -> bool:
@@ -301,6 +410,9 @@ def get_model_endpoint(model_name: str) -> str:
 
 
 def get_model_context_limit(model_key: str) -> int:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config and config.context_window:
+        return config.context_window
     return MODEL_DEFAULT_CONTEXT.get(model_key, MODEL_DEFAULT_CONTEXT[DEFAULT_MODEL_KEY])
 
 
@@ -310,6 +422,19 @@ def get_chat_history_limit(model_key: str) -> int:
 
 def get_chat_max_tokens(model_key: str) -> int:
     return MODEL_CHAT_MAX_TOKENS.get(model_key, MODEL_CHAT_MAX_TOKENS[DEFAULT_MODEL_KEY])
+
+
+def get_model_generation_options(model_key: str) -> Dict[str, object]:
+    options = dict(MODEL_GENERATION_OPTIONS.get(model_key, MODEL_GENERATION_OPTIONS.get(DEFAULT_MODEL_KEY, {})))
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config:
+        if config.temperature is not None:
+            options["temperature"] = config.temperature
+        if config.top_p is not None:
+            options["top_p"] = config.top_p
+        if config.top_k is not None:
+            options["top_k"] = config.top_k
+    return options
 
 
 def get_analyze_max_tokens(model_key: str) -> int:
@@ -515,11 +640,24 @@ def resolve_huggingface_filename(repo: str, file_pattern: str) -> str:
     with urllib.request.urlopen(request, timeout=60) as response:
         body = json.loads(response.read().decode("utf-8"))
     siblings = body.get("siblings", [])
-    candidates = [
+    filenames = [
         item.get("rfilename", "")
         for item in siblings
-        if isinstance(item, dict) and re.fullmatch(file_pattern, item.get("rfilename", ""))
+        if isinstance(item, dict) and item.get("rfilename", "")
     ]
+    if any(token in file_pattern for token in ["*", "?", "["]):
+        candidates = [
+            name for name in filenames
+            if fnmatch.fnmatch(name.lower(), file_pattern.lower())
+        ]
+    else:
+        candidates = [
+            name for name in filenames
+            if re.fullmatch(file_pattern, name)
+        ]
+    non_split = [name for name in candidates if not re.search(r"-\d{5}-of-\d{5}\.gguf$", name)]
+    if non_split:
+        candidates = non_split
     if not candidates:
         raise ValueError(f"No Hugging Face file matched pattern: {file_pattern}")
     return sorted(candidates)[0]
@@ -590,11 +728,11 @@ def find_model_file(model_dir: Path, pattern: str = "*.gguf") -> Optional[Path]:
 
 
 def cleanup_image_upload_dir() -> None:
-    if IMAGE_UPLOAD_DIR.exists():
-        shutil.rmtree(IMAGE_UPLOAD_DIR, ignore_errors=True)
-    IMAGE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    with IMAGE_UPLOADS_LOCK:
-        IMAGE_UPLOADS.clear()
+    if UPLOAD_DIR.exists():
+        shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    with FILE_UPLOADS_LOCK:
+        FILE_UPLOADS.clear()
 
 
 def decode_image_payload(data: str) -> bytes:
@@ -694,45 +832,779 @@ exit 0
     }
 
 
-def save_uploaded_image(name: str, mime_type: str, data: str) -> Dict[str, object]:
-    clean_name = Path(str(name or "").strip() or "image").name
+def get_upload_kind(extension: str, mime_type: str) -> str:
+    lowered_ext = extension.lower()
+    lowered_mime = mime_type.lower()
+    if lowered_ext in IMAGE_UPLOAD_EXTENSIONS or lowered_mime.startswith("image/"):
+        return "image"
+    if lowered_ext in AUDIO_UPLOAD_EXTENSIONS or lowered_mime.startswith("audio/"):
+        return "audio"
+    if lowered_ext in VIDEO_UPLOAD_EXTENSIONS or lowered_mime.startswith("video/"):
+        return "video"
+    if lowered_ext in DOCUMENT_UPLOAD_EXTENSIONS:
+        return "document"
+    return "text"
+
+
+def find_command(candidates: List[str]) -> Optional[str]:
+    bundled = {
+        "ffmpeg": ROOT_DIR / "runtime" / "ffmpeg" / "bin" / "ffmpeg.exe",
+        "ffprobe": ROOT_DIR / "runtime" / "ffmpeg" / "bin" / "ffprobe.exe",
+        "whisper": ROOT_DIR / "runtime" / "whisper" / "bin" / "whisper-cli.exe",
+        "whisper-cli": ROOT_DIR / "runtime" / "whisper" / "bin" / "whisper-cli.exe",
+    }
+    for candidate in candidates:
+        lowered = candidate.lower()
+        bundled_path = bundled.get(lowered)
+        if bundled_path and bundled_path.exists():
+            return str(bundled_path)
+        if lowered in {"whisper", "whisper-cli"}:
+            for fallback in (
+                ROOT_DIR / "runtime" / "whisper" / "whisper-cli.exe",
+                ROOT_DIR / "runtime" / "whisper" / "build" / "bin" / "Release" / "whisper-cli.exe",
+            ):
+                if fallback.exists():
+                    return str(fallback)
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
+def get_total_physical_memory_gb() -> Optional[float]:
+    if platform.system().lower() == "windows":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
+            return round(status.ullTotalPhys / (1024 ** 3), 2)
+        return None
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return round((pages * page_size) / (1024 ** 3), 2)
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def get_media_analysis_assessment() -> Dict[str, object]:
+    ram_gb = get_total_physical_memory_gb()
+    cpu_threads = os.cpu_count() or 0
+    profile = "unknown"
+    recommended_max_keyframes = 8
+    if ram_gb is not None:
+        if ram_gb < 24:
+            profile = "limited"
+            recommended_max_keyframes = 6
+        elif ram_gb < 48:
+            profile = "balanced-cpu-igpu"
+            recommended_max_keyframes = 12
+        else:
+            profile = "large-memory"
+            recommended_max_keyframes = 24
+    if cpu_threads and cpu_threads < 8:
+        recommended_max_keyframes = min(recommended_max_keyframes, 8)
+    override = os.environ.get("CODEWORKER_VIDEO_MAX_KEYFRAMES", "").strip()
+    if override:
+        try:
+            recommended_max_keyframes = max(1, min(60, int(override)))
+            profile = f"{profile}:override"
+        except ValueError:
+            pass
+    return {
+        "profile": profile,
+        "ramGb": ram_gb,
+        "cpuThreads": cpu_threads,
+        "recommendedMaxKeyframes": recommended_max_keyframes,
+        "videoStrategy": "sampled-keyframes",
+        "speechToText": get_stt_backend_status(),
+    }
+
+
+def ensure_ffmpeg_runtime() -> Tuple[Optional[str], Optional[str], str]:
+    ffmpeg = find_command(["ffmpeg"])
+    ffprobe = find_command(["ffprobe"])
+    if ffmpeg and ffprobe:
+        return ffmpeg, ffprobe, "ready"
+    bootstrap = run_script("bootstrap.cmd", "-SkipModels", "-SkipWinPython", timeout_seconds=600)
+    ffmpeg = find_command(["ffmpeg"])
+    ffprobe = find_command(["ffprobe"])
+    if ffmpeg and ffprobe:
+        return ffmpeg, ffprobe, "installed"
+    details = (bootstrap.stdout + bootstrap.stderr).strip()
+    return None, None, details or "ffmpeg/ffprobe not found"
+
+
+def get_stt_backend_status() -> Dict[str, object]:
+    if os.environ.get("CODEWORKER_STT_DISABLED", "").strip().lower() in {"1", "true", "yes"}:
+        return {"available": False, "backend": "disabled", "reason": "CODEWORKER_STT_DISABLED"}
+    if os.environ.get("CODEWORKER_STT_COMMAND", "").strip():
+        return {"available": True, "backend": "custom-command"}
+    whisper_cpp = find_command(["whisper-cli"])
+    whisper_cpp_model = get_whisper_cpp_model_path()
+    if whisper_cpp and whisper_cpp_model:
+        return {"available": True, "backend": "whisper.cpp", "path": whisper_cpp, "modelPath": str(whisper_cpp_model), "installHint": "bundled"}
+    if importlib.util.find_spec("faster_whisper") is not None:
+        return {"available": True, "backend": "faster-whisper"}
+    if importlib.util.find_spec("whisper") is not None:
+        return {"available": True, "backend": "openai-whisper"}
+    whisper_cli = find_command(["whisper"])
+    if whisper_cli:
+        return {"available": True, "backend": "whisper-cli", "path": whisper_cli}
+    return {
+        "available": False,
+        "backend": "none",
+        "reason": "Install whisper.cpp/faster-whisper/openai-whisper or set CODEWORKER_STT_COMMAND.",
+        "installHint": "Run scripts/bootstrap.cmd -SkipModels -SkipWinPython to install bundled whisper.cpp.",
+    }
+
+
+def get_whisper_cpp_model_path() -> Optional[Path]:
+    configured = os.environ.get("CODEWORKER_WHISPER_CPP_MODEL", "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.exists() else None
+    model_dir = ROOT_DIR / "runtime" / "whisper" / "models"
+    for name in ("ggml-base.bin", "ggml-base.en.bin", "ggml-small.bin", "ggml-tiny.bin", "ggml-tiny.en.bin"):
+        path = model_dir / name
+        if path.exists():
+            return path
+    return None
+
+
+def get_stt_max_seconds() -> int:
+    raw = os.environ.get("CODEWORKER_STT_MAX_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_STT_MAX_SECONDS
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return DEFAULT_STT_MAX_SECONDS
+
+
+def media_has_audio_stream(source: Path, ffprobe: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                str(source),
+            ],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0 and "audio" in (result.stdout or "").lower()
+
+
+def extract_media_audio_to_wav(source: Path, upload_id: str, ffmpeg: str) -> Tuple[Optional[Path], str]:
+    target_dir = UPLOAD_DIR / "audio"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = target_dir / f"{upload_id}.wav"
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "wav",
+            str(wav_path),
+        ],
+        cwd=str(ROOT_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        check=False,
+    )
+    if result.returncode != 0 or not wav_path.exists() or wav_path.stat().st_size <= 44:
+        details = (result.stderr or result.stdout or "").strip().splitlines()
+        return None, (details[-1][:240] if details else "audio-extract-failed")
+    return wav_path, "ready"
+
+
+def transcribe_wav_with_backend(wav_path: Path) -> Tuple[str, str]:
+    language = os.environ.get("CODEWORKER_STT_LANGUAGE", "").strip()
+    model_name = os.environ.get("CODEWORKER_STT_MODEL", "base").strip() or "base"
+    custom_command = os.environ.get("CODEWORKER_STT_COMMAND", "").strip()
+    if custom_command:
+        output_dir = UPLOAD_DIR / "transcripts"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{wav_path.stem}.txt"
+        command = custom_command.format(
+            input=str(wav_path),
+            output=str(output_path),
+            output_dir=str(output_dir),
+            model=model_name,
+            language=language,
+        )
+        result = subprocess.run(
+            command,
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(60, get_stt_max_seconds() * 4),
+            shell=True,
+            check=False,
+        )
+        if output_path.exists():
+            text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                return text, "custom-command"
+        text = (result.stdout or "").strip()
+        if result.returncode == 0 and text:
+            return text, "custom-command:stdout"
+        details = (result.stderr or result.stdout or "").strip().splitlines()
+        raise RuntimeError(details[-1] if details else "custom STT command produced no transcript")
+
+    whisper_cpp = find_command(["whisper-cli"])
+    whisper_cpp_model = get_whisper_cpp_model_path()
+    if whisper_cpp and whisper_cpp_model:
+        output_dir = UPLOAD_DIR / "transcripts"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_prefix = output_dir / wav_path.stem
+        command = [
+            whisper_cpp,
+            "-m",
+            str(whisper_cpp_model),
+            "-f",
+            str(wav_path),
+            "-otxt",
+            "-of",
+            str(output_prefix),
+        ]
+        if language:
+            command.extend(["-l", language])
+        result = subprocess.run(
+            command,
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(60, get_stt_max_seconds() * 4),
+            check=False,
+        )
+        output_path = output_prefix.with_suffix(".txt")
+        if result.returncode == 0 and output_path.exists():
+            text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                return text, "whisper.cpp"
+        details = (result.stderr or result.stdout or "").strip().splitlines()
+        raise RuntimeError(details[-1] if details else "whisper.cpp produced no transcript")
+
+    if importlib.util.find_spec("faster_whisper") is not None:
+        from faster_whisper import WhisperModel  # type: ignore
+
+        model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        kwargs = {"beam_size": 1}
+        if language:
+            kwargs["language"] = language
+        segments, _info = model.transcribe(str(wav_path), **kwargs)
+        text = "\n".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+        if text:
+            return text, "faster-whisper"
+        raise RuntimeError("faster-whisper produced no transcript")
+
+    if importlib.util.find_spec("whisper") is not None:
+        import whisper  # type: ignore
+
+        model = whisper.load_model(model_name)
+        kwargs = {}
+        if language:
+            kwargs["language"] = language
+        result = model.transcribe(str(wav_path), **kwargs)
+        text = str(result.get("text", "")).strip()
+        if text:
+            return text, "openai-whisper"
+        raise RuntimeError("openai-whisper produced no transcript")
+
+    whisper_cli = find_command(["whisper"])
+    if whisper_cli:
+        output_dir = UPLOAD_DIR / "transcripts"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        command = [
+            whisper_cli,
+            str(wav_path),
+            "--model",
+            model_name,
+            "--output_format",
+            "txt",
+            "--output_dir",
+            str(output_dir),
+        ]
+        if language:
+            command.extend(["--language", language])
+        result = subprocess.run(
+            command,
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(60, get_stt_max_seconds() * 4),
+            check=False,
+        )
+        output_path = output_dir / f"{wav_path.stem}.txt"
+        if result.returncode == 0 and output_path.exists():
+            text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                return text, "whisper-cli"
+        details = (result.stderr or result.stdout or "").strip().splitlines()
+        raise RuntimeError(details[-1] if details else "whisper CLI produced no transcript")
+
+    raise RuntimeError("no STT backend available")
+
+
+def transcribe_media_attachment(upload: Dict[str, object]) -> None:
+    kind = str(upload.get("kind", ""))
+    if kind not in {"audio", "video"}:
+        return
+    source = Path(str(upload.get("path", "")))
+    if not source.exists():
+        upload["transcriptStatus"] = "audio-transcript-unavailable:source-missing"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    ffmpeg, ffprobe, ffmpeg_status = ensure_ffmpeg_runtime()
+    if not ffmpeg or not ffprobe:
+        upload["transcriptStatus"] = f"audio-transcript-unavailable:{ffmpeg_status}"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    duration = get_video_duration_seconds(source, ffprobe)
+    if duration is not None and not float(upload.get("durationSeconds", 0) or 0):
+        upload["durationSeconds"] = round(duration, 3)
+    max_seconds = get_stt_max_seconds()
+    if duration is not None and duration > max_seconds:
+        upload["transcriptStatus"] = f"audio-transcript-skipped:duration-too-long:{duration:.1f}s>{max_seconds}s"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    if not media_has_audio_stream(source, ffprobe):
+        upload["transcriptStatus"] = "audio-transcript-unavailable:no-audio-stream"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    backend_status = get_stt_backend_status()
+    if not backend_status.get("available"):
+        reason = str(backend_status.get("reason", backend_status.get("backend", "unavailable")))
+        upload["transcriptStatus"] = f"audio-transcript-unavailable:{reason}"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    wav_path, audio_status = extract_media_audio_to_wav(source, str(upload.get("id", uuid.uuid4().hex)), ffmpeg)
+    if wav_path is None:
+        upload["transcriptStatus"] = f"audio-transcript-unavailable:{audio_status}"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    try:
+        transcript, backend = transcribe_wav_with_backend(wav_path)
+    except Exception as exc:
+        upload["transcriptStatus"] = f"audio-transcript-unavailable:{exc}"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    transcript = transcript.strip()
+    if not transcript:
+        upload["transcriptStatus"] = "audio-transcript-unavailable:empty-transcript"
+        if kind == "audio":
+            upload["extractionStatus"] = upload["transcriptStatus"]
+        return
+    if len(transcript) > MAX_AUDIO_TRANSCRIPT_CHARS:
+        transcript = transcript[:MAX_AUDIO_TRANSCRIPT_CHARS].rstrip() + "\n[transcript truncated]"
+        status = f"audio-transcript-truncated:{backend}"
+    else:
+        status = f"audio-transcript-extracted:{backend}"
+    upload["textPreview"] = transcript
+    upload["textBlocks"] = [transcript]
+    upload["transcriptStatus"] = status
+    upload["transcriptChars"] = len(transcript)
+    if kind == "audio":
+        upload["extractionStatus"] = status
+
+
+def convert_doc_to_docx(file_path: Path) -> Optional[Path]:
+    soffice = find_command(["soffice", "libreoffice"])
+    if not soffice:
+        return None
+    target_dir = UPLOAD_DIR / "converted"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    before = {item.name for item in target_dir.glob("*.docx")}
+    result = subprocess.run(
+        [
+            soffice,
+            "--headless",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            str(target_dir),
+            str(file_path),
+        ],
+        cwd=str(ROOT_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    converted = [item for item in target_dir.glob("*.docx") if item.name not in before]
+    if not converted:
+        fallback = target_dir / f"{file_path.stem}.docx"
+        return fallback if fallback.exists() else None
+    return converted[0]
+
+
+def extract_text_from_upload(file_path: Path, extension: str, mime_type: str) -> Tuple[str, str]:
+    lowered_ext = extension.lower()
+    if lowered_ext in TEXT_UPLOAD_EXTENSIONS or mime_type.startswith("text/"):
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        return content[:MAX_TEXT_ATTACHMENT_CHARS], "text-extracted" if len(content) <= MAX_TEXT_ATTACHMENT_CHARS else "text-truncated"
+    if lowered_ext == ".pdf":
+        parser_errors: List[str] = []
+        try:
+            from pypdf import PdfReader  # type: ignore
+            reader = PdfReader(str(file_path))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages[:20]).strip()
+            return text[:MAX_TEXT_ATTACHMENT_CHARS], "text-extracted" if text else "metadata-only"
+        except Exception as exc:
+            parser_errors.append(f"pypdf: {exc}")
+        try:
+            import pdfplumber  # type: ignore
+            with pdfplumber.open(str(file_path)) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages[:20]).strip()
+            return text[:MAX_TEXT_ATTACHMENT_CHARS], "text-extracted" if text else "metadata-only"
+        except Exception as exc:
+            parser_errors.append(f"pdfplumber: {exc}")
+        return "", "parser-unavailable: " + " | ".join(parser_errors)
+    if lowered_ext == ".doc":
+        converted = convert_doc_to_docx(file_path)
+        if converted is not None:
+            text, status = extract_text_from_upload(converted, ".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            return text, f"converted-doc:{status}" if text else "legacy-doc-metadata-only"
+        return "", "legacy-doc-metadata-only"
+    if lowered_ext == ".docx":
+        try:
+            import docx  # type: ignore
+            doc = docx.Document(str(file_path))
+            text = "\n".join(paragraph.text for paragraph in doc.paragraphs).strip()
+            return text[:MAX_TEXT_ATTACHMENT_CHARS], "text-extracted" if text else "metadata-only"
+        except Exception as exc:
+            return "", f"parser-unavailable: {exc}"
+    return "", "metadata-only"
+
+
+def save_uploaded_file(name: str, mime_type: str, data: str) -> Dict[str, object]:
+    clean_name = Path(str(name or "").strip() or "attachment").name
     content_type = str(mime_type or "").strip().lower()
-    extension = SUPPORTED_IMAGE_MIME_TYPES.get(content_type)
-    if not extension:
-        raise ValueError("Unsupported image format. Use PNG, JPEG, or WEBP.")
-    image_bytes = decode_image_payload(data)
-    if not image_bytes:
-        raise ValueError("Uploaded image is empty.")
-    if len(image_bytes) > MAX_IMAGE_UPLOAD_BYTES:
-        raise ValueError(f"Uploaded image is too large. Limit: {MAX_IMAGE_UPLOAD_BYTES // (1024 * 1024)} MB.")
-    image_id = uuid.uuid4().hex
-    file_path = IMAGE_UPLOAD_DIR / f"{image_id}{extension}"
+    guessed_extension = Path(clean_name).suffix.lower()
+    extension = SUPPORTED_IMAGE_MIME_TYPES.get(content_type) or guessed_extension or mimetypes.guess_extension(content_type) or ".bin"
+    if extension.lower() not in SUPPORTED_FILE_EXTENSIONS and not content_type.startswith(("text/", "image/", "audio/", "video/")):
+        raise ValueError(f"Unsupported file format: {extension or content_type}")
+    file_bytes = decode_image_payload(data)
+    if not file_bytes:
+        raise ValueError("Uploaded file is empty.")
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"Uploaded file is too large. Limit: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
+    original_sha256 = hashlib.sha256(file_bytes).hexdigest()
+    upload_id = uuid.uuid4().hex
+    file_path = UPLOAD_DIR / f"{upload_id}{extension}"
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_bytes(image_bytes)
-    normalization = normalize_uploaded_image(file_path, content_type)
-    size_bytes = file_path.stat().st_size if file_path.exists() else len(image_bytes)
+    file_path.write_bytes(file_bytes)
+    kind = get_upload_kind(extension, content_type)
+    normalization = normalize_uploaded_image(file_path, content_type) if kind == "image" else {"normalized": False}
+    model_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    text_preview, extraction_status = extract_text_from_upload(file_path, extension, content_type)
+    if kind == "image" and extraction_status == "metadata-only":
+        extraction_status = "vision-pending"
+    if kind == "video" and extraction_status == "metadata-only":
+        extraction_status = "video-keyframes-pending"
+    if kind == "audio" and extraction_status == "metadata-only":
+        extraction_status = "audio-transcript-unavailable"
+    size_bytes = file_path.stat().st_size if file_path.exists() else len(file_bytes)
     payload = {
-        "id": image_id,
+        "id": upload_id,
         "name": clean_name,
         "mimeType": content_type,
         "sizeBytes": size_bytes,
         "path": str(file_path),
-        "kind": "image",
+        "kind": kind,
+        "extension": extension,
         "normalizedForModel": bool(normalization.get("normalized")),
         "width": int(normalization.get("width", 0) or 0),
         "height": int(normalization.get("height", 0) or 0),
+        "originalSha256": original_sha256,
+        "sha256": model_sha256,
+        "durationSeconds": 0,
+        "keyframeCount": 0,
+        "videoAnalysisMode": "",
+        "videoFrameTimestamps": [],
+        "transcriptStatus": "",
+        "transcriptChars": 0,
+        "textPreview": text_preview,
+        "extractionStatus": extraction_status,
+        "nativeParts": [{"type": "image_url"}] if kind == "image" else [],
+        "textBlocks": [text_preview] if text_preview else [],
+        "derivedFiles": [],
     }
-    with IMAGE_UPLOADS_LOCK:
-        IMAGE_UPLOADS[image_id] = payload
+    with FILE_UPLOADS_LOCK:
+        FILE_UPLOADS[upload_id] = payload
+    if kind == "video":
+        payload["derivedFiles"] = derive_video_keyframes(payload)
+        transcribe_media_attachment(payload)
+    elif kind == "audio":
+        transcribe_media_attachment(payload)
     return payload
 
 
-def get_uploaded_image(image_id: str) -> Optional[Dict[str, object]]:
-    if not image_id:
+def register_derived_file(name: str, mime_type: str, file_path: Path, kind: str, extraction_status: str) -> Dict[str, object]:
+    upload_id = uuid.uuid4().hex
+    extension = file_path.suffix.lower() or mimetypes.guess_extension(mime_type) or ".bin"
+    stored_path = UPLOAD_DIR / f"{upload_id}{extension}"
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(file_path, stored_path)
+    normalization = normalize_uploaded_image(stored_path, mime_type) if kind == "image" else {"normalized": False}
+    model_sha256 = hashlib.sha256(stored_path.read_bytes()).hexdigest()
+    text_preview = ""
+    if kind == "text":
+        text_preview, extraction_status = extract_text_from_upload(stored_path, extension, mime_type)
+    payload = {
+        "id": upload_id,
+        "name": name,
+        "mimeType": mime_type,
+        "sizeBytes": stored_path.stat().st_size,
+        "path": str(stored_path),
+        "kind": kind,
+        "extension": extension,
+        "normalizedForModel": bool(normalization.get("normalized")),
+        "width": int(normalization.get("width", 0) or 0),
+        "height": int(normalization.get("height", 0) or 0),
+        "originalSha256": model_sha256,
+        "sha256": model_sha256,
+        "durationSeconds": 0,
+        "keyframeCount": 0,
+        "videoAnalysisMode": "",
+        "videoFrameTimestamps": [],
+        "transcriptStatus": "",
+        "transcriptChars": 0,
+        "textPreview": text_preview,
+        "extractionStatus": extraction_status,
+        "nativeParts": [{"type": "image_url"}] if kind == "image" else [],
+        "textBlocks": [text_preview] if text_preview else [],
+        "derivedFiles": [],
+    }
+    with FILE_UPLOADS_LOCK:
+        FILE_UPLOADS[upload_id] = payload
+    return payload
+
+
+def get_video_duration_seconds(source: Path, ffprobe: str) -> Optional[float]:
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(source),
+            ],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except Exception:
         return None
-    with IMAGE_UPLOADS_LOCK:
-        image = IMAGE_UPLOADS.get(image_id)
-        return dict(image) if image else None
+    if result.returncode != 0:
+        return None
+    try:
+        duration = float((result.stdout or "").strip())
+    except ValueError:
+        return None
+    return duration if duration > 0 else None
+
+
+def choose_video_keyframe_budget(duration_seconds: Optional[float], max_frames: Optional[int] = None) -> Tuple[int, str]:
+    assessment = get_media_analysis_assessment()
+    recommended = int(max_frames or assessment.get("recommendedMaxKeyframes", 8) or 8)
+    if not duration_seconds:
+        return min(recommended, 3), "unknown-duration-sample"
+    if duration_seconds <= 30:
+        return min(recommended, 8), "short-balanced"
+    if duration_seconds <= 120:
+        return min(recommended, 12), "balanced"
+    if duration_seconds <= 300:
+        return min(recommended, 16), "extended-sampled"
+    return min(recommended, 24), "long-sampled"
+
+
+def choose_video_timestamps(duration_seconds: Optional[float], max_frames: int) -> List[float]:
+    if not duration_seconds:
+        return [0.1]
+    max_frames = max(1, max_frames)
+    if max_frames > 3:
+        start = 0.1
+        upper_bound = max(0.1, duration_seconds - 0.05)
+        if max_frames == 1:
+            return [min(start, upper_bound)]
+        step = (upper_bound - start) / max(1, max_frames - 1)
+        timestamps: List[float] = []
+        for index in range(max_frames):
+            timestamp = min(upper_bound, max(0.0, start + step * index))
+            if all(abs(timestamp - existing) > 0.15 for existing in timestamps):
+                timestamps.append(timestamp)
+        return timestamps or [0.1]
+    candidates = [
+        0.1,
+        max(0.1, duration_seconds * 0.5),
+        max(0.1, duration_seconds * 0.9),
+    ]
+    bounded: List[float] = []
+    upper_bound = max(0.1, duration_seconds - 0.05)
+    for value in candidates:
+        timestamp = min(max(0.0, value), upper_bound)
+        if all(abs(timestamp - existing) > 0.15 for existing in bounded):
+            bounded.append(timestamp)
+        if len(bounded) >= max_frames:
+            break
+    return bounded or [0.0]
+
+
+def format_video_timestamp(seconds: float) -> str:
+    return f"{max(0.0, seconds):.3f}"
+
+
+def derive_video_keyframes(upload: Dict[str, object], max_frames: Optional[int] = None) -> List[Dict[str, object]]:
+    ffmpeg, ffprobe, ffmpeg_status = ensure_ffmpeg_runtime()
+    if not ffmpeg or not ffprobe:
+        upload["extractionStatus"] = f"video-keyframes-unavailable:{ffmpeg_status}"
+        return []
+    source = Path(str(upload.get("path", "")))
+    if not source.exists():
+        upload["extractionStatus"] = "video-keyframes-unavailable:source-missing"
+        return []
+    duration = get_video_duration_seconds(source, ffprobe)
+    if duration is not None:
+        upload["durationSeconds"] = round(duration, 3)
+    frame_budget, analysis_mode = choose_video_keyframe_budget(duration, max_frames)
+    upload["videoAnalysisMode"] = analysis_mode
+    frame_dir = UPLOAD_DIR / "video-frames" / str(upload.get("id", uuid.uuid4().hex))
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    derived: List[Dict[str, object]] = []
+    errors: List[str] = []
+    timestamps = choose_video_timestamps(duration, frame_budget)
+    upload["videoFrameTimestamps"] = [round(value, 3) for value in timestamps]
+    for index, timestamp in enumerate(timestamps, start=1):
+        frame_path = frame_dir / f"frame-{index}.jpg"
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-ss",
+                format_video_timestamp(timestamp),
+                "-i",
+                str(source),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(896,iw)':-2",
+                "-q:v",
+                "3",
+                str(frame_path),
+            ],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
+            check=False,
+        )
+        if result.returncode != 0 or not frame_path.exists() or frame_path.stat().st_size <= 0:
+            details = (result.stderr or result.stdout or "").strip().splitlines()
+            if details:
+                errors.append(details[-1][:240])
+            else:
+                errors.append(f"no-frame-at-{format_video_timestamp(timestamp)}")
+            continue
+        derived_upload = register_derived_file(
+            f"{upload.get('name', 'video')} keyframe {index}",
+            "image/jpeg",
+            frame_path,
+            "image",
+            f"video-keyframe:{format_video_timestamp(timestamp)}s",
+        )
+        derived.append(build_history_attachment(derived_upload))
+    upload["keyframeCount"] = len(derived)
+    if derived:
+        upload["extractionStatus"] = f"video-keyframes-extracted:{len(derived)}"
+    else:
+        reason = " | ".join(errors[:2]) if errors else "no-decodable-frames"
+        upload["extractionStatus"] = f"video-keyframes-unavailable:{reason}"
+    return derived
+
+
+def save_uploaded_image(name: str, mime_type: str, data: str) -> Dict[str, object]:
+    image = save_uploaded_file(name, mime_type, data)
+    if image.get("kind") != "image":
+        raise ValueError("Uploaded file is not an image.")
+    return image
+
+
+def get_uploaded_file(upload_id: str) -> Optional[Dict[str, object]]:
+    if not upload_id:
+        return None
+    with FILE_UPLOADS_LOCK:
+        upload = FILE_UPLOADS.get(upload_id)
+        return dict(upload) if upload else None
+
+
+def get_uploaded_image(image_id: str) -> Optional[Dict[str, object]]:
+    return get_uploaded_file(image_id)
 
 
 def get_uploaded_image_data_url(image: Dict[str, object]) -> str:
@@ -743,19 +1615,45 @@ def get_uploaded_image_data_url(image: Dict[str, object]) -> str:
     return f"data:{image.get('mimeType', 'image/png')};base64,{encoded}"
 
 
-def build_history_image_attachment(image: Dict[str, object]) -> Dict[str, object]:
+def build_history_attachment(upload: Dict[str, object]) -> Dict[str, object]:
     return {
-        "id": image.get("id"),
-        "kind": "image",
-        "name": image.get("name"),
-        "mimeType": image.get("mimeType"),
-        "sizeBytes": image.get("sizeBytes"),
+        "id": upload.get("id"),
+        "kind": upload.get("kind"),
+        "name": upload.get("name"),
+        "mimeType": upload.get("mimeType"),
+        "sizeBytes": upload.get("sizeBytes"),
+        "width": upload.get("width", 0),
+        "height": upload.get("height", 0),
+        "sha256": upload.get("sha256", ""),
+        "originalSha256": upload.get("originalSha256", ""),
+        "normalizedForModel": upload.get("normalizedForModel", False),
+        "durationSeconds": upload.get("durationSeconds", 0),
+        "keyframeCount": upload.get("keyframeCount", 0),
+        "videoAnalysisMode": upload.get("videoAnalysisMode", ""),
+        "videoFrameTimestamps": upload.get("videoFrameTimestamps", []),
+        "transcriptStatus": upload.get("transcriptStatus", ""),
+        "transcriptChars": upload.get("transcriptChars", 0),
+        "textPreview": upload.get("textPreview", ""),
+        "extractionStatus": upload.get("extractionStatus", ""),
+        "derivedFiles": upload.get("derivedFiles", []),
     }
+
+
+def build_history_image_attachment(image: Dict[str, object]) -> Dict[str, object]:
+    return build_history_attachment(image)
 
 
 def query_models(port: int, timeout_sec: int = 2) -> Optional[Dict[str, object]]:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=timeout_sec) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def query_model_props(port: int, timeout_sec: int = 2) -> Optional[Dict[str, object]]:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/props", timeout=timeout_sec) as response:
             return json.loads(response.read().decode("utf-8"))
     except Exception:
         return None
@@ -767,6 +1665,48 @@ def is_model_ready(model_alias: str, port: int) -> bool:
         return False
     data = payload.get("data", [])
     return any(isinstance(item, dict) and item.get("id") == model_alias for item in data)
+
+
+def is_codeworker_model_command(commandline: str) -> bool:
+    lowered = commandline.lower()
+    return "codeworker" in lowered and ("launch_llama_server.py" in lowered or "llama-server.exe" in lowered)
+
+
+def is_running_model_server_compatible(
+    model_key: str,
+    model_alias: str,
+    port: int,
+    model_file: Path,
+    mmproj_file: Optional[Path],
+) -> bool:
+    if not is_model_ready(model_alias, port):
+        return False
+    props = query_model_props(port)
+    if props:
+        running_path = str(props.get("model_path", "")).lower()
+        expected_model = str(model_file).lower()
+        if running_path and expected_model and running_path != expected_model:
+            return False
+        if get_model_capabilities(model_key).get("requires_mmproj"):
+            modalities = props.get("modalities", {})
+            if isinstance(modalities, dict) and modalities.get("vision") is False:
+                return False
+    pid = get_listening_pid(port)
+    if pid is None:
+        return True
+    commandline = get_process_commandline(pid)
+    if not commandline or not is_codeworker_model_command(commandline):
+        return True
+    lowered = commandline.lower()
+    expected_model = str(model_file).lower()
+    if expected_model and expected_model not in lowered:
+        return False
+    if get_model_capabilities(model_key).get("requires_mmproj"):
+        if mmproj_file is None:
+            return False
+        expected_mmproj = str(mmproj_file).lower()
+        return "--mmproj" in lowered and expected_mmproj in lowered
+    return True
 
 
 def is_port_listening(port: int) -> bool:
@@ -784,7 +1724,18 @@ def is_port_listening(port: int) -> bool:
         check=False,
         timeout=10,
     )
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    fallback = subprocess.run(
+        ["netstat", "-ano"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=10,
+    )
+    return fallback.returncode == 0 and re.search(rf"^\s*TCP\s+127\.0\.0\.1:{port}\s+\S+\s+LISTENING\s+\d+\s*$", fallback.stdout, re.MULTILINE) is not None
 
 
 def get_listening_pid(port: int) -> Optional[int]:
@@ -809,6 +1760,19 @@ def get_listening_pid(port: int) -> Optional[int]:
     text = result.stdout.strip()
     if text.isdigit():
         return int(text)
+    fallback = subprocess.run(
+        ["netstat", "-ano"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=10,
+    )
+    if fallback.returncode == 0:
+        match = re.search(rf"^\s*TCP\s+127\.0\.0\.1:{port}\s+\S+\s+LISTENING\s+(\d+)\s*$", fallback.stdout, re.MULTILINE)
+        if match:
+            return int(match.group(1))
     return None
 
 
@@ -845,13 +1809,12 @@ def kill_process(pid: int) -> bool:
     return result.returncode == 0
 
 
-def try_reclaim_codeworker_port(port: int) -> Optional[str]:
+def try_reclaim_codeworker_port(port: int, model_alias: str = "") -> Optional[str]:
     pid = get_listening_pid(port)
     if not pid:
         return None
     commandline = get_process_commandline(pid)
-    lowered = commandline.lower()
-    if "codeworker" in lowered and ("launch_llama_server.py" in lowered or "llama-server.exe" in lowered):
+    if is_codeworker_model_command(commandline):
         if kill_process(pid):
             for _ in range(10):
                 if not is_port_listening(port):
@@ -859,6 +1822,15 @@ def try_reclaim_codeworker_port(port: int) -> Optional[str]:
                 threading.Event().wait(1)
             return f"Attempted to reclaim CodeWorker model port {port}, but it is still listening."
         return f"Failed to stop stale CodeWorker model server on PID {pid}."
+    props = query_model_props(port)
+    if model_alias and isinstance(props, dict) and props.get("model_alias") == model_alias:
+        if kill_process(pid):
+            for _ in range(10):
+                if not is_port_listening(port):
+                    return f"Reclaimed CodeWorker model port {port} by stopping PID {pid} with alias {model_alias}."
+                threading.Event().wait(1)
+            return f"Attempted to reclaim CodeWorker model port {port}, but it is still listening."
+        return f"Failed to stop stale model server on PID {pid} with alias {model_alias}."
     return f"Port {port} is occupied by PID {pid}: {commandline or 'unknown process'}"
 
 
@@ -895,16 +1867,30 @@ def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str, Optional[Path]]
             )
     validate_model_file(model_file)
     mmproj_file: Optional[Path] = None
-    mmproj_pattern = get_model_mmproj_pattern(model_key)
-    if mmproj_pattern:
-        mmproj_file = find_model_file(model_dir, mmproj_pattern)
+    mmproj_patterns = get_model_mmproj_patterns(model_key)
+    if mmproj_patterns:
+        mmproj_file = match_first_model_file(model_dir, mmproj_patterns)
+        if mmproj_file is None:
+            bootstrap = run_script("bootstrap.cmd", "-SkipRuntime", "-Models", model_key, timeout_seconds=1800)
+            mmproj_file = match_first_model_file(model_dir, mmproj_patterns)
+            if bootstrap.returncode != 0:
+                raise RuntimeError(
+                    json.dumps(
+                        make_error(
+                            "MODEL_MISSING",
+                            "Failed to prepare multimodal projection file.",
+                            bootstrap.stdout + bootstrap.stderr,
+                            extra={"modelKey": model_key},
+                        )
+                    )
+                )
         if mmproj_file is None:
             raise RuntimeError(
                 json.dumps(
                     make_error(
                         "MODEL_MISSING",
                         "Failed to prepare multimodal projection file.",
-                        f"Missing mmproj in {model_dir}",
+                        f"Missing mmproj in {model_dir}; patterns={';'.join(mmproj_patterns)}",
                         extra={"modelKey": model_key},
                     )
                 )
@@ -924,14 +1910,14 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
     model_file, model_alias, mmproj_file = ensure_runtime_and_model(model_key)
     llama_server = ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
 
-    if is_model_ready(model_alias, port):
+    if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
         return {"modelAlias": model_alias, "logPath": None, "alreadyRunning": True}
 
-    if is_port_listening(port):
-        reclaim_details = try_reclaim_codeworker_port(port)
-        if is_model_ready(model_alias, port):
+    if is_model_ready(model_alias, port) or is_port_listening(port):
+        reclaim_details = try_reclaim_codeworker_port(port, model_alias=model_alias)
+        if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
             return {"modelAlias": model_alias, "logPath": None, "alreadyRunning": True}
-        if is_port_listening(port):
+        if is_model_ready(model_alias, port) or is_port_listening(port):
             raise RuntimeError(
                 json.dumps(
                     make_error(
@@ -980,7 +1966,10 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
     )
 
     for _ in range(60):
-        if is_model_ready(model_alias, port):
+        if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
+            threading.Event().wait(2)
+            if not is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
+                continue
             return {"modelAlias": model_alias, "logPath": str(log_path), "alreadyRunning": False}
         threading.Event().wait(2)
 
@@ -1164,24 +2153,50 @@ def collect_project_files(project_root: Path) -> List[ProjectFile]:
         dirs[:] = [item for item in dirs if item.lower() not in ignored_dirs]
         for filename in files:
             path = Path(root) / filename
-            if path.suffix.lower() in IGNORED_EXTENSIONS:
+            suffix = path.suffix.lower()
+            if suffix in IGNORED_EXTENSIONS:
                 continue
             try:
                 stat = path.stat()
             except OSError:
                 continue
-            if stat.st_size > 512_000:
+            if suffix not in SUPPORTED_FILE_EXTENSIONS and suffix:
+                continue
+            if suffix in TEXT_UPLOAD_EXTENSIONS and stat.st_size > 1_500_000:
+                continue
+            if suffix not in TEXT_UPLOAD_EXTENSIONS and stat.st_size > MAX_UPLOAD_BYTES:
                 continue
             results.append(
                 ProjectFile(
                     path=path.relative_to(project_root).as_posix(),
                     size=stat.st_size,
-                    language=LANGUAGE_BY_EXTENSION.get(path.suffix.lower(), "Other"),
+                    language=LANGUAGE_BY_EXTENSION.get(suffix, "Other"),
                 )
             )
             if len(results) >= MAX_SCAN_FILES:
-                return sorted(results, key=lambda item: item.path.lower())
-    return sorted(results, key=lambda item: item.path.lower())
+                return sort_project_files(results)
+    return sort_project_files(results)
+
+
+def sort_project_files(files: List[ProjectFile]) -> List[ProjectFile]:
+    priority = {
+        "Python": 0, "TypeScript": 1, "JavaScript": 1, "C#": 2, "Java": 2,
+        "Markdown": 3, "JSON": 4, "YAML": 4,
+    }
+    return sorted(files, key=lambda item: (priority.get(item.language, 20), item.path.lower()))
+
+
+def file_kind_from_path(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in IMAGE_UPLOAD_EXTENSIONS:
+        return "image"
+    if suffix in AUDIO_UPLOAD_EXTENSIONS:
+        return "audio"
+    if suffix in VIDEO_UPLOAD_EXTENSIONS:
+        return "video"
+    if suffix in DOCUMENT_UPLOAD_EXTENSIONS:
+        return "document"
+    return "text"
 
 
 def detect_entrypoints(file_paths: List[str]) -> List[str]:
@@ -1227,7 +2242,13 @@ def read_file_excerpt(project_root: Path, relative_path: str, max_chars: int = M
         target.relative_to(project_root)
     except ValueError as exc:
         raise ValueError("Invalid file path.") from exc
-    content = target.read_text(encoding="utf-8", errors="replace")
+    suffix = target.suffix.lower()
+    if suffix in DOCUMENT_UPLOAD_EXTENSIONS:
+        mime_type, _ = mimetypes.guess_type(str(target))
+        extracted, status = extract_text_from_upload(target, suffix, mime_type or "")
+        content = extracted or f"{relative_path}\n文件解析狀態: {status}\n目前只提供 metadata。"
+    else:
+        content = target.read_text(encoding="utf-8", errors="replace")
     return content[:max_chars] + ("\n... [truncated]" if len(content) > max_chars else "")
 
 
@@ -1237,6 +2258,11 @@ def read_file_full(project_root: Path, relative_path: str) -> str:
         target.relative_to(project_root)
     except ValueError as exc:
         raise ValueError("Invalid file path.") from exc
+    suffix = target.suffix.lower()
+    if suffix in DOCUMENT_UPLOAD_EXTENSIONS:
+        mime_type, _ = mimetypes.guess_type(str(target))
+        extracted, status = extract_text_from_upload(target, suffix, mime_type or "")
+        return extracted or f"{relative_path}\n文件解析狀態: {status}\n目前只提供 metadata。"
     return target.read_text(encoding="utf-8", errors="replace")
 
 
@@ -1801,11 +2827,16 @@ def build_pending_edit_prompt_block(pending_edit: Optional[Dict[str, object]]) -
     return "\n".join(lines).strip()
 
 
-def normalize_message_roles(messages: List[Dict[str, object]]) -> List[Dict[str, str]]:
-    normalized: List[Dict[str, str]] = []
+def normalize_message_roles(messages: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    normalized: List[Dict[str, object]] = []
     for message in messages:
         role = str(message.get("role", "")).strip()
-        content = str(message.get("content", "")).strip()
+        content_obj = message.get("content", "")
+        content: object
+        if isinstance(content_obj, list):
+            content = content_obj
+        else:
+            content = str(content_obj).strip()
         if not content:
             continue
         if role not in {"system", "user", "assistant"}:
@@ -1842,42 +2873,125 @@ def sanitize_model_reply(model_alias: str, content: str, raw_mode: bool = False)
 
 def get_continue_on_length(model_key: str) -> int:
     if model_key == "gemma4":
-        return 2
+        return 4
     if model_key == "qwen35":
         return 1
     return 0
 
 
+def get_request_max_tokens(payload: Dict[str, object], default_value: int) -> int:
+    raw = payload.get("maxTokens", payload.get("max_tokens", 0))
+    try:
+        requested = int(raw or 0)
+    except (TypeError, ValueError):
+        return default_value
+    if requested <= 0:
+        return default_value
+    return max(16, min(default_value, requested))
+
+
 def build_chat_system_prompt(model_key: str) -> str:
-    if model_key in {"gemma4", "qwen35"}:
-        return ANSWER_ONLY_SYSTEM_PROMPT
-    return ""
+    return (
+        "請只根據本輪實際提供給你的文字、圖片、文件抽取內容與 keyframes 回答。"
+        "若使用者貼的是 URL/連結，而系統沒有提供網頁內容、影片 keyframes 或逐字稿，"
+        "只能說明目前只看得到連結本身，不得根據網址、檔名或標題猜測影片內容。"
+        "若附件只有 metadata 而沒有像素、音訊逐字稿或文字抽取內容，請明確說明限制，不要編造內容。"
+    )
+
+
+def strip_think_blocks(content: str) -> str:
+    return re.sub(r"<think>\s*[\s\S]*?\s*</think>", "", str(content or ""), flags=re.IGNORECASE).strip()
+
+
+def build_answer_only_retry_messages(messages: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    retry_messages: List[Dict[str, object]] = []
+    inserted = False
+    for message in messages:
+        item = dict(message)
+        if not inserted and str(item.get("role", "")) == "system":
+            item["content"] = f"{str(item.get('content', '')).strip()}\n\n{ANSWER_ONLY_SYSTEM_PROMPT}".strip()
+            inserted = True
+        retry_messages.append(item)
+    if not inserted:
+        retry_messages.insert(0, {"role": "system", "content": ANSWER_ONLY_SYSTEM_PROMPT})
+    retry_messages.append({"role": "user", "content": ANSWER_ONLY_RETRY_PROMPT})
+    return retry_messages
+
+
+def is_continue_request(message: str) -> bool:
+    lowered = str(message or "").strip().lower()
+    if not lowered:
+        return False
+    return any(token in lowered for token in CONTINUE_TOKENS)
+
+
+def build_history_continuation_message(message: str, history: List[Dict[str, object]]) -> Optional[str]:
+    last_user = ""
+    last_assistant = ""
+    for item in reversed(history):
+        role = str(item.get("role", ""))
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        if role == "assistant" and not last_assistant:
+            last_assistant = strip_think_blocks(content) or content
+        elif role == "user" and not last_user:
+            last_user = content
+        if last_user and last_assistant:
+            break
+    if not last_assistant:
+        return None
+    tail = last_assistant[-6000:]
+    parts = [
+        "使用者要求延續上一輪回答。請直接接續，不要重新開場，不要重複前文。",
+        f"本輪使用者要求：{message}",
+    ]
+    if last_user:
+        parts.append(f"上一輪使用者問題：\n{last_user[-2000:]}")
+    parts.append(f"上一輪回答末尾：\n{tail}")
+    parts.append("請從上一輪回答中斷處繼續，若上一輪回答其實已完整，請只補充尚未完成的重點。")
+    return "\n\n".join(parts)
 
 
 def build_analyze_system_prompt(model_key: str) -> str:
-    if model_key in {"gemma4", "qwen35"}:
-        return ANSWER_ONLY_SYSTEM_PROMPT
     return ""
 
 
 def build_raw_chat_user_message(context: str, message: str) -> str:
+    if not context.strip():
+        return f"USER QUESTION:\n{message}"
+    normalized_context = context.strip()
+    if normalized_context.startswith(("PINNED FILE CONTENT", "PROJECT CACHE CONTEXT", "PROJECT RAG CONTEXT")):
+        return (
+            f"{normalized_context}\n\n"
+            f"USER QUESTION:\n{message}"
+        )
     return (
-        "PINNED FILE CONTENT:\n"
-        f"{context}\n\n"
+        "PROJECT CONTEXT:\n"
+        f"{normalized_context}\n\n"
         f"USER QUESTION:\n{message}"
     )
 
 
 def build_raw_analyze_user_message(prompt: str, context: str) -> str:
+    if not context.strip():
+        return f"USER QUESTION:\n{prompt}"
+    normalized_context = context.strip()
+    if normalized_context.startswith(("PINNED FILE CONTENT", "PROJECT CACHE CONTEXT", "PROJECT RAG CONTEXT")):
+        return (
+            f"{normalized_context}\n\n"
+            f"USER QUESTION:\n{prompt}"
+        )
     return (
-        "PINNED FILE CONTENT:\n"
-        f"{context}\n\n"
+        "PROJECT CONTEXT:\n"
+        f"{normalized_context}\n\n"
         f"USER QUESTION:\n{prompt}"
     )
 
 
-def build_chat_user_content(context: str, message: str, image: Optional[Dict[str, object]] = None) -> object:
-    if not image:
+def build_chat_user_content(context: str, message: str, image: Optional[Dict[str, object]] = None, images: Optional[List[Dict[str, object]]] = None) -> object:
+    direct_images = list(images or ([] if image is None else [image]))
+    if not direct_images:
         return build_raw_chat_user_message(context, message)
     text_sections: List[str] = []
     if context.strip():
@@ -1885,11 +2999,263 @@ def build_chat_user_content(context: str, message: str, image: Optional[Dict[str
     if message.strip():
         text_sections.append(f"USER QUESTION:\n{message}")
     else:
-        text_sections.append("USER QUESTION:\n請根據這張圖片回答。")
-    return [
-        {"type": "text", "text": "\n\n".join(text_sections).strip()},
-        {"type": "image_url", "image_url": {"url": get_uploaded_image_data_url(image)}},
-    ]
+        text_sections.append("USER QUESTION:\n請根據附件圖片回答。")
+    content: List[Dict[str, object]] = [{"type": "text", "text": "\n\n".join(text_sections).strip()}]
+    for item in direct_images:
+        content.append({"type": "image_url", "image_url": {"url": get_uploaded_image_data_url(item)}})
+    return content
+
+
+def build_attachment_prompt_block(attachments: List[Dict[str, object]], model_key: str, native_rejected: bool = False) -> str:
+    if not attachments:
+        return ""
+    sections = ["\n\n[ATTACHMENTS]"]
+    if native_rejected:
+        sections.append(
+            "重要限制：本輪附件的原生多模態輸入已被本地模型服務拒絕。"
+            "若附件沒有可抽取文字，模型沒有收到圖片/影片/音訊的實際內容。"
+            "不得描述、辨識、翻譯、推測或編造未收到的視覺/聽覺內容；"
+            "只能根據下方 metadata 與文字抽取內容回答，必要時直接說明目前無法讀取實際內容。"
+        )
+    for index, upload in enumerate(attachments, start=1):
+        kind = str(upload.get("kind", "file"))
+        name = str(upload.get("name", "attachment"))
+        mime_type = str(upload.get("mimeType", "unknown"))
+        size = human_size(int(upload.get("sizeBytes", 0) or 0))
+        status = str(upload.get("extractionStatus", "metadata-only"))
+        sections.append(f"附件 {index}: {name} ({kind}, {mime_type}, {size}, extraction={status})")
+        if kind == "image":
+            width = int(upload.get("width", 0) or 0)
+            height = int(upload.get("height", 0) or 0)
+            if width > 0 and height > 0:
+                sections.append(f"圖片尺寸: {width}x{height}")
+            sha256 = str(upload.get("sha256", "")).strip()
+            original_sha256 = str(upload.get("originalSha256", "")).strip()
+            if sha256:
+                sections.append(f"模型收到的圖片 SHA256: {sha256}")
+            if original_sha256 and original_sha256 != sha256:
+                sections.append(f"原始上傳圖片 SHA256: {original_sha256}")
+        text_preview = str(upload.get("textPreview", "")).strip()
+        if kind == "video":
+            duration = float(upload.get("durationSeconds", 0) or 0)
+            keyframes = int(upload.get("keyframeCount", 0) or 0)
+            analysis_mode = str(upload.get("videoAnalysisMode", "")).strip()
+            timestamps = upload.get("videoFrameTimestamps", [])
+            transcript_status = str(upload.get("transcriptStatus", "")).strip()
+            if duration > 0:
+                sections.append(f"影片長度: {duration:.3f} 秒")
+            if analysis_mode:
+                sections.append(f"影片分析模式: {analysis_mode}")
+            if keyframes > 0:
+                if isinstance(timestamps, list) and timestamps:
+                    compact_times = ", ".join(f"{float(value):.3f}s" for value in timestamps[:24] if isinstance(value, (int, float)))
+                    if compact_times:
+                        sections.append(f"keyframe 時間點: {compact_times}")
+                sections.append(
+                    f"影片已抽取 {keyframes} 張 keyframe，keyframes 會作為圖片附件提供。"
+                    "請只根據這些 keyframes 與逐字稿描述影片；這不是完整逐格觀看。"
+                )
+            else:
+                sections.append(
+                    "這是影片附件，但目前沒有可用 keyframe 或逐字稿。"
+                    "只能根據 metadata 說明限制，不得猜測影片畫面、角色、動作或聲音。"
+                )
+            if transcript_status:
+                sections.append(f"音訊逐字稿狀態: {transcript_status}")
+        elif kind == "audio":
+            transcript_status = str(upload.get("transcriptStatus", upload.get("extractionStatus", ""))).strip()
+            if transcript_status:
+                sections.append(f"音訊逐字稿狀態: {transcript_status}")
+
+        if text_preview:
+            sections.append("附件文字內容/節錄:")
+            sections.append(text_preview[:MAX_TEXT_ATTACHMENT_CHARS])
+        elif kind == "image":
+            if native_rejected:
+                sections.append(
+                    "這是圖片附件，但本輪沒有圖片像素內容可供模型閱讀。"
+                    "請明確告知無法直接看見圖片內容，不要猜測圖片文字或畫面。"
+                )
+            else:
+                sections.append(
+                    "這是圖片附件。若目前模型與 llama.cpp server 沒有可用 vision projection，"
+                    "請明確告知無法直接看見圖片內容，並請使用者提供文字描述或改用支援圖片的模型。"
+                )
+        elif kind == "audio":
+            sections.append("這是音訊附件；目前沒有可用逐字稿。不得猜測音訊內容。")
+        elif kind != "video":
+            sections.append("此附件目前只提供 metadata，沒有可抽取的文字內容。")
+    return "\n".join(sections).strip()
+
+
+def expand_attachments_with_derived(attachments: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    expanded: List[Dict[str, object]] = []
+    seen = set()
+    for upload in attachments:
+        upload_id = str(upload.get("id", ""))
+        if upload_id and upload_id not in seen:
+            expanded.append(upload)
+            seen.add(upload_id)
+        for derived in upload.get("derivedFiles", []) or []:
+            if not isinstance(derived, dict):
+                continue
+            derived_id = str(derived.get("id", ""))
+            if not derived_id or derived_id in seen:
+                continue
+            stored = get_uploaded_file(derived_id)
+            if stored:
+                expanded.append(stored)
+                seen.add(derived_id)
+    return expanded
+
+
+def update_uploaded_file(upload_id: str, updates: Dict[str, object]) -> None:
+    if not upload_id:
+        return
+    with FILE_UPLOADS_LOCK:
+        if upload_id in FILE_UPLOADS:
+            FILE_UPLOADS[upload_id].update(updates)
+
+
+def prepare_attachments_for_model(model_key: str, attachments: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    return expand_attachments_with_derived(attachments)
+
+
+def build_attachment_chat_content(
+    context: str,
+    message: str,
+    attachments: List[Dict[str, object]],
+    model_key: str,
+    force_text_fallback: bool = False,
+) -> Tuple[object, Dict[str, object]]:
+    expanded = expand_attachments_with_derived(attachments)
+    native_images = [] if force_text_fallback or not model_has_native_image_transport(model_key) else [item for item in expanded if item.get("kind") == "image"]
+    native_ids = {str(item.get("id", "")) for item in native_images}
+    text_attachments = [item for item in expanded if str(item.get("id", "")) not in native_ids]
+    attachment_prompt = build_attachment_prompt_block(text_attachments, model_key, native_rejected=force_text_fallback)
+    effective_message = message
+    if attachment_prompt:
+        effective_message = (effective_message + "\n\n" + attachment_prompt).strip()
+    user_content = build_chat_user_content(context, effective_message, images=native_images)
+    return user_content, {
+        "nativeImages": len(native_images),
+        "textAttachments": len(text_attachments),
+        "fallback": force_text_fallback,
+        "fallbackKinds": sorted({str(item.get("kind", "file")) for item in expanded}),
+    }
+
+
+def is_multimodal_transport_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    markers = (
+        "image_url",
+        "images",
+        "image input",
+        "multimodal",
+        "mmproj",
+        "projector",
+        "vision",
+        "clip",
+        "unsupported content",
+        "unsupported image",
+        "invalid image",
+        "content type",
+        "not support image",
+        "does not support image",
+        "image data",
+    )
+    return any(marker in text for marker in markers)
+
+
+def call_local_model_with_attachment_fallback(
+    model_alias: str,
+    model_key: str,
+    context: str,
+    message: str,
+    attachments: List[Dict[str, object]],
+    system_prompt: str,
+    max_tokens: int,
+    timeout_seconds: int,
+    continue_on_length: int,
+) -> Tuple[str, Optional[Dict[str, object]], Dict[str, object]]:
+    user_content, attachment_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=False)
+    messages = build_raw_messages(model_key, user_content, system_prompt)
+    try:
+        reply = call_local_model(
+            model_alias,
+            messages,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            continue_on_length=continue_on_length,
+            raw_mode=True,
+        ).strip()
+        return reply, None, attachment_meta
+    except Exception as exc:
+        if not attachment_meta.get("nativeImages") or not is_multimodal_transport_error(exc):
+            raise
+        fallback_content, fallback_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=True)
+        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt)
+        reply = call_local_model(
+            model_alias,
+            fallback_messages,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            continue_on_length=continue_on_length,
+            raw_mode=True,
+        ).strip()
+        fallback_info = {
+            "reason": str(exc),
+            "fallbackKinds": fallback_meta.get("fallbackKinds", []),
+            "retried": True,
+        }
+        return reply, fallback_info, fallback_meta
+
+
+def stream_local_model_with_attachment_fallback(
+    model_alias: str,
+    model_key: str,
+    context: str,
+    message: str,
+    attachments: List[Dict[str, object]],
+    system_prompt: str,
+    max_tokens: int,
+    timeout_seconds: int,
+    continue_on_length: int,
+):
+    user_content, attachment_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=False)
+    messages = build_raw_messages(model_key, user_content, system_prompt)
+    emitted_model_output = False
+    try:
+        for event in stream_local_model_events(
+            model_alias,
+            messages,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            continue_on_length=continue_on_length,
+        ):
+            if event.get("type") in {"reasoning", "content"} and str(event.get("text", "")):
+                emitted_model_output = True
+            yield event
+        return
+    except Exception as exc:
+        if emitted_model_output or not attachment_meta.get("nativeImages") or not is_multimodal_transport_error(exc):
+            raise
+        fallback_content, fallback_meta = build_attachment_chat_content(context, message, attachments, model_key, force_text_fallback=True)
+        yield {
+            "type": "attachment_fallback",
+            "reason": str(exc),
+            "fallbackKinds": fallback_meta.get("fallbackKinds", []),
+            "retried": True,
+        }
+        fallback_messages = build_raw_messages(model_key, fallback_content, system_prompt)
+        for event in stream_local_model_events(
+            model_alias,
+            fallback_messages,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            continue_on_length=continue_on_length,
+        ):
+            yield event
 
 
 def build_raw_messages(model_key: str, user_content: object, system_prompt: str = "") -> List[Dict[str, object]]:
@@ -2158,6 +3524,159 @@ def build_project_context(
         total_limit,
         total_chars,
     )
+
+
+def load_cached_skeleton(project_root: Path) -> List[Dict[str, object]]:
+    skeleton_path = rag_index_dir(DATA_DIR, project_root) / "skeleton.json"
+    if not skeleton_path.exists():
+        return []
+    try:
+        payload = json.loads(skeleton_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def ensure_project_index(project_root: Path) -> Tuple[Dict[str, object], bool]:
+    db_path = rag_index_dir(DATA_DIR, project_root) / "index.sqlite"
+    skeleton_path = rag_index_dir(DATA_DIR, project_root) / "skeleton.json"
+    if db_path.exists() and skeleton_path.exists() and not index_is_stale(project_root, DATA_DIR):
+        return {
+            "projectHash": rag_index_dir(DATA_DIR, project_root).name,
+            "indexDir": str(rag_index_dir(DATA_DIR, project_root)),
+            "database": str(db_path),
+            "files": len(load_cached_skeleton(project_root)),
+            "chunks": 0,
+        }, False
+    return rebuild_index(project_root, DATA_DIR), True
+
+
+def append_context_section(chunks: List[str], section: str, total_limit: int) -> bool:
+    section = section.strip()
+    if not section:
+        return False
+    separator = "\n\n" if chunks else ""
+    current = sum(len(item) for item in chunks) + (2 * max(0, len(chunks) - 1))
+    budget = total_limit - current - len(separator)
+    if budget <= 80:
+        return False
+    if len(section) > budget:
+        section = section[: max(0, budget - 24)].rstrip() + "\n... [truncated]"
+    chunks.append(section)
+    return True
+
+
+def build_project_rag_context(
+    project_root: Path,
+    state: SessionState,
+    prompt: str,
+    model_key: str,
+) -> Tuple[str, Dict[str, object]]:
+    index_result, index_rebuilt = ensure_project_index(project_root)
+    skeleton = load_cached_skeleton(project_root)
+    search_result = search_index(project_root, DATA_DIR, prompt, limit=12)
+    matches = search_result.get("matches", []) if isinstance(search_result, dict) else []
+    total_limit = get_context_limits(model_key, single_file_focus=False).get("total_chars", MAX_TOTAL_CONTEXT)
+    total_limit = max(9000, min(26000, int(total_limit)))
+    chunks: List[str] = []
+    files_sent: List[Dict[str, object]] = []
+
+    append_context_section(
+        chunks,
+        "\n".join(
+            [
+                "PROJECT RAG CONTEXT",
+                "未勾選 pinned files；本次使用 CodeWorker 的全專案搜尋快取與 RAG 檢索結果。",
+                "這不是把整個專案原始碼完整丟給模型，而是使用快取的 skeleton、summary、symbols、imports 與相關 chunks。",
+                f"專案路徑: {project_root}",
+                f"快取狀態: {'本次重建' if index_rebuilt else '沿用既有快取'}",
+                f"快取檔案數: {index_result.get('files', len(skeleton))}",
+                "",
+                "PROJECT SUMMARY",
+                state.summary or build_summary(project_root, state.files, state.entrypoints, state.tests),
+            ]
+        ),
+        total_limit,
+    )
+
+    if matches:
+        match_lines = ["RAG MATCHES FOR USER REQUEST"]
+        for item in matches[:12]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if not path or not content:
+                continue
+            line_start = int(item.get("lineStart", 1) or 1)
+            line_end = int(item.get("lineEnd", line_start) or line_start)
+            source = str(item.get("source", "rag"))
+            match_lines.append(f"\n檔案: {path}:{line_start}-{line_end} [{source}]\n```\n{content[:1400]}\n```")
+            files_sent.append({
+                "path": path,
+                "mode": "rag-chunk",
+                "truncated": True,
+                "charsSent": min(len(content), 1400),
+                "charsTotal": len(content),
+                "lineStart": line_start,
+                "lineEnd": line_end,
+                "source": source,
+            })
+        append_context_section(chunks, "\n".join(match_lines), total_limit)
+
+    skeleton_lines = ["CACHED PROJECT SKELETON"]
+    skeleton_budget_count = 120
+    for item in skeleton[:skeleton_budget_count]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).strip()
+        if not path:
+            continue
+        symbols = item.get("symbols", [])
+        imports = item.get("imports", [])
+        summary = str(item.get("summary", "")).strip().replace("\n", " ")
+        symbol_text = ", ".join(str(value) for value in symbols[:8]) if isinstance(symbols, list) else ""
+        import_text = ", ".join(str(value) for value in imports[:6]) if isinstance(imports, list) else ""
+        line = f"- {path}"
+        if symbol_text:
+            line += f" | symbols: {symbol_text}"
+        if import_text:
+            line += f" | imports: {import_text}"
+        if summary:
+            line += f" | summary: {summary[:360]}"
+        skeleton_lines.append(line)
+        files_sent.append({"path": path, "mode": "cached-summary", "truncated": True, "charsSent": min(len(line), 520), "charsTotal": int(item.get("size", 0) or len(summary))})
+    append_context_section(chunks, "\n".join(skeleton_lines), total_limit)
+
+    used_chars = sum(len(item) for item in chunks) + (2 * max(0, len(chunks) - 1))
+    indexed_files = int(index_result.get("files", len(skeleton)) or len(skeleton))
+    coverage = {
+        "mode": "project-rag",
+        "modelKey": model_key,
+        "selectedFiles": max(len(state.files), indexed_files),
+        "filesSent": len(files_sent),
+        "fullCount": 0,
+        "excerptCount": len(files_sent),
+        "truncated": True,
+        "omittedFiles": max(0, max(len(state.files), indexed_files) - len(files_sent)),
+        "charLimit": total_limit,
+        "usedChars": used_chars,
+        "files": files_sent[:120],
+        "indexRebuilt": index_rebuilt,
+        "indexFiles": indexed_files,
+        "indexChunks": int(index_result.get("chunks", 0) or 0),
+        "indexDir": str(index_result.get("indexDir", "")),
+    }
+    return "\n\n".join(chunks), coverage
+
+
+def build_project_cache_context(
+    project_root: Path,
+    state: SessionState,
+    prompt: str,
+    model_key: str,
+) -> Tuple[str, Dict[str, object]]:
+    return build_project_rag_context(project_root, state, prompt, model_key)
 
 
 def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
@@ -3391,17 +4910,14 @@ def call_local_model(
 
     while True:
         prepared_messages = prepare_messages_for_model(model_alias, working_messages)
-        payload = json.dumps(
-            {
-                "model": model_alias,
-                "messages": prepared_messages,
-                "temperature": 0.2,
-                "stream": False,
-                "max_tokens": max_tokens,
-                **({"chat_template_kwargs": {"enable_thinking": False}} if model_key == "qwen35" else {}),
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
+        request_payload = {
+            "model": model_alias,
+            "messages": prepared_messages,
+            "stream": False,
+            "max_tokens": max_tokens,
+        }
+        request_payload.update(get_model_generation_options(model_key))
+        payload = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             endpoint,
             data=payload,
@@ -3443,11 +4959,16 @@ def call_local_model(
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError("Unexpected model response format.") from exc
         if not raw_content.strip():
-            if model_key == "qwen35" and not answer_only_retry_used and (reasoning_content.strip() or finish_reason == "length"):
+            if reasoning_content.strip() and not answer_only_retry_used:
                 answer_only_retry_used = True
-                working_messages.append({"role": "user", "content": ANSWER_ONLY_RETRY_PROMPT})
+                working_messages = build_answer_only_retry_messages(working_messages)
                 continue
+            if reasoning_content.strip():
+                parts.append(f"<think>\n{reasoning_content.strip()}\n</think>")
+                break
             raise_model_empty_reply(finish_reason, reasoning_content)
+        if reasoning_content.strip():
+            parts.append(f"<think>\n{reasoning_content.strip()}\n</think>")
         parts.append(raw_content)
         if finish_reason != "length" or remaining_continuations <= 0:
             break
@@ -3455,6 +4976,107 @@ def call_local_model(
         working_messages.append({"role": "assistant", "content": raw_content})
         working_messages.append({"role": "user", "content": "請直接從上一句繼續回答，不要重複前文，不要重新開場。"})
     return sanitize_model_reply(model_alias, "\n".join(part for part in parts if part.strip()), raw_mode=raw_mode)
+
+
+def raise_local_model_http_error(exc: urllib.error.HTTPError) -> None:
+    details = ""
+    try:
+        details = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        details = str(exc)
+    lowered_details = details.lower()
+    if ("exceeds the available context size" in lowered_details) or ("context size has been exceeded" in lowered_details):
+        raise RuntimeError(
+            "目前送給模型的專案上下文太大，超過這台機器目前可用的 context 上限。請縮小對話歷史、減少釘選檔案，或重新開啟專案後再試。"
+        ) from exc
+    raise RuntimeError(f"Failed to call local model endpoint: HTTP {exc.code}: {details}") from exc
+
+
+def raise_local_model_url_error(exc: urllib.error.URLError, timeout_seconds: int) -> None:
+    reason = getattr(exc, "reason", "")
+    if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+        raise RuntimeError(
+            f"本地模型回應已等到目前上限仍未完成。模型可能仍在生成超長內容、主機效能不足，或本輪上下文需要縮小。timeout={timeout_seconds}s。若經常發生，請減少釘選檔案或縮小問題範圍後再試。"
+        ) from exc
+    raise RuntimeError(f"Failed to call local model endpoint: {exc}") from exc
+
+
+def stream_local_model_events(
+    model_alias: str,
+    messages: List[Dict[str, object]],
+    timeout_seconds: int = 180,
+    max_tokens: int = 600,
+    continue_on_length: int = 0,
+):
+    endpoint = get_model_endpoint(model_alias)
+    working_messages = list(messages)
+    remaining_continuations = max(0, continue_on_length)
+    answer_only_retry_used = False
+    while True:
+        prepared_messages = prepare_messages_for_model(model_alias, working_messages)
+        request_payload = {
+            "model": model_alias,
+            "messages": prepared_messages,
+            "stream": True,
+            "max_tokens": max_tokens,
+        }
+        request_payload.update(get_model_generation_options(get_model_key_from_alias(model_alias)))
+        payload = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        finish_reason = ""
+        streamed_content: List[str] = []
+        streamed_reasoning: List[str] = []
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        payload_obj = json.loads(data)
+                        choice = payload_obj.get("choices", [{}])[0]
+                        finish_reason = str(choice.get("finish_reason", "") or finish_reason)
+                        delta = choice.get("delta") or choice.get("message") or {}
+                        reasoning = str(delta.get("reasoning_content") or "")
+                        content = str(delta.get("content") or "")
+                        if reasoning:
+                            streamed_reasoning.append(reasoning)
+                            yield {"type": "reasoning", "text": reasoning}
+                        if content:
+                            streamed_content.append(content)
+                            yield {"type": "content", "text": content}
+                    except Exception:
+                        continue
+        except (TimeoutError, socket.timeout) as exc:
+            raise RuntimeError(
+                f"本地模型回應已等到目前上限仍未完成。模型可能仍在生成超長內容、主機效能不足，或本輪上下文需要縮小。timeout={timeout_seconds}s。若經常發生，請減少釘選檔案或縮小問題範圍後再試。"
+            ) from exc
+        except urllib.error.HTTPError as exc:
+            raise_local_model_http_error(exc)
+        except urllib.error.URLError as exc:
+            raise_local_model_url_error(exc, timeout_seconds)
+        content_text = "".join(streamed_content).strip()
+        reasoning_text = "".join(streamed_reasoning).strip()
+        if not content_text and reasoning_text and not answer_only_retry_used:
+            answer_only_retry_used = True
+            yield {"type": "continuation", "text": "模型只輸出思考過程，已自動要求輸出最終答案。"}
+            working_messages = build_answer_only_retry_messages(working_messages)
+            continue
+        if finish_reason != "length" or remaining_continuations <= 0:
+            yield {"type": "finish", "finishReason": finish_reason}
+            break
+        remaining_continuations -= 1
+        yield {"type": "continuation", "text": "內容過長，已自動從上一句繼續。"}
+        working_messages.append({"role": "assistant", "content": content_text})
+        working_messages.append({"role": "user", "content": "請直接從上一句繼續回答，不要重複前文，不要重新開場。"})
 
 
 def parse_script_output(output: str) -> Dict[str, str]:
@@ -3685,7 +5307,38 @@ def get_status_payload() -> Dict[str, object]:
             "history": STATE.history[-20:],
             "pendingEdit": STATE.pending_edit,
             "uiState": STATE.ui_state,
+            "mediaAssessment": get_media_analysis_assessment(),
         }
+
+
+def get_models_payload() -> Dict[str, object]:
+    models: Dict[str, object] = {}
+    for key, capability in get_public_model_capabilities().items():
+        model_dir = get_model_directory(key)
+        config = get_registry_model_config(ROOT_DIR, key)
+        patterns = config.file_patterns if config else [get_model_file_pattern(key)]
+        primary = match_first_model_file(model_dir, patterns)
+        mmproj = None
+        if config and config.mmproj_patterns:
+            mmproj = match_first_model_file(model_dir, config.mmproj_patterns)
+        ready = False
+        if primary:
+            ready = is_running_model_server_compatible(key, get_model_alias(key), get_model_port(key), primary, mmproj)
+        models[key] = {
+            **capability,
+            "installed": bool(primary and primary.exists()),
+            "modelPath": str(primary) if primary else "",
+            "mmprojPath": str(mmproj) if mmproj else "",
+            "ready": ready,
+            "nativeImageReady": bool(mmproj and ready and model_supports_images(key)),
+        }
+    return {"models": models, "defaultModelKey": DEFAULT_MODEL_KEY, "mediaAssessment": get_media_analysis_assessment()}
+
+
+def write_sse_event(handler: BaseHTTPRequestHandler, event: str, payload: Dict[str, object]) -> None:
+    data = json.dumps(payload, ensure_ascii=False)
+    handler.wfile.write(f"event: {event}\ndata: {data}\n\n".encode("utf-8"))
+    handler.wfile.flush()
 
 
 class WebUIHandler(BaseHTTPRequestHandler):
@@ -3699,11 +5352,23 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             json_response(self, {"ok": True, "data": get_status_payload()})
             return
+        if parsed.path == "/api/models":
+            json_response(self, {"ok": True, "data": get_models_payload()})
+            return
+        if parsed.path == "/api/media-assessment":
+            json_response(self, {"ok": True, "data": get_media_analysis_assessment()})
+            return
         if parsed.path == "/api/file":
             self.handle_file_request(parsed)
             return
+        if parsed.path == "/api/file-tree":
+            self.handle_file_tree(parsed)
+            return
         if parsed.path.startswith("/api/tasks/"):
             self.handle_task_status(parsed.path)
+            return
+        if parsed.path.startswith("/api/agent/events/"):
+            self.handle_agent_events(parsed.path)
             return
         self.serve_static(parsed.path.lstrip("/"))
 
@@ -3724,8 +5389,32 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/chat":
             self.handle_chat()
             return
+        if parsed.path == "/api/chat/stream":
+            self.handle_chat_stream()
+            return
+        if parsed.path == "/api/models/ensure":
+            self.handle_model_ensure()
+            return
+        if parsed.path == "/api/index/rebuild":
+            self.handle_index_rebuild()
+            return
+        if parsed.path == "/api/rag/search":
+            self.handle_rag_search()
+            return
+        if parsed.path == "/api/agent/run":
+            self.handle_agent_run()
+            return
+        if parsed.path == "/api/actions/confirm":
+            self.handle_action_confirm()
+            return
+        if parsed.path.startswith("/api/actions/") and parsed.path.endswith("/confirm"):
+            self.handle_action_confirm(parsed.path.rsplit("/", 2)[-2])
+            return
         if parsed.path == "/api/uploads/image":
-            self.handle_upload_image()
+            self.handle_upload_file(require_image=True)
+            return
+        if parsed.path == "/api/uploads/file":
+            self.handle_upload_file()
             return
         if parsed.path == "/api/edit/plan":
             self.handle_edit_plan()
@@ -3798,19 +5487,150 @@ class WebUIHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             error_response(self, make_error("MODEL_DOWNLOAD_FAILED", "Failed to start model redownload.", str(exc)))
 
-    def handle_upload_image(self) -> None:
+    def handle_upload_file(self, require_image: bool = False) -> None:
         try:
             payload = self.read_json_body()
-            image = save_uploaded_image(
+            upload = save_uploaded_file(
                 str(payload.get("name", "")).strip(),
                 str(payload.get("mimeType", "")).strip(),
                 str(payload.get("data", "")),
             )
-            json_response(self, {"ok": True, "data": image})
+            if require_image and upload.get("kind") != "image":
+                raise ValueError("Uploaded file is not an image.")
+            json_response(self, {"ok": True, "data": upload})
         except ValueError as exc:
-            error_response(self, make_error("IMAGE_UPLOAD_FAILED", "Image upload failed.", str(exc)))
+            error_response(self, make_error("FILE_UPLOAD_FAILED", "File upload failed.", str(exc)))
         except Exception as exc:
-            error_response(self, make_error("IMAGE_UPLOAD_FAILED", "Image upload failed.", str(exc)))
+            error_response(self, make_error("FILE_UPLOAD_FAILED", "File upload failed.", str(exc)))
+
+    def handle_model_ensure(self) -> None:
+        try:
+            payload = self.read_json_body()
+            model_key = str(payload.get("modelKey", STATE.model_key or DEFAULT_MODEL_KEY)).strip().lower()
+            if model_key not in SUPPORTED_MODEL_KEYS:
+                raise ValueError("Unsupported model.")
+            result = ensure_local_model_server(model_key, port=get_model_port(model_key))
+            json_response(self, {"ok": True, "data": {"modelKey": model_key, **result}})
+        except ValueError as exc:
+            error_response(self, make_error("MODEL_INVALID", "Model validation failed.", str(exc)))
+        except RuntimeError as exc:
+            try:
+                error_payload = json.loads(str(exc))
+            except json.JSONDecodeError:
+                error_payload = make_error("MODEL_START_FAILED", "Failed to ensure model.", str(exc))
+            error_response(self, error_payload)
+        except Exception as exc:
+            error_response(self, make_error("MODEL_START_FAILED", "Failed to ensure model.", str(exc)))
+
+    def get_ready_project_root(self) -> Path:
+        with STATE_LOCK:
+            if STATE.ui_state != "ready" or not STATE.project_path:
+                raise ValueError("請先完成開啟專案。")
+            return Path(STATE.project_path)
+
+    def handle_index_rebuild(self) -> None:
+        try:
+            project_root = self.get_ready_project_root()
+            result = rebuild_index(project_root, DATA_DIR)
+            json_response(self, {"ok": True, "data": result})
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("INDEX_FAILED", "Rebuild index failed.", traceback.format_exc() or str(exc)))
+
+    def handle_rag_search(self) -> None:
+        try:
+            payload = self.read_json_body()
+            query = str(payload.get("query", "")).strip()
+            if not query:
+                raise ValueError("query is required.")
+            project_root = self.get_ready_project_root()
+            ensure_project_index(project_root)
+            result = search_index(project_root, DATA_DIR, query, int(payload.get("limit", 8) or 8))
+            json_response(self, {"ok": True, "data": result})
+        except ValueError as exc:
+            message = "Project is not ready." if str(exc) == "請先完成開啟專案。" else "RAG search failed."
+            code = "PROJECT_NOT_READY" if str(exc) == "請先完成開啟專案。" else "RAG_SEARCH_FAILED"
+            error_response(self, make_error(code, message, str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("RAG_SEARCH_FAILED", "RAG search failed.", str(exc)))
+
+    def handle_agent_run(self) -> None:
+        try:
+            payload = self.read_json_body()
+            message = str(payload.get("message", "")).strip()
+            if not message:
+                raise ValueError("message is required.")
+            project_root = self.get_ready_project_root()
+            result = run_agent(project_root, DATA_DIR, message)
+            run_id = uuid.uuid4().hex
+            AGENT_RUNS[run_id] = result
+            json_response(self, {"ok": True, "data": {"runId": run_id, **result}})
+        except ValueError as exc:
+            code = "PROJECT_NOT_READY" if str(exc) == "請先完成開啟專案。" else "AGENT_RUN_FAILED"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "Agent run failed."
+            error_response(self, make_error(code, message, str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("AGENT_RUN_FAILED", "Agent run failed.", str(exc)))
+
+    def handle_agent_events(self, path: str) -> None:
+        run_id = path.rsplit("/", 1)[-1]
+        result = AGENT_RUNS.get(run_id)
+        if not result:
+            error_response(self, make_error("AGENT_RUN_NOT_FOUND", "Agent run not found.", run_id), status=404)
+            return
+        json_response(self, {"ok": True, "data": result})
+
+    def handle_action_confirm(self, action_id_from_path: str = "") -> None:
+        try:
+            payload = self.read_json_body()
+            action_id = action_id_from_path or str(payload.get("actionId", "")).strip()
+            approved = bool(payload.get("approved", False))
+            if not action_id:
+                raise ValueError("actionId is required.")
+            project_root = self.get_ready_project_root()
+            result = confirm_agent_action(project_root, action_id, approved, DATA_DIR)
+            json_response(self, {"ok": True, "data": result})
+        except ValueError as exc:
+            error_response(self, make_error("ACTION_CONFIRM_FAILED", "Action confirmation failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("ACTION_CONFIRM_FAILED", "Action confirmation failed.", str(exc)))
+
+    def handle_file_tree(self, parsed: urllib.parse.ParseResult) -> None:
+        try:
+            query = urllib.parse.parse_qs(parsed.query)
+            search = query.get("query", [""])[0].strip().lower()
+            kind_filter = query.get("kind", [""])[0].strip().lower()
+            offset = max(0, int(query.get("offset", ["0"])[0] or 0))
+            limit = max(1, min(500, int(query.get("limit", ["200"])[0] or 200)))
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("Project is not ready.")
+                files = list(STATE.files)
+            rows = []
+            for item in files:
+                kind = file_kind_from_path(item.path)
+                if search and search not in item.path.lower() and search not in item.language.lower():
+                    continue
+                if kind_filter and kind_filter != kind:
+                    continue
+                rows.append({"path": item.path, "language": item.language, "kind": kind, "size": item.size})
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "data": {
+                        "items": rows[offset:offset + limit],
+                        "total": len(rows),
+                        "offset": offset,
+                        "limit": limit,
+                    },
+                },
+            )
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("FILE_TREE_FAILED", "File tree query failed.", str(exc)))
 
     def handle_analyze(self) -> None:
         try:
@@ -3820,7 +5640,6 @@ class WebUIHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
-                require_pinned_context(STATE)
                 model_key = requested_model_key or STATE.model_key
                 if model_key not in SUPPORTED_MODEL_KEYS:
                     raise ValueError("Unsupported model.")
@@ -3840,8 +5659,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
+            if snapshot.pinned_files:
                 context, context_coverage = build_project_context(project_root, snapshot, prompt)
-            if requested_model_key and requested_model_key != STATE.model_key:
+            else:
+                context, context_coverage = build_project_cache_context(project_root, snapshot, prompt, model_key)
+            with STATE_LOCK:
+                current_model_key = STATE.model_key
+            if requested_model_key and requested_model_key != current_model_key:
                 ensure_local_model_server(model_key, port=get_model_port(model_key))
                 with STATE_LOCK:
                     STATE.model_key = model_key
@@ -3870,8 +5694,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     )
                 )
             with STATE_LOCK:
-                STATE.history.append({"role": "assistant", "content": reply, "kind": "analysis"})
-            json_response(self, {"ok": True, "data": {"reply": reply, "contextCoverage": context_coverage}})
+                STATE.history.append({
+                    "role": "assistant",
+                    "content": reply,
+                    "kind": "analysis",
+                    "modelKey": model_key,
+                    "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)),
+                    "contextUsed": bool(context.strip()),
+                })
+            json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage}})
         except ModelReplyError as exc:
             error_response(self, exc.error)
         except ValueError as exc:
@@ -3883,8 +5714,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 code = "MODEL_INVALID"
                 message = "Model validation failed."
             else:
-                code = "PINNED_CONTEXT_REQUIRED"
-                message = "請先勾選釘選檔案。"
+                code = "ANALYZE_FAILED"
+                message = "Analyze failed."
             error_response(self, make_error(code, message, details))
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Analyze failed.", str(exc)))
@@ -3895,20 +5726,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
             message = str(payload.get("message", "")).strip()
             requested_model_key = str(payload.get("modelKey", "")).strip().lower()
             image_id = str(payload.get("imageId", "")).strip()
-            image = get_uploaded_image(image_id) if image_id else None
-            if not message and image is None:
+            attachment_ids = payload.get("attachmentIds", [])
+            if not isinstance(attachment_ids, list):
+                attachment_ids = []
+            if image_id:
+                attachment_ids = [image_id, *[str(item) for item in attachment_ids]]
+            attachments = [get_uploaded_file(str(item).strip()) for item in attachment_ids if str(item).strip()]
+            attachments = [item for item in attachments if item is not None]
+            images = [item for item in attachments if item.get("kind") == "image"]
+            if not message and not attachments:
                 raise ValueError("message or image is required.")
             with STATE_LOCK:
-                if STATE.ui_state != "ready" or not STATE.project_path:
-                    raise ValueError("請先完成開啟專案。")
                 model_key = requested_model_key or STATE.model_key
                 if model_key not in SUPPORTED_MODEL_KEYS:
                     raise ValueError("Unsupported model.")
-                if image is not None and not model_supports_images(model_key):
-                    raise ValueError("Selected model does not support image input. Please switch to qwen35.")
-                if image is None:
-                    require_pinned_context(STATE)
-                project_root = Path(STATE.project_path)
+                project_root = Path(STATE.project_path) if STATE.project_path else None
                 snapshot = SessionState(
                     project_path=STATE.project_path,
                     model_key=model_key,
@@ -3924,35 +5756,41 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
-                if snapshot.pinned_files:
+                effective_message = message
+                continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
+                if continuation_message:
+                    effective_message = continuation_message
+                    context = ""
+                    context_coverage = {"mode": "history-continuation", "historyItems": len(snapshot.history)}
+                elif project_root is not None and snapshot.pinned_files:
                     context, context_coverage = build_project_context(
                         project_root,
                         snapshot,
-                        message or "請根據圖片回答。",
-                        prefer_compact=image is not None and model_prefers_compact_image_context(model_key),
+                        effective_message or "請根據附件回答。",
+                        prefer_compact=bool(images) and model_prefers_compact_image_context(model_key),
                     )
+                elif project_root is not None:
+                    context, context_coverage = build_project_rag_context(project_root, snapshot, effective_message or "請根據附件回答。", model_key)
                 else:
                     context = ""
                     context_coverage = None
-            if image_id and image is None:
-                raise ValueError("Uploaded image not found. Please upload the image again.")
-            if model_key != STATE.model_key or image is not None:
-                ensure_local_model_server(model_key, port=get_model_port(model_key))
+                max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
+            if attachment_ids and not attachments:
+                raise ValueError("Uploaded file not found. Please upload the file again.")
+            ensure_local_model_server(model_key, port=get_model_port(model_key))
             model_alias = get_model_alias(model_key)
-            user_content = build_chat_user_content(context, message, image)
-            messages = build_raw_messages(
-                snapshot.model_key,
-                user_content,
-                build_chat_system_prompt(snapshot.model_key),
-            )
-            reply = call_local_model(
+            attachments = prepare_attachments_for_model(snapshot.model_key, attachments)
+            reply, fallback_info, _attachment_meta = call_local_model_with_attachment_fallback(
                 model_alias,
-                messages,
-                max_tokens=get_chat_max_tokens(snapshot.model_key),
+                snapshot.model_key,
+                context,
+                effective_message,
+                attachments,
+                build_chat_system_prompt(snapshot.model_key),
+                max_tokens=max_tokens,
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
-                continue_on_length=0,
-                raw_mode=True,
-            ).strip()
+                continue_on_length=get_continue_on_length(snapshot.model_key),
+            )
             if not reply:
                 raise ModelReplyError(
                     make_error(
@@ -3965,12 +5803,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 STATE.model_key = model_key
                 STATE.model_alias = model_alias
-                user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat"}
-                if image is not None:
-                    user_record["attachments"] = [build_history_image_attachment(image)]
+                user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat", "contextUsed": bool(context.strip())}
+                if attachments:
+                    user_record["attachments"] = [build_history_attachment(item) for item in attachments]
                 STATE.history.append(user_record)
-                STATE.history.append({"role": "assistant", "content": reply, "kind": "chat"})
-            json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "contextCoverage": context_coverage}})
+                STATE.history.append({"role": "assistant", "content": reply, "kind": "chat", "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextUsed": bool(context.strip())})
+            json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "contextCoverage": context_coverage, "attachmentFallback": fallback_info}})
         except ModelReplyError as exc:
             error_response(self, exc.error)
         except ValueError as exc:
@@ -3981,18 +5819,173 @@ class WebUIHandler(BaseHTTPRequestHandler):
             elif details.startswith("Selected model does not support image input"):
                 code = "IMAGE_MODEL_UNSUPPORTED"
                 message = "Selected model does not support image input."
-            elif details.startswith("Uploaded image not found"):
-                code = "IMAGE_UPLOAD_FAILED"
-                message = "Uploaded image is not available."
+            elif details.startswith("Uploaded image not found") or details.startswith("Uploaded file not found"):
+                code = "FILE_UPLOAD_FAILED"
+                message = "Uploaded file is not available."
             elif details.startswith("Unsupported model"):
                 code = "MODEL_INVALID"
                 message = "Model validation failed."
+            elif details == "message or image is required.":
+                code = "CHAT_EMPTY"
+                message = "message or image is required."
             else:
-                code = "PINNED_CONTEXT_REQUIRED"
-                message = "請先勾選釘選檔案。"
+                code = "CHAT_FAILED"
+                message = "Chat failed."
             error_response(self, make_error(code, message, details))
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Chat failed.", str(exc)))
+
+    def handle_chat_stream(self) -> None:
+        try:
+            payload = self.read_json_body()
+            message = str(payload.get("message", "")).strip()
+            requested_model_key = str(payload.get("modelKey", "")).strip().lower()
+            image_id = str(payload.get("imageId", "")).strip()
+            attachment_ids = payload.get("attachmentIds", [])
+            if not isinstance(attachment_ids, list):
+                attachment_ids = []
+            if image_id:
+                attachment_ids = [image_id, *[str(item) for item in attachment_ids]]
+            attachments = [get_uploaded_file(str(item).strip()) for item in attachment_ids if str(item).strip()]
+            attachments = [item for item in attachments if item is not None]
+            images = [item for item in attachments if item.get("kind") == "image"]
+            if not message and not attachments:
+                raise ValueError("message or image is required.")
+            with STATE_LOCK:
+                model_key = requested_model_key or STATE.model_key
+                if model_key not in SUPPORTED_MODEL_KEYS:
+                    raise ValueError("Unsupported model.")
+                project_root = Path(STATE.project_path) if STATE.project_path else None
+                snapshot = SessionState(
+                    project_path=STATE.project_path,
+                    model_key=model_key,
+                    model_alias=get_model_alias(model_key),
+                    summary=STATE.summary,
+                    tree=list(STATE.tree),
+                    files=list(STATE.files),
+                    entrypoints=list(STATE.entrypoints),
+                    tests=list(STATE.tests),
+                    pinned_files=list(STATE.pinned_files),
+                    current_preview_path=None,
+                    history=list(STATE.history),
+                    pending_edit=STATE.pending_edit,
+                    ui_state=STATE.ui_state,
+                )
+                effective_message = message
+                continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
+                if continuation_message:
+                    effective_message = continuation_message
+                    context = ""
+                    context_coverage = {"mode": "history-continuation", "historyItems": len(snapshot.history)}
+                elif project_root is not None and snapshot.pinned_files:
+                    context, context_coverage = build_project_context(
+                        project_root,
+                        snapshot,
+                        effective_message or "請根據附件回答。",
+                        prefer_compact=bool(images) and model_prefers_compact_image_context(model_key),
+                    )
+                elif project_root is not None:
+                    context, context_coverage = build_project_rag_context(project_root, snapshot, effective_message or "請根據附件回答。", model_key)
+                else:
+                    context = ""
+                    context_coverage = None
+                max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
+            if attachment_ids and not attachments:
+                raise ValueError("Uploaded file not found. Please upload the file again.")
+        except ValueError as exc:
+            details = str(exc)
+            code = "MODEL_INVALID" if details.startswith("Unsupported model") else "CHAT_FAILED"
+            error_response(self, make_error(code, "Chat failed.", details))
+            return
+        except Exception as exc:
+            error_response(self, make_error("CHAT_FAILED", "Chat failed.", str(exc)))
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+
+        reasoning_parts: List[str] = []
+        content_parts: List[str] = []
+        reasoning_open = False
+        try:
+            write_sse_event(self, "status", {"message": "啟動本地模型", "modelKey": model_key})
+            ensure_local_model_server(model_key, port=get_model_port(model_key))
+            model_alias = get_model_alias(model_key)
+            attachments = prepare_attachments_for_model(snapshot.model_key, attachments)
+            write_sse_event(self, "context", {"contextCoverage": context_coverage})
+            write_sse_event(self, "model", {"modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key))})
+            for event in stream_local_model_with_attachment_fallback(
+                model_alias,
+                snapshot.model_key,
+                context,
+                effective_message,
+                attachments,
+                build_chat_system_prompt(snapshot.model_key),
+                max_tokens=max_tokens,
+                timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
+                continue_on_length=get_continue_on_length(snapshot.model_key),
+            ):
+                event_type = event.get("type", "content")
+                text = str(event.get("text", ""))
+                if event_type == "finish":
+                    continue
+                if event_type == "attachment_fallback":
+                    write_sse_event(
+                        self,
+                        "attachment_fallback",
+                        {
+                            "reason": str(event.get("reason", "")),
+                            "fallbackKinds": event.get("fallbackKinds", []),
+                            "retried": bool(event.get("retried", False)),
+                        },
+                    )
+                    continue
+                if event_type == "continuation":
+                    write_sse_event(self, "continuation", {"text": text or "內容過長，已自動續寫。"})
+                    continue
+                if not text:
+                    continue
+                if event_type == "reasoning":
+                    reasoning_parts.append(text)
+                    if not reasoning_open:
+                        reasoning_open = True
+                        write_sse_event(self, "reasoning_start", {"modelKey": model_key})
+                    write_sse_event(self, "reasoning", {"text": text})
+                else:
+                    if reasoning_open:
+                        reasoning_open = False
+                        write_sse_event(self, "reasoning_end", {})
+                    content_parts.append(text)
+                    write_sse_event(self, "content", {"text": text})
+            if reasoning_open:
+                write_sse_event(self, "reasoning_end", {})
+            reasoning = "".join(reasoning_parts).strip()
+            content = "".join(content_parts).strip()
+            reply_parts = []
+            if reasoning:
+                reply_parts.append(f"<think>\n{reasoning}\n</think>")
+            if content:
+                reply_parts.append(content)
+            reply = "\n\n".join(reply_parts).strip()
+            if not reply:
+                raise ModelReplyError(make_error("MODEL_EMPTY_REPLY", "模型沒有產生可顯示的最終答案。", "", extra={"modelKey": model_key}))
+            with STATE_LOCK:
+                STATE.model_key = model_key
+                STATE.model_alias = model_alias
+                user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat", "contextUsed": bool(context.strip())}
+                if attachments:
+                    user_record["attachments"] = [build_history_attachment(item) for item in attachments]
+                STATE.history.append(user_record)
+                STATE.history.append({"role": "assistant", "content": reply, "kind": "chat", "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextUsed": bool(context.strip())})
+            write_sse_event(self, "done", {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage})
+        except ModelReplyError as exc:
+            write_sse_event(self, "error", exc.error)
+        except Exception as exc:
+            write_sse_event(self, "error", make_error("MODEL_START_FAILED", "Chat failed.", str(exc), extra={"modelKey": model_key}))
 
     def handle_edit_plan(self) -> None:
         try:
@@ -4088,8 +6081,29 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if relative_path not in {file.path for file in STATE.files}:
                     raise ValueError("File is not part of the indexed project.")
                 STATE.current_preview_path = relative_path
+            target = (project_root / relative_path).resolve()
+            kind = file_kind_from_path(relative_path)
+            if kind == "image" and target.stat().st_size <= MAX_UPLOAD_BYTES:
+                mime_type, _ = mimetypes.guess_type(str(target))
+                data_url = f"data:{mime_type or 'application/octet-stream'};base64,{base64.b64encode(target.read_bytes()).decode('ascii')}"
+                json_response(self, {"ok": True, "data": {"path": relative_path, "content": "", "kind": kind, "dataUrl": data_url}})
+                return
+            if kind == "document":
+                content = read_file_full(project_root, relative_path)
+                json_response(self, {"ok": True, "data": {"path": relative_path, "content": content, "kind": kind}})
+                return
+            if kind != "text":
+                stat = target.stat()
+                content = (
+                    f"{relative_path}\n"
+                    f"類型: {kind}\n"
+                    f"大小: {human_size(stat.st_size)}\n"
+                    "此檔案可被列入附件或 RAG metadata；目前檔案預覽不直接解析其二進位內容。"
+                )
+                json_response(self, {"ok": True, "data": {"path": relative_path, "content": content, "kind": kind}})
+                return
             content = read_file_full(project_root, relative_path)
-            json_response(self, {"ok": True, "data": {"path": relative_path, "content": content}})
+            json_response(self, {"ok": True, "data": {"path": relative_path, "content": content, "kind": kind}})
         except ValueError as exc:
             error_response(self, make_error("PROJECT_NOT_READY", "Cannot preview file.", str(exc)))
 

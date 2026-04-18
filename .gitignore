@@ -3,6 +3,9 @@ logs/*.txt
 downloads/
 models/
 runtime/
+data/indexes/
+data/agent-actions.jsonl
+.codex-artifacts/
 __pycache__/
 *.pyc
 Thumbs.db
