@@ -31,7 +31,7 @@ if str(ROOT_DIR) not in sys.path:
 START_SERVER = ROOT_DIR / "scripts" / "start-server.cmd"
 GAME_DIR = Path(r"C:\Games")
 MODELS = ("qwen35", "gemma4")
-CONTEXTS = (8192, 12288, 16384)
+CONTEXTS = (4096, 8192, 12288, 16384)
 PORT_BASE = {
     "qwen35": 18080,
     "gemma4": 18180,
@@ -227,9 +227,10 @@ def probe_model(model_key: str, context_size: int, port: int, include_structured
     return result
 
 
-def build_summary(results):
+def build_summary(results, selected_models=None):
     lines = ["# Model Context Bench", ""]
-    for model_key in MODELS:
+    selected = list(selected_models or MODELS)
+    for model_key in selected:
         model_results = [item for item in results if item["model"] == model_key]
         lines.append(f"## {model_key}")
         successful = [item for item in model_results if item["startup_ok"] and all(test.get("ok") for test in item["tests"].values())]
@@ -269,7 +270,7 @@ def main():
     logs_dir = ROOT_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     (logs_dir / "model-context-bench.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    (logs_dir / "model-context-summary.md").write_text(build_summary(results), encoding="utf-8")
+    (logs_dir / "model-context-summary.md").write_text(build_summary(results, selected_models=selected_models), encoding="utf-8")
     print("ok")
 
 

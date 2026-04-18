@@ -53,7 +53,7 @@
       "alias": "gemma4-local",
       "displayName": "Gemma 4 26B",
       "port": 8081,
-      "contextWindow": 4096,
+      "contextWindow": 16384,
       "defaultQuant": "UD-Q4_K_M",
       "filePattern": "*gemma-4-26B-A4B-it*UD-Q4_K_M*.gguf",
       "filePatterns": [
