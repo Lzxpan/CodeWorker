@@ -173,6 +173,11 @@ SUPPORTED_FILE_EXTENSIONS = (
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     "dist", "build", "target", "out", ".idea", ".vscode", ".next", ".nuxt", ".cache", "coverage",
+    ".tmp", ".codex-artifacts", "runtime", "models", "downloads",
+}
+GENERATED_PATH_PREFIXES = {
+    ("data", "indexes"),
+    ("logs",),
 }
 IGNORED_EXTENSIONS = {
     ".zip", ".7z", ".gz",
@@ -2148,11 +2153,29 @@ root.destroy()
 
 def collect_project_files(project_root: Path) -> List[ProjectFile]:
     results: List[ProjectFile] = []
-    ignored_dirs = {item.lower() for item in IGNORED_DIRS}
+
+    def should_ignore_project_path(path: Path) -> bool:
+        try:
+            relative = path.relative_to(project_root)
+        except ValueError:
+            return False
+        parts = tuple(part.lower() for part in relative.parts)
+        if not parts:
+            return False
+        if any(part in IGNORED_DIRS for part in parts):
+            return True
+        return any(parts[: len(prefix)] == prefix for prefix in GENERATED_PATH_PREFIXES)
+
     for root, dirs, files in os.walk(project_root):
-        dirs[:] = [item for item in dirs if item.lower() not in ignored_dirs]
+        root_path = Path(root)
+        dirs[:] = [
+            item for item in dirs
+            if not should_ignore_project_path(root_path / item)
+        ]
         for filename in files:
             path = Path(root) / filename
+            if should_ignore_project_path(path):
+                continue
             suffix = path.suffix.lower()
             if suffix in IGNORED_EXTENSIONS:
                 continue
@@ -3588,12 +3611,10 @@ def build_project_rag_context(
                 "PROJECT RAG CONTEXT",
                 "未勾選 pinned files；本次使用 CodeWorker 的全專案搜尋快取與 RAG 檢索結果。",
                 "這不是把整個專案原始碼完整丟給模型，而是使用快取的 skeleton、summary、symbols、imports 與相關 chunks。",
+                "若使用者問「哪個檔案」、「哪一段」、「在哪裡」或類似定位問題，請優先使用 RAG MATCHES 的檔案路徑與行號回答。",
                 f"專案路徑: {project_root}",
                 f"快取狀態: {'本次重建' if index_rebuilt else '沿用既有快取'}",
                 f"快取檔案數: {index_result.get('files', len(skeleton))}",
-                "",
-                "PROJECT SUMMARY",
-                state.summary or build_summary(project_root, state.files, state.entrypoints, state.tests),
             ]
         ),
         total_limit,
@@ -3623,6 +3644,17 @@ def build_project_rag_context(
                 "source": source,
             })
         append_context_section(chunks, "\n".join(match_lines), total_limit)
+
+    append_context_section(
+        chunks,
+        "\n".join(
+            [
+                "PROJECT SUMMARY",
+                state.summary or build_summary(project_root, state.files, state.entrypoints, state.tests),
+            ]
+        ),
+        total_limit,
+    )
 
     skeleton_lines = ["CACHED PROJECT SKELETON"]
     skeleton_budget_count = 120

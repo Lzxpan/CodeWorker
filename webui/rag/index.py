@@ -11,10 +11,12 @@ from typing import Dict, Iterable, List, Optional, Tuple
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     "dist", "build", "target", "out", ".idea", ".vscode", ".next", ".nuxt", ".cache", "coverage",
+    ".tmp", ".codex-artifacts", "runtime", "models", "downloads",
 }
 TEXT_EXTENSIONS = {
-    ".pas", ".dfm", ".dpr", ".dproj", ".cpp", ".c", ".h", ".hpp", ".java", ".py", ".js", ".jsx", ".ts",
-    ".tsx", ".go", ".rs", ".rust", ".swift", ".lua", ".sql", ".sh", ".cs", ".html", ".css", ".json",
+    ".pas", ".dfm", ".dpr", ".dproj", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".java", ".kt", ".py",
+    ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rust", ".swift", ".lua", ".sql", ".sh", ".bat",
+    ".cmd", ".ps1", ".cs", ".html", ".css", ".scss", ".vue", ".svelte", ".json",
     ".yaml", ".yml", ".xml", ".toml", ".ini", ".csv", ".env", ".txt", ".md", ".tex", ".rtf",
 }
 DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx"}
@@ -27,10 +29,46 @@ LANGUAGE_BY_EXTENSION = {
     ".java": "Java", ".go": "Go", ".rs": "Rust", ".cs": "C#", ".cpp": "C++", ".c": "C", ".h": "C/C++ Header",
     ".hpp": "C/C++ Header", ".sql": "SQL", ".html": "HTML", ".css": "CSS", ".json": "JSON",
     ".yaml": "YAML", ".yml": "YAML", ".xml": "XML", ".toml": "TOML", ".ini": "INI",
+    ".sh": "Shell", ".bat": "Batch", ".cmd": "Batch", ".ps1": "PowerShell",
     ".md": "Markdown", ".txt": "Text", ".pdf": "PDF", ".doc": "Word", ".docx": "Word",
     ".png": "Image", ".jpg": "Image", ".jpeg": "Image", ".webp": "Image", ".mp3": "Audio",
     ".wav": "Audio", ".mp4": "Video", ".mov": "Video", ".webm": "Video",
 }
+GENERATED_PATH_PREFIXES = {
+    ("data", "indexes"),
+    ("logs",),
+}
+CODE_LOCATION_HINTS = (
+    "在哪", "哪個檔案", "哪一段", "哪裡", "位置", "第幾行", "line", "section",
+    "code", "程式碼", "函式", "function", "class", "方法",
+)
+MODEL_LOAD_HINTS = (
+    "model", "模型", "加載", "載入", "加载", "load", "loading", "啟動", "启动",
+    "llama", "gguf", "mmproj",
+)
+MODEL_LOAD_EXPANSIONS = {
+    "ensure_runtime_and_model",
+    "ensure_local_model_server",
+    "launch_llama_server",
+    "llama-server",
+    "MODEL_FILE",
+    "MODEL_MMPROJ",
+    "model_file",
+    "model_alias",
+    "--model",
+    "--mmproj",
+    "resolve_model_env",
+    "start-server",
+    "bootstrap.manifest",
+    "get_model_config",
+    "MODEL_PORTS",
+}
+CODE_EXTENSIONS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".go", ".rs", ".cs", ".cpp", ".cc", ".cxx",
+    ".c", ".h", ".hpp", ".swift", ".lua", ".sql", ".sh", ".bat", ".cmd", ".ps1", ".html", ".css",
+    ".scss", ".vue", ".svelte",
+}
+CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".toml", ".ini", ".env", ".xml"}
 
 
 def project_hash(project_root: Path) -> str:
@@ -39,6 +77,19 @@ def project_hash(project_root: Path) -> str:
 
 def index_dir(data_dir: Path, project_root: Path) -> Path:
     return data_dir / "indexes" / project_hash(project_root)
+
+
+def should_ignore_path(project_root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(project_root)
+    except ValueError:
+        return False
+    parts = tuple(part.lower() for part in relative.parts)
+    if not parts:
+        return False
+    if any(part in IGNORED_DIRS for part in parts):
+        return True
+    return any(parts[: len(prefix)] == prefix for prefix in GENERATED_PATH_PREFIXES)
 
 
 def file_kind(path: Path) -> str:
@@ -60,11 +111,16 @@ def file_language(path: Path) -> str:
 
 def iter_text_files(project_root: Path, max_files: int = 5000) -> Iterable[Path]:
     count = 0
-    ignored = {item.lower() for item in IGNORED_DIRS}
     for root, dirs, files in os.walk(project_root):
-        dirs[:] = [item for item in dirs if item.lower() not in ignored]
+        root_path = Path(root)
+        dirs[:] = [
+            item for item in dirs
+            if not should_ignore_path(project_root, root_path / item)
+        ]
         for filename in files:
             path = Path(root) / filename
+            if should_ignore_path(project_root, path):
+                continue
             suffix = path.suffix.lower()
             if suffix not in INDEXABLE_EXTENSIONS:
                 continue
@@ -353,6 +409,76 @@ def normalize_fts_query(query: str) -> str:
     return " OR ".join(f'"{token}"' for token in tokens[:12])
 
 
+def query_tokens(query: str) -> List[str]:
+    tokens = [
+        token.lower()
+        for token in re.findall(r"[A-Za-z_][\w.\-/]*|\d+", query, flags=re.UNICODE)
+        if len(token.strip()) >= 2
+    ]
+    return list(dict.fromkeys(tokens))
+
+
+def is_code_location_query(query: str) -> bool:
+    lowered = query.lower()
+    return any(hint.lower() in lowered for hint in CODE_LOCATION_HINTS)
+
+
+def is_model_loading_query(query: str) -> bool:
+    lowered = query.lower()
+    return any(hint.lower() in lowered for hint in MODEL_LOAD_HINTS)
+
+
+def expand_query_terms(query: str) -> List[str]:
+    terms = query_tokens(query)
+    lowered = query.lower()
+    if is_model_loading_query(query):
+        terms.extend(term.lower() for term in MODEL_LOAD_EXPANSIONS)
+    if "開啟專案" in lowered or "open project" in lowered:
+        terms.extend(["open_project", "handle_open_project", "collect_project_files", "analyze"])
+    if "rag" in lowered or "檢索" in lowered or "搜尋" in lowered:
+        terms.extend(["build_project_rag_context", "search_index", "rebuild_index", "rag"])
+    return list(dict.fromkeys(term for term in terms if len(term) >= 2))
+
+
+def path_rank_bonus(path: str, query: str) -> float:
+    lowered_path = path.lower()
+    suffix = Path(path).suffix.lower()
+    score = 0.0
+    if suffix in CODE_EXTENSIONS:
+        score += 0.45
+    elif suffix in CONFIG_EXTENSIONS:
+        score += 0.18
+    elif suffix in {".md", ".txt", ".rtf", ".tex"}:
+        score -= 0.12
+    if should_ignore_path(Path("."), Path(path)):
+        score -= 2.0
+    if is_model_loading_query(query):
+        if lowered_path in {"webui/server.py", "scripts/launch_llama_server.py", "scripts/start-server.cmd", "scripts/resolve_model_env.py"}:
+            score += 0.75
+        if lowered_path.startswith(("docs/", "data/", "logs/")):
+            score -= 0.45
+    return score
+
+
+def content_rank_bonus(path: str, content: str, query: str, source: str) -> float:
+    lowered_content = content.lower()
+    terms = expand_query_terms(query)
+    score = path_rank_bonus(path, query)
+    if source == "file-metadata":
+        score -= 0.35 if is_code_location_query(query) else 0.05
+    elif source == "fts":
+        score += 0.18
+    for term in terms[:24]:
+        term_lower = term.lower()
+        if term_lower in path.lower():
+            score += 0.18
+        if term_lower in lowered_content:
+            score += min(lowered_content.count(term_lower), 4) * 0.08
+    if is_code_location_query(query) and re.search(r"\b(def|class|function|async function|subprocess|Popen|llama-server|--model)\b", content):
+        score += 0.35
+    return score
+
+
 def row_to_match(row: Tuple[object, ...], source: str, score: float) -> Dict[str, object]:
     path, chunk_index, content, line_start, line_end, kind = row
     return {
@@ -375,7 +501,10 @@ def search_index(project_root: Path, data_dir: Path, query: str, limit: int = 8)
     conn.row_factory = sqlite3.Row
     matches: List[Dict[str, object]] = []
     seen = set()
-    fetch_limit = max(limit * 3, limit)
+    fetch_limit = max(limit * 8, 40)
+    max_candidates = max(limit * 12, 80)
+    expanded_terms = expand_query_terms(query)
+    expanded_query = " ".join([query, *expanded_terms])
 
     def add_rows(rows: Iterable[sqlite3.Row], source: str, score: float) -> None:
         for row in rows:
@@ -383,22 +512,25 @@ def search_index(project_root: Path, data_dir: Path, query: str, limit: int = 8)
             if key in seen:
                 continue
             seen.add(key)
+            content = str(row["content"] or "")
+            path = str(row["path"])
+            ranked_score = score + content_rank_bonus(path, content, query, source)
             matches.append(
                 {
-                    "path": str(row["path"]),
+                    "path": path,
                     "chunkIndex": int(row["chunk_index"] or 0),
                     "lineStart": int(row["line_start"] or 1),
                     "lineEnd": int(row["line_end"] or row["line_start"] or 1),
-                    "content": str(row["content"] or "")[:1800],
+                    "content": content[:1800],
                     "kind": str(row["kind"] or "text"),
                     "source": source,
-                    "score": score,
+                    "score": round(ranked_score, 4),
                 }
             )
-            if len(matches) >= limit:
+            if len(matches) >= max_candidates:
                 return
 
-    fts_query = normalize_fts_query(query)
+    fts_query = normalize_fts_query(expanded_query)
     if fts_query:
         try:
             rows = conn.execute(
@@ -415,10 +547,9 @@ def search_index(project_root: Path, data_dir: Path, query: str, limit: int = 8)
         except sqlite3.OperationalError:
             pass
 
-    tokens = [token.lower() for token in re.findall(r"[\w.\-/]+", query, flags=re.UNICODE) if len(token) >= 2]
-    like_terms = tokens[:8] or [query.lower()]
+    like_terms = expanded_terms[:20] or [query.lower()]
     for token in like_terms:
-        if len(matches) >= limit:
+        if len(matches) >= max_candidates:
             break
         like = f"%{token}%"
         rows = conn.execute(
@@ -433,7 +564,7 @@ def search_index(project_root: Path, data_dir: Path, query: str, limit: int = 8)
         add_rows(rows, "like", 0.7)
 
     for token in like_terms:
-        if len(matches) >= limit:
+        if len(matches) >= max_candidates:
             break
         like = f"%{token}%"
         rows = conn.execute(
@@ -451,6 +582,7 @@ def search_index(project_root: Path, data_dir: Path, query: str, limit: int = 8)
         add_rows(rows, "file-metadata", 0.5)
 
     conn.close()
+    matches.sort(key=lambda item: (-float(item.get("score", 0) or 0), str(item.get("path", "")), int(item.get("chunkIndex", 0) or 0)))
     return {"ready": True, "matches": matches[:limit]}
 
 

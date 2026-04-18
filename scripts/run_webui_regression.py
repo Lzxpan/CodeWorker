@@ -334,6 +334,79 @@ def test_rag_manifest_search_and_stale():
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_rag_model_loading_locator_prefers_source_chunks():
+    root = ROOT / ".tmp" / "regression-model-locator"
+    data_dir = ROOT / ".tmp" / "regression-model-locator-index"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    (root / "webui").mkdir(parents=True, exist_ok=True)
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "docs").mkdir(parents=True, exist_ok=True)
+    (root / "runtime" / "WinPython" / "python" / "Lib").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "indexes" / "cached").mkdir(parents=True, exist_ok=True)
+    (root / "webui" / "server.py").write_text(
+        "def ensure_runtime_and_model(model_key):\n"
+        "    model_file = resolve_model_file(model_key)\n"
+        "    return model_file\n\n"
+        "def ensure_local_model_server(model_key):\n"
+        "    model_file = ensure_runtime_and_model(model_key)\n"
+        "    return launch_llama_server(model_file)\n",
+        encoding="utf-8",
+    )
+    (root / "scripts" / "launch_llama_server.py").write_text(
+        "import subprocess\n\n"
+        "def launch_llama_server(model_file, mmproj_file=None):\n"
+        "    args = ['llama-server', '--model', str(model_file)]\n"
+        "    if mmproj_file:\n"
+        "        args += ['--mmproj', str(mmproj_file)]\n"
+        "    return subprocess.Popen(args)\n",
+        encoding="utf-8",
+    )
+    (root / "scripts" / "start-server.cmd").write_text(
+        "@echo off\r\n"
+        "set MODEL_FILE=%~1\r\n"
+        "llama-server.exe --model \"%MODEL_FILE%\"\r\n",
+        encoding="utf-8",
+    )
+    (root / "config" / "bootstrap.manifest.json").write_text(
+        '{"models":{"gemma4":{"repo":"example/gemma","filePatterns":["*.gguf"]}}}',
+        encoding="utf-8",
+    )
+    (root / "docs" / "model-notes.md").write_text(
+        "# Model loading\nThis document mentions model loading but is not the implementation.\n",
+        encoding="utf-8",
+    )
+    (root / "runtime" / "WinPython" / "python" / "Lib" / "noise.py").write_text(
+        "def ensure_runtime_and_model():\n    return 'do not index bundled runtime'\n",
+        encoding="utf-8",
+    )
+    (root / "data" / "indexes" / "cached" / "manifest.json").write_text(
+        '{"summary":"do not index cached RAG output"}',
+        encoding="utf-8",
+    )
+    try:
+        result = rebuild_index(root, data_dir)
+        assert_true(result["files"] == 5, "RAG should index project source, scripts, config, and docs only")
+        matches = search_index(root, data_dir, "請問加載model的code在哪個檔案的哪一段？", limit=5)["matches"]
+        assert_true(matches, "model loading locator query should return matches")
+        assert_true(
+            matches[0]["path"] in {"webui/server.py", "scripts/launch_llama_server.py", "scripts/start-server.cmd"},
+            "model loading locator should prefer source code chunks over summaries",
+        )
+        assert_true(
+            "llama-server" in matches[0]["content"] or "ensure_runtime_and_model" in matches[0]["content"],
+            "top model loading match should include implementation content",
+        )
+        assert_true(
+            all(not str(item["path"]).startswith(("runtime/", "data/indexes/")) for item in matches),
+            "RAG search must not return bundled runtime or cached index files",
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def test_project_rag_context_without_pins():
     root = ROOT / ".tmp" / "regression-chat-project"
     data_dir = ROOT / ".tmp" / "regression-chat-index"
@@ -371,6 +444,7 @@ def main():
         test_model_file_matching_does_not_fallback_on_pattern_miss,
         test_http_error_body_is_preserved,
         test_rag_manifest_search_and_stale,
+        test_rag_model_loading_locator_prefers_source_chunks,
         test_project_rag_context_without_pins,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
