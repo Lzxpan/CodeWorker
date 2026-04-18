@@ -38,6 +38,13 @@ def test_default_model_is_gemma4():
     assert_true(server.get_models_payload()["defaultModelKey"] == "gemma4", "/api/models defaultModelKey should be gemma4")
 
 
+def test_gemma_context_window_matches_local_bench():
+    assert_true(server.get_model_context_limit("gemma4") == 16384, "gemma4 should use the locally validated 16384 context window")
+    assert_true(server.get_chat_max_tokens("gemma4") <= 4096, "gemma4 response budget should leave room for input context")
+    limits = server.get_context_limits("gemma4", single_file_focus=False)
+    assert_true(limits["total_chars"] >= 20000, "gemma4 RAG char budget should use the larger validated context window")
+
+
 def test_gemma_manifest_uses_unsloth_with_mmproj():
     manifest = json.loads((ROOT / "config" / "bootstrap.manifest.json").read_text(encoding="utf-8"))
     gemma = manifest["models"]["gemma4"]
@@ -609,6 +616,7 @@ def main():
         test_no_context_chat_payload,
         test_request_max_tokens_clamps_to_default,
         test_default_model_is_gemma4,
+        test_gemma_context_window_matches_local_bench,
         test_gemma_manifest_uses_unsloth_with_mmproj,
         test_model_file_matching_does_not_fallback_on_pattern_miss,
         test_http_error_body_is_preserved,

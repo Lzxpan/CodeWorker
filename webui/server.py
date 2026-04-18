@@ -67,7 +67,7 @@ MODEL_PORTS = {
     "qwen35": 8082,
 }
 MODEL_DEFAULT_CONTEXT = {
-    "gemma4": 4096,
+    "gemma4": 16384,
     "qwen35": 12288,
 }
 MODEL_CHAT_MAX_TOKENS = {
@@ -91,7 +91,16 @@ MODEL_HISTORY_LIMIT = {
     "qwen35": 6,
 }
 MODEL_CONTEXT_LIMITS = {
-    "gemma4": {"max_files": 2, "file_chars": 2600, "total_chars": 9000, "single_file_chars": 18000, "single_total_chars": 18000},
+    "gemma4": {
+        "max_files": 3,
+        "file_chars": 5200,
+        "total_chars": 28000,
+        "single_file_chars": 26000,
+        "single_total_chars": 28000,
+        "full_max_files": 3,
+        "full_total_chars": 30000,
+        "full_file_chars": 24000,
+    },
     "qwen35": {
         "max_files": 4,
         "file_chars": 6400,
@@ -433,7 +442,10 @@ def get_chat_history_limit(model_key: str) -> int:
 
 
 def get_chat_max_tokens(model_key: str) -> int:
-    return MODEL_CHAT_MAX_TOKENS.get(model_key, MODEL_CHAT_MAX_TOKENS[DEFAULT_MODEL_KEY])
+    configured = MODEL_CHAT_MAX_TOKENS.get(model_key, MODEL_CHAT_MAX_TOKENS[DEFAULT_MODEL_KEY])
+    context_limit = max(1024, get_model_context_limit(model_key))
+    context_ceiling = max(512, context_limit // 4)
+    return min(configured, context_ceiling)
 
 
 def get_model_generation_options(model_key: str) -> Dict[str, object]:
@@ -450,7 +462,10 @@ def get_model_generation_options(model_key: str) -> Dict[str, object]:
 
 
 def get_analyze_max_tokens(model_key: str) -> int:
-    return MODEL_ANALYZE_MAX_TOKENS.get(model_key, MODEL_ANALYZE_MAX_TOKENS[DEFAULT_MODEL_KEY])
+    configured = MODEL_ANALYZE_MAX_TOKENS.get(model_key, MODEL_ANALYZE_MAX_TOKENS[DEFAULT_MODEL_KEY])
+    context_limit = max(1024, get_model_context_limit(model_key))
+    context_ceiling = max(512, context_limit // 5)
+    return min(configured, context_ceiling)
 
 
 def get_chat_timeout_seconds(model_key: str) -> int:
@@ -473,7 +488,25 @@ def get_context_limits(model_key: str, single_file_focus: bool, prefer_compact: 
         limits["full_max_files"] = 0
         limits["full_total_chars"] = 0
         limits["full_file_chars"] = 0
+    char_ceiling = estimate_input_char_budget(model_key, get_chat_max_tokens(model_key))
+    for key in ("total_chars", "full_total_chars", "single_total_chars"):
+        if key in limits and int(limits.get(key, 0) or 0) > 0:
+            limits[key] = min(int(limits[key]), char_ceiling)
+    for key in ("file_chars", "full_file_chars", "single_file_chars"):
+        if key in limits and int(limits.get(key, 0) or 0) > 0:
+            limits[key] = min(int(limits[key]), char_ceiling)
     return limits
+
+
+def estimate_input_char_budget(model_key: str, max_response_tokens: Optional[int] = None) -> int:
+    context_limit = max(1024, get_model_context_limit(model_key))
+    response_tokens = int(max_response_tokens or get_chat_max_tokens(model_key))
+    response_tokens = max(256, min(response_tokens, max(512, context_limit // 3)))
+    reserve_tokens = max(768, context_limit // 16)
+    input_tokens = max(512, context_limit - response_tokens - reserve_tokens)
+    # Source code is often 3-4 chars/token, but Chinese prompts and paths are denser.
+    # 2.2 keeps enough headroom for chat templates, memory, attachments, and system prompt.
+    return max(3500, int(input_tokens * 2.2))
 
 
 def make_error(
@@ -1686,6 +1719,11 @@ def is_codeworker_model_command(commandline: str) -> bool:
     return "codeworker" in lowered and ("launch_llama_server.py" in lowered or "llama-server.exe" in lowered)
 
 
+def commandline_has_context_size(commandline: str, context_size: int) -> bool:
+    normalized = re.sub(r"[\"']", "", commandline.lower())
+    return bool(re.search(rf"(?:--context|-c)\s+{int(context_size)}(?:\s|$)", normalized))
+
+
 def is_running_model_server_compatible(
     model_key: str,
     model_alias: str,
@@ -1701,6 +1739,12 @@ def is_running_model_server_compatible(
         expected_model = str(model_file).lower()
         if running_path and expected_model and running_path != expected_model:
             return False
+        settings = props.get("default_generation_settings", {})
+        if isinstance(settings, dict):
+            running_ctx = int(settings.get("n_ctx", 0) or 0)
+            expected_ctx = get_model_context_limit(model_key)
+            if running_ctx and expected_ctx and running_ctx < expected_ctx:
+                return False
         if get_model_capabilities(model_key).get("requires_mmproj"):
             modalities = props.get("modalities", {})
             if isinstance(modalities, dict) and modalities.get("vision") is False:
@@ -1714,6 +1758,9 @@ def is_running_model_server_compatible(
     lowered = commandline.lower()
     expected_model = str(model_file).lower()
     if expected_model and expected_model not in lowered:
+        return False
+    expected_ctx = str(get_model_context_limit(model_key))
+    if expected_ctx and not commandline_has_context_size(lowered, int(expected_ctx)):
         return False
     if get_model_capabilities(model_key).get("requires_mmproj"):
         if mmproj_file is None:
@@ -3817,13 +3864,17 @@ def build_project_rag_context(
     state: SessionState,
     prompt: str,
     model_key: str,
+    max_response_tokens: Optional[int] = None,
 ) -> Tuple[str, Dict[str, object]]:
     index_result, index_rebuilt = ensure_project_index(project_root)
     skeleton = load_cached_skeleton(project_root)
-    search_result = search_index(project_root, DATA_DIR, prompt, limit=12)
-    matches = search_result.get("matches", []) if isinstance(search_result, dict) else []
     total_limit = get_context_limits(model_key, single_file_focus=False).get("total_chars", MAX_TOTAL_CONTEXT)
-    total_limit = max(9000, min(26000, int(total_limit)))
+    total_limit = min(int(total_limit), estimate_input_char_budget(model_key, max_response_tokens))
+    total_limit = max(3500, total_limit)
+    search_limit = 18 if total_limit >= 20000 else 12
+    excerpt_chars = 1200 if total_limit >= 20000 else 900
+    search_result = search_index(project_root, DATA_DIR, prompt, limit=search_limit)
+    matches = search_result.get("matches", []) if isinstance(search_result, dict) else []
     chunks: List[str] = []
     files_sent: List[Dict[str, object]] = []
 
@@ -3845,7 +3896,7 @@ def build_project_rag_context(
 
     if matches:
         match_lines = ["RAG MATCHES FOR USER REQUEST"]
-        for item in matches[:12]:
+        for item in matches[:search_limit]:
             if not isinstance(item, dict):
                 continue
             path = str(item.get("path", "")).strip()
@@ -3855,12 +3906,13 @@ def build_project_rag_context(
             line_start = int(item.get("lineStart", 1) or 1)
             line_end = int(item.get("lineEnd", line_start) or line_start)
             source = str(item.get("source", "rag"))
-            match_lines.append(f"\n檔案: {path}:{line_start}-{line_end} [{source}]\n```\n{content[:1400]}\n```")
+            excerpt = content[:excerpt_chars]
+            match_lines.append(f"\n檔案: {path}:{line_start}-{line_end} [{source}]\n```\n{excerpt}\n```")
             files_sent.append({
                 "path": path,
                 "mode": "rag-chunk",
                 "truncated": True,
-                "charsSent": min(len(content), 1400),
+                "charsSent": min(len(content), excerpt_chars),
                 "charsTotal": len(content),
                 "lineStart": line_start,
                 "lineEnd": line_end,
@@ -3916,6 +3968,9 @@ def build_project_rag_context(
         "omittedFiles": max(0, max(len(state.files), indexed_files) - len(files_sent)),
         "charLimit": total_limit,
         "usedChars": used_chars,
+        "contextWindow": get_model_context_limit(model_key),
+        "maxResponseTokens": int(max_response_tokens or get_chat_max_tokens(model_key)),
+        "searchLimit": search_limit,
         "files": files_sent[:120],
         "indexRebuilt": index_rebuilt,
         "indexFiles": indexed_files,
@@ -3930,8 +3985,9 @@ def build_project_cache_context(
     state: SessionState,
     prompt: str,
     model_key: str,
+    max_response_tokens: Optional[int] = None,
 ) -> Tuple[str, Dict[str, object]]:
-    return build_project_rag_context(project_root, state, prompt, model_key)
+    return build_project_rag_context(project_root, state, prompt, model_key, max_response_tokens=max_response_tokens)
 
 
 def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
@@ -5920,10 +5976,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
+            analyze_max_tokens = get_analyze_max_tokens(model_key)
             if snapshot.pinned_files:
                 context, context_coverage = build_project_context(project_root, snapshot, prompt)
             else:
-                context, context_coverage = build_project_cache_context(project_root, snapshot, prompt, model_key)
+                context, context_coverage = build_project_cache_context(
+                    project_root,
+                    snapshot,
+                    prompt,
+                    model_key,
+                    max_response_tokens=analyze_max_tokens,
+                )
             with STATE_LOCK:
                 current_model_key = STATE.model_key
             if requested_model_key and requested_model_key != current_model_key:
@@ -5940,7 +6003,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             reply = call_local_model(
                 model_alias,
                 messages,
-                max_tokens=get_analyze_max_tokens(model_key),
+                max_tokens=analyze_max_tokens,
                 timeout_seconds=get_analyze_timeout_seconds(model_key),
                 continue_on_length=0,
                 raw_mode=True,
@@ -6022,6 +6085,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 )
                 effective_message = message
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
+                max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
                     effective_message = continuation_message
                     context = ""
@@ -6034,12 +6098,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         prefer_compact=bool(images) and model_prefers_compact_image_context(model_key),
                     )
                 elif project_root is not None:
-                    context, context_coverage = build_project_rag_context(project_root, snapshot, effective_message or "請根據附件回答。", model_key)
+                    context, context_coverage = build_project_rag_context(
+                        project_root,
+                        snapshot,
+                        effective_message or "請根據附件回答。",
+                        model_key,
+                        max_response_tokens=max_tokens,
+                    )
                 else:
                     context = ""
                     context_coverage = None
                 context_coverage = with_memory_coverage(context_coverage, snapshot, model_key) if not continuation_message else context_coverage
-                max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
             if attachment_ids and not attachments:
                 raise ValueError("Uploaded file not found. Please upload the file again.")
             ensure_local_model_server(model_key, port=get_model_port(model_key))
@@ -6136,6 +6205,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 )
                 effective_message = message
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
+                max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
                     effective_message = continuation_message
                     context = ""
@@ -6148,12 +6218,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         prefer_compact=bool(images) and model_prefers_compact_image_context(model_key),
                     )
                 elif project_root is not None:
-                    context, context_coverage = build_project_rag_context(project_root, snapshot, effective_message or "請根據附件回答。", model_key)
+                    context, context_coverage = build_project_rag_context(
+                        project_root,
+                        snapshot,
+                        effective_message or "請根據附件回答。",
+                        model_key,
+                        max_response_tokens=max_tokens,
+                    )
                 else:
                     context = ""
                     context_coverage = None
                 context_coverage = with_memory_coverage(context_coverage, snapshot, model_key) if not continuation_message else context_coverage
-                max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
             if attachment_ids and not attachments:
                 raise ValueError("Uploaded file not found. Please upload the file again.")
         except ValueError as exc:
