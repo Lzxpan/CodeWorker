@@ -3049,6 +3049,68 @@ def build_answer_only_retry_messages(messages: List[Dict[str, object]]) -> List[
     return retry_messages
 
 
+def build_length_continuation_messages(messages: List[Dict[str, object]], assistant_tail: str) -> List[Dict[str, object]]:
+    system_messages = [
+        {"role": "system", "content": str(item.get("content", "")).strip()}
+        for item in messages
+        if str(item.get("role", "")).strip() == "system" and str(item.get("content", "")).strip()
+    ]
+    visible_tail = strip_think_blocks(assistant_tail) or str(assistant_tail or "").strip()
+    visible_tail = truncate_middle(visible_tail, 3600)
+    continuation_messages: List[Dict[str, object]] = []
+    continuation_messages.extend(system_messages[:2])
+    if visible_tail:
+        continuation_messages.append({"role": "assistant", "content": visible_tail})
+    continuation_messages.append({"role": "user", "content": "請直接從上一句繼續回答，不要重複前文，不要重新開場。"})
+    return continuation_messages
+
+
+def build_stream_reply_text(reasoning: str, content: str) -> str:
+    parts = []
+    if reasoning.strip():
+        parts.append(f"<think>\n{reasoning.strip()}\n</think>")
+    if content.strip():
+        parts.append(content.strip())
+    return "\n\n".join(parts).strip()
+
+
+def append_chat_exchange_locked(
+    model_key: str,
+    message: str,
+    attachments: List[Dict[str, object]],
+    context: str,
+    reply: str,
+    assistant_kind: str = "chat",
+) -> None:
+    STATE.model_key = model_key
+    STATE.model_alias = get_model_alias(model_key)
+    user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat", "contextUsed": bool(context.strip())}
+    if attachments:
+        user_record["attachments"] = [build_history_attachment(item) for item in attachments]
+    STATE.history.append(user_record)
+    STATE.history.append({
+        "role": "assistant",
+        "content": reply,
+        "kind": assistant_kind,
+        "modelKey": model_key,
+        "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)),
+        "contextUsed": bool(context.strip()),
+    })
+    compact_session_memory_locked(model_key)
+
+
+def with_memory_coverage(coverage: Optional[Dict[str, object]], snapshot: SessionState, model_key: str) -> Optional[Dict[str, object]]:
+    history_count = len(build_history_messages(snapshot.history, model_key))
+    summary_chars = len(str(snapshot.memory_summary or ""))
+    if not history_count and not summary_chars:
+        return coverage
+    enriched = dict(coverage or {"mode": "memory"})
+    enriched["memoryHistoryItems"] = history_count
+    enriched["memorySummaryChars"] = summary_chars
+    enriched["memoryCompactedCount"] = int(snapshot.memory_compacted_count or 0)
+    return enriched
+
+
 def is_continue_request(message: str) -> bool:
     lowered = str(message or "").strip().lower()
     if not lowered:
@@ -5166,8 +5228,7 @@ def call_local_model(
         if finish_reason != "length" or remaining_continuations <= 0:
             break
         remaining_continuations -= 1
-        working_messages.append({"role": "assistant", "content": raw_content})
-        working_messages.append({"role": "user", "content": "請直接從上一句繼續回答，不要重複前文，不要重新開場。"})
+        working_messages = build_length_continuation_messages(working_messages, raw_content)
     return sanitize_model_reply(model_alias, "\n".join(part for part in parts if part.strip()), raw_mode=raw_mode)
 
 
@@ -5267,9 +5328,8 @@ def stream_local_model_events(
             yield {"type": "finish", "finishReason": finish_reason}
             break
         remaining_continuations -= 1
-        yield {"type": "continuation", "text": "內容過長，已自動從上一句繼續。"}
-        working_messages.append({"role": "assistant", "content": content_text})
-        working_messages.append({"role": "user", "content": "請直接從上一句繼續回答，不要重複前文，不要重新開場。"})
+        yield {"type": "continuation", "text": "內容過長，已自動改用上一段回答末尾續寫，避免重送大型專案上下文。"}
+        working_messages = build_length_continuation_messages(working_messages, content_text)
 
 
 def parse_script_output(output: str) -> Dict[str, str]:
@@ -5978,6 +6038,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 else:
                     context = ""
                     context_coverage = None
+                context_coverage = with_memory_coverage(context_coverage, snapshot, model_key) if not continuation_message else context_coverage
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
             if attachment_ids and not attachments:
                 raise ValueError("Uploaded file not found. Please upload the file again.")
@@ -6007,14 +6068,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     )
                 )
             with STATE_LOCK:
-                STATE.model_key = model_key
-                STATE.model_alias = model_alias
-                user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat", "contextUsed": bool(context.strip())}
-                if attachments:
-                    user_record["attachments"] = [build_history_attachment(item) for item in attachments]
-                STATE.history.append(user_record)
-                STATE.history.append({"role": "assistant", "content": reply, "kind": "chat", "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextUsed": bool(context.strip())})
-                compact_session_memory_locked(model_key)
+                append_chat_exchange_locked(model_key, message, attachments, context, reply)
             json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "contextCoverage": context_coverage, "attachmentFallback": fallback_info}})
         except ModelReplyError as exc:
             error_response(self, exc.error)
@@ -6098,6 +6152,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 else:
                     context = ""
                     context_coverage = None
+                context_coverage = with_memory_coverage(context_coverage, snapshot, model_key) if not continuation_message else context_coverage
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
             if attachment_ids and not attachments:
                 raise ValueError("Uploaded file not found. Please upload the file again.")
@@ -6176,27 +6231,19 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 write_sse_event(self, "reasoning_end", {})
             reasoning = "".join(reasoning_parts).strip()
             content = "".join(content_parts).strip()
-            reply_parts = []
-            if reasoning:
-                reply_parts.append(f"<think>\n{reasoning}\n</think>")
-            if content:
-                reply_parts.append(content)
-            reply = "\n\n".join(reply_parts).strip()
+            reply = build_stream_reply_text(reasoning, content)
             if not reply:
                 raise ModelReplyError(make_error("MODEL_EMPTY_REPLY", "模型沒有產生可顯示的最終答案。", "", extra={"modelKey": model_key}))
             with STATE_LOCK:
-                STATE.model_key = model_key
-                STATE.model_alias = model_alias
-                user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat", "contextUsed": bool(context.strip())}
-                if attachments:
-                    user_record["attachments"] = [build_history_attachment(item) for item in attachments]
-                STATE.history.append(user_record)
-                STATE.history.append({"role": "assistant", "content": reply, "kind": "chat", "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextUsed": bool(context.strip())})
-                compact_session_memory_locked(model_key)
+                append_chat_exchange_locked(model_key, message, attachments, context, reply)
             write_sse_event(self, "done", {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage})
         except ModelReplyError as exc:
             write_sse_event(self, "error", exc.error)
         except Exception as exc:
+            partial_reply = build_stream_reply_text("".join(reasoning_parts), "".join(content_parts))
+            if partial_reply:
+                with STATE_LOCK:
+                    append_chat_exchange_locked(model_key, message, attachments, context, partial_reply, assistant_kind="chat-partial")
             write_sse_event(self, "error", make_error("MODEL_START_FAILED", "Chat failed.", str(exc), extra={"modelKey": model_key}))
 
     def handle_edit_plan(self) -> None:

@@ -231,6 +231,88 @@ def test_compact_session_memory_keeps_ui_history_and_builds_summary():
             server.STATE.history, server.STATE.memory_summary, server.STATE.memory_compacted_count = old_values
 
 
+def test_length_continuation_drops_large_project_context():
+    class FakeResponse:
+        def __init__(self, lines):
+            self.lines = [line.encode("utf-8") for line in lines]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            return iter(self.lines)
+
+    requests = []
+    original_urlopen = server.urllib.request.urlopen
+    try:
+        def fake_urlopen(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8"))
+            requests.append(payload)
+            if len(requests) == 1:
+                return FakeResponse([
+                    'data: {"choices":[{"delta":{"content":"first part"},"finish_reason":null}]}\n',
+                    'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n',
+                    "data: [DONE]\n",
+                ])
+            return FakeResponse([
+                'data: {"choices":[{"delta":{"content":" second part"},"finish_reason":"stop"}]}\n',
+                "data: [DONE]\n",
+            ])
+
+        server.urllib.request.urlopen = fake_urlopen
+        events = list(server.stream_local_model_events(
+            "gemma4-local",
+            [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "PROJECT RAG CONTEXT\n" + ("large context\n" * 200)},
+            ],
+            timeout_seconds=1,
+            max_tokens=16,
+            continue_on_length=1,
+        ))
+    finally:
+        server.urllib.request.urlopen = original_urlopen
+    assert_true(len(requests) == 2, "length continuation should call the model twice")
+    second_messages = requests[1]["messages"]
+    second_payload_text = json.dumps(second_messages, ensure_ascii=False)
+    assert_true("PROJECT RAG CONTEXT" not in second_payload_text, "length continuation should not resend large project context")
+    assert_true("first part" in second_payload_text, "length continuation should include the previous answer tail")
+    assert_true(any(event.get("type") == "content" and event.get("text") == " second part" for event in events), "length continuation should stream continued content")
+
+
+def test_partial_stream_reply_can_be_saved_for_continue():
+    old_values = (
+        list(server.STATE.history),
+        server.STATE.memory_summary,
+        server.STATE.memory_compacted_count,
+        server.STATE.model_key,
+        server.STATE.model_alias,
+    )
+    try:
+        with server.STATE_LOCK:
+            server.STATE.history = []
+            server.STATE.memory_summary = ""
+            server.STATE.memory_compacted_count = 0
+            partial = server.build_stream_reply_text("reasoning", "已輸出的部分回答")
+            server.append_chat_exchange_locked("gemma4", "請長篇說明", [], "PROJECT RAG CONTEXT", partial, assistant_kind="chat-partial")
+            continuation = server.build_history_continuation_message("請繼續", server.STATE.history)
+        assert_true(continuation is not None, "partial stream output should be available for manual continue")
+        assert_true("已輸出的部分回答" in continuation, "continue prompt should include partial answer tail")
+        assert_true("PROJECT RAG CONTEXT" not in continuation, "manual continue should not re-inject full project context")
+    finally:
+        with server.STATE_LOCK:
+            (
+                server.STATE.history,
+                server.STATE.memory_summary,
+                server.STATE.memory_compacted_count,
+                server.STATE.model_key,
+                server.STATE.model_alias,
+            ) = old_values
+
+
 def test_stream_reasoning_only_length_retries_for_final_answer():
     class FakeResponse:
         def __init__(self, lines):
@@ -544,6 +626,8 @@ def main():
         test_chat_messages_include_recent_history,
         test_chat_messages_include_compressed_memory_summary,
         test_compact_session_memory_keeps_ui_history_and_builds_summary,
+        test_length_continuation_drops_large_project_context,
+        test_partial_stream_reply_can_be_saved_for_continue,
         test_stream_reasoning_only_length_retries_for_final_answer,
         test_gemma_native_image_payload_with_mmproj,
         test_prepare_attachments_does_not_use_qwen_helper,

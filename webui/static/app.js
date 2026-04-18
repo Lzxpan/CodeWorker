@@ -820,6 +820,15 @@ function formatContextCoverage(coverage) {
     return "";
   }
   const mode = String(coverage.mode || "");
+  const memorySuffix = (() => {
+    const historyItems = Number(coverage.memoryHistoryItems || 0);
+    const summaryChars = Number(coverage.memorySummaryChars || 0);
+    if (!historyItems && !summaryChars) return "";
+    if (state.language === "en") {
+      return ` Memory: ${summaryChars > 0 ? `${summaryChars} compressed char(s), ` : ""}${historyItems} recent item(s).`;
+    }
+    return ` 記憶：${summaryChars > 0 ? `壓縮摘要 ${summaryChars} 字，` : ""}最近 ${historyItems} 筆。`;
+  })();
   if (mode === "history-continuation") {
     const historyItems = Number(coverage.historyItems || 0);
     if (state.language === "en") {
@@ -833,9 +842,12 @@ function formatContextCoverage(coverage) {
     const indexFiles = Number(coverage.indexFiles || selectedFiles);
     const rebuilt = Boolean(coverage.indexRebuilt);
     if (state.language === "en") {
-      return `Full-project search context: ${rebuilt ? "rebuilt" : "reused"} local index, ${indexFiles} indexed file(s), sent ${filesSent}/${selectedFiles} matching summary/chunk item(s).`;
+      return `Full-project search context: ${rebuilt ? "rebuilt" : "reused"} local index, ${indexFiles} indexed file(s), sent ${filesSent}/${selectedFiles} matching summary/chunk item(s).${memorySuffix}`;
     }
-    return `全專案搜尋上下文：${rebuilt ? "已重建" : "沿用"}本機索引，已索引 ${indexFiles} 個檔案，本次送出 ${filesSent}/${selectedFiles} 個命中摘要/片段。`;
+    return `全專案搜尋上下文：${rebuilt ? "已重建" : "沿用"}本機索引，已索引 ${indexFiles} 個檔案，本次送出 ${filesSent}/${selectedFiles} 個命中摘要/片段。${memorySuffix}`;
+  }
+  if (mode === "memory") {
+    return state.language === "en" ? `No project context used.${memorySuffix}` : `未使用專案上下文。${memorySuffix}`;
   }
   const filesSent = Number(coverage.filesSent || 0);
   const selectedFiles = Number(coverage.selectedFiles || filesSent);
@@ -853,7 +865,7 @@ function formatContextCoverage(coverage) {
     if (coverage.truncated) {
       parts.push(". The model did not receive every file in full.");
     }
-    return parts.join("");
+    return `${parts.join("")}${memorySuffix}`;
   }
   const parts = [
     `本次上下文：已送出 ${filesSent}/${selectedFiles} 個釘選檔案`,
@@ -865,7 +877,7 @@ function formatContextCoverage(coverage) {
   if (coverage.truncated) {
     parts.push("。模型沒有讀到所有檔案的完整內容。");
   }
-  return parts.join("");
+  return `${parts.join("")}${memorySuffix}`;
 }
 
 function renderContextCoverage(coverage) {

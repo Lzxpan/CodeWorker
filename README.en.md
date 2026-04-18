@@ -43,6 +43,7 @@ Current model positioning:
 - image and attachment requests are attempted with the current model first; if the selected model or `llama.cpp` setup cannot process them, CodeWorker downgrades the attachment into a text note and lets the model explain the limitation
 - chat now uses streaming output; `reasoning_content` or `<think>` blocks are preserved in an expandable reasoning panel that auto-scrolls when opened
 - normal chat includes compressed memory plus recent raw turns, so follow-up questions such as "the previous one" or "that file" remain connected while using fewer tokens
+- when long answers hit `finish_reason=length`, continuation only sends the previous answer tail instead of resending large RAG context; if streaming fails mid-answer, the partial output is saved for manual continuation
 
 Recommended GitHub About:
 
@@ -175,6 +176,7 @@ Behavior summary:
 - images go through the backend together with the text request, then are either handled directly or downgraded into a text attachment note
 - when the context budget is too small for full files, the UI explicitly shows excerpt mode through `context coverage`
 - older turns are compressed into `COMPRESSED CONVERSATION MEMORY`, while the latest turns stay raw; if memory conflicts with the current RAG / pinned context, the current project context wins
+- automatic long-answer continuation uses the previous answer tail, avoiding repeated submission of the same large `PROJECT RAG CONTEXT`
 - write, patch, delete, and command Agent actions must become pending actions first; they only run after user confirmation, and the audit log is written to `data/agent-actions.jsonl`
 
 ---
@@ -189,6 +191,7 @@ Behavior summary:
 - removed the right-side file preview panel and changed the chat workspace to a wider single-column layout; clicking a filename in the file tree now toggles pinned context
 - fixed long-answer continuation so reasoning-only responses trigger an answer-only retry, and user "continue" requests reuse recent chat history instead of re-injecting full-project RAG
 - added compressed conversation memory for normal chat: all models receive older-turn summaries plus recent raw turns to improve follow-ups while saving tokens
+- fixed manual continuation after streaming failures: partial output is stored in history, so the next "continue" request does not re-inject full-project RAG
 - strengthened RAG code location: Chinese queries expand common implementation terms, so "game speed" searches for `speed`, `Timer`, `Interval`, `Tick`, and `gameSpeed`
 - reasoning panels now auto-scroll to the newest streamed text when expanded
 - tightened video metadata-only fallback so the model must not infer content from file names, URLs, or metadata
