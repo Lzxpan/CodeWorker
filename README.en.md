@@ -42,7 +42,7 @@ Current model positioning:
 - small-to-medium pinned code sets are sent as full files where possible; if CodeWorker has to fall back to excerpts, the UI shows `context coverage`
 - image and attachment requests are attempted with the current model first; if the selected model or `llama.cpp` setup cannot process them, CodeWorker downgrades the attachment into a text note and lets the model explain the limitation
 - chat now uses streaming output; `reasoning_content` or `<think>` blocks are preserved in an expandable reasoning panel that auto-scrolls when opened
-- normal chat includes recent turns as short-term memory so follow-up questions such as "the previous one" or "that file" remain connected
+- normal chat includes compressed memory plus recent raw turns, so follow-up questions such as "the previous one" or "that file" remain connected while using fewer tokens
 
 Recommended GitHub About:
 
@@ -174,7 +174,7 @@ Behavior summary:
 - the `File tree` is the manual context-selection entry point; when nothing is pinned, the RAG index automatically provides retrieval-based context
 - images go through the backend together with the text request, then are either handled directly or downgraded into a text attachment note
 - when the context budget is too small for full files, the UI explicitly shows excerpt mode through `context coverage`
-- recent chat turns are included as short-term memory in chat requests; if that memory conflicts with the current RAG / pinned context, the current project context wins
+- older turns are compressed into `COMPRESSED CONVERSATION MEMORY`, while the latest turns stay raw; if memory conflicts with the current RAG / pinned context, the current project context wins
 - write, patch, delete, and command Agent actions must become pending actions first; they only run after user confirmation, and the audit log is written to `data/agent-actions.jsonl`
 
 ---
@@ -188,7 +188,7 @@ Behavior summary:
 - added a bundled `whisper.cpp` speech-to-text pipeline for audio files and video audio tracks; when no local STT backend is available, the UI and prompt expose an explicit status
 - removed the right-side file preview panel and changed the chat workspace to a wider single-column layout; clicking a filename in the file tree now toggles pinned context
 - fixed long-answer continuation so reasoning-only responses trigger an answer-only retry, and user "continue" requests reuse recent chat history instead of re-injecting full-project RAG
-- added short-term memory for normal chat: all models receive recent user/assistant turns to improve follow-up questions
+- added compressed conversation memory for normal chat: all models receive older-turn summaries plus recent raw turns to improve follow-ups while saving tokens
 - strengthened RAG code location: Chinese queries expand common implementation terms, so "game speed" searches for `speed`, `Timer`, `Interval`, `Tick`, and `gameSpeed`
 - reasoning panels now auto-scroll to the newest streamed text when expanded
 - tightened video metadata-only fallback so the model must not infer content from file names, URLs, or metadata
