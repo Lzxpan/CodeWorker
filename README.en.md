@@ -131,7 +131,7 @@ Suggested prompts:
 8. For Word, mention `Word`, `word file`, `docx`, or `docx file`, for example: `Generate a Word file from the previous answer.`
 9. For text and code, mention the extension or format alias, such as `txt file`, `md file`, `py file`, `js file`, `json file`, `html file`, `css file`, `yaml file`, `sql file`, or `cs file`.
 10. For Excel, mention `Excel`, `xlsx`, `spreadsheet`, or the target extension, for example: `Turn the test checklist into an Excel spreadsheet.`
-11. Review the pending preview and click `Confirm write`. After writing, the chat shows the final path and filename.
+11. Review the pending preview and click `Confirm write`. After writing, the chat shows the absolute path, relative path, and file size. If the file was not actually written, the backend returns an error instead of a success message.
 
 ---
 
@@ -218,6 +218,7 @@ Workflow rules:
 - expanded text and code aliases, including `txt file`, `md file`, `py file`, `js file`, `ts file`, `json file`, `html file`, `css file`, `yaml file`, `sql file`, and `cs file`.
 - added inline-content file generation; when a user pastes complete Markdown and asks for `.docx` or another format in the same message, CodeWorker creates the preview directly without model inference.
 - added previous-answer direct file generation; when a user asks to export the above or previous assistant answer, CodeWorker creates the preview from history without model inference.
+- after confirmation, CodeWorker verifies that the physical file exists and returns its absolute path plus size; the frontend success message now shows the absolute path to avoid relative-path confusion.
 - added parsing for multi-format generation requests such as `PPTX and PDF`, and previous-answer export when the prompt references `previous` or `last answer`.
 - fixed garbled Chinese text in generated PDFs, raw Markdown markers in PPTX / DOCX, and Word generation prompts that should use the previous answer.
 - added `pdfplumber`, `reportlab`, `python-pptx`, and `openpyxl` to `scripts\bootstrap.ps1`.

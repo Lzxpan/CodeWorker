@@ -3013,6 +3013,7 @@ def public_generated_action(action: Dict[str, object]) -> Dict[str, object]:
         "kind": action.get("kind"),
         "status": action.get("status"),
         "targetPath": action.get("targetPath"),
+        "absoluteTargetPath": action.get("absoluteTargetPath"),
         "extension": action.get("extension"),
         "title": action.get("title"),
         "preview": action.get("preview"),
@@ -3046,10 +3047,25 @@ def confirm_generated_file(action_id: str) -> Dict[str, object]:
         if not temp_path.exists():
             raise ValueError("Generated temp file is missing.")
         shutil.copyfile(temp_path, target)
+    if not target.exists():
+        raise ValueError(f"Generated file was not written: {target}")
+    size_bytes = target.stat().st_size
+    if extension in GENERATABLE_BINARY_EXTENSIONS and size_bytes <= 0:
+        raise ValueError(f"Generated file is empty: {target}")
     action["status"] = "completed"
+    action["writtenPath"] = str(target)
+    action["writtenSizeBytes"] = size_bytes
+    action["completedAt"] = current_timestamp()
     with GENERATED_FILE_ACTIONS_LOCK:
         GENERATED_FILE_ACTIONS[action_id] = action
-    return {"path": str(target), "targetPath": action.get("targetPath"), "status": "completed"}
+    return {
+        "path": str(target),
+        "targetPath": action.get("targetPath"),
+        "absoluteTargetPath": str(target),
+        "exists": True,
+        "sizeBytes": size_bytes,
+        "status": "completed",
+    }
 
 
 def cancel_generated_file(action_id: str) -> Dict[str, object]:
