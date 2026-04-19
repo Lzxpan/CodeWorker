@@ -1763,12 +1763,16 @@ function renderGeneratedFileActionCard(action) {
   const overwriteText = action.overwrites
     ? (state.language === "en" ? "This will overwrite an existing file." : "這會覆蓋既有檔案。")
     : (state.language === "en" ? "This will create a new file." : "這會建立新檔案。");
+  const absolutePath = action.absoluteTargetPath || "";
+  const pathMeta = absolutePath
+    ? `${overwriteText} ${state.language === "en" ? "Full path:" : "完整路徑："} ${absolutePath}`
+    : overwriteText;
   return `
     <div class="generated-action-card" data-action-id="${escapeHtml(String(action.id || ""))}">
       <div class="generated-action-header">
         <div>
           <div class="generated-action-path">${escapeHtml(action.targetPath || "")}</div>
-          <div class="generated-action-meta">${escapeHtml(overwriteText)}</div>
+          <div class="generated-action-meta">${escapeHtml(pathMeta)}</div>
         </div>
         <div class="actions generated-action-buttons">
           <button type="button" class="primary" data-action="confirm-generated">${escapeHtml(state.language === "en" ? "Confirm write" : "確認寫入")}</button>
@@ -1798,7 +1802,11 @@ async function confirmGeneratedFile(actionId) {
     removeGeneratedActionCard(actionId);
     setStatus(state.language === "en" ? "File written" : "檔案已寫入");
     await loadFileTree({ query: elements.fileTreeSearch?.value || "" });
-    appendMessage("assistant", `${state.language === "en" ? "File written:" : "已寫入檔案："} ${data.targetPath || data.path}`);
+    const writtenPath = data.path || data.absoluteTargetPath || data.targetPath || "";
+    const sizeText = Number.isFinite(Number(data.sizeBytes)) && Number(data.sizeBytes) > 0
+      ? ` (${Number(data.sizeBytes)} bytes)`
+      : "";
+    appendMessage("assistant", `${state.language === "en" ? "File written:" : "已寫入檔案："} ${writtenPath}${sizeText}`);
   } catch (error) {
     showError(normalizeError(error, "FILE_GENERATION_CONFIRM_FAILED", t("errors.fileGenerationFailed")));
   }

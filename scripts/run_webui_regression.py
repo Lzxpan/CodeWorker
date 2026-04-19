@@ -736,10 +736,14 @@ def test_generated_docx_and_text_previews_can_be_created():
         assert_true(not (root / "generated" / "sample.docx").exists(), "docx preview must not write before confirmation")
         assert_true(str(text_action["content"]).strip() == "print('hello')", "text preview should keep source content")
         assert_true(not (root / "generated" / "sample.py").exists(), "text preview must not write before confirmation")
-        server.confirm_generated_file(str(docx_action["id"]))
-        server.confirm_generated_file(str(text_action["id"]))
+        docx_result = server.confirm_generated_file(str(docx_action["id"]))
+        text_result = server.confirm_generated_file(str(text_action["id"]))
         assert_true((root / "generated" / "sample.docx").exists(), "docx should be written after confirmation")
         assert_true((root / "generated" / "sample.py").read_text(encoding="utf-8").strip() == "print('hello')", "text file should be written after confirmation")
+        assert_true(docx_result["exists"] is True and Path(str(docx_result["path"])).exists(), "docx confirm response should prove the file exists")
+        assert_true(text_result["exists"] is True and Path(str(text_result["path"])).exists(), "text confirm response should prove the file exists")
+        assert_true(int(docx_result["sizeBytes"]) > 0, "docx confirm response should include non-zero size")
+        assert_true(str(docx_result["absoluteTargetPath"]).endswith("sample.docx"), "confirm response should include absolute target path")
     finally:
         with server.STATE_LOCK:
             server.STATE.project_path = old_project
