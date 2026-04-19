@@ -526,6 +526,8 @@ function Install-PythonPackages {
             $importName = "docx"
         } elseif ($package -eq "python-pptx") {
             $importName = "pptx"
+        } elseif ($package -eq "openpyxl") {
+            $importName = "openpyxl"
         }
         $checkCode = "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$importName') else 1)"
         & $pythonExe -c $checkCode
@@ -579,7 +581,7 @@ if (-not $SkipRuntime) {
 }
 
 if (-not $SkipWinPython) {
-    Install-PythonPackages -Packages @("pypdf", "python-docx", "reportlab", "python-pptx")
+    Install-PythonPackages -Packages @("pypdf", "python-docx", "reportlab", "python-pptx", "openpyxl")
 } else {
     Write-Step "Skipping Python document parser packages because -SkipWinPython was provided."
 }
