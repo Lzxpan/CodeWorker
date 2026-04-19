@@ -2695,6 +2695,30 @@ def build_generation_requests_from_model_reply(prompt: str, reply_content: str) 
     return parse_generation_requests({"prompt": prompt, "title": title, "content": visible})
 
 
+def extract_inline_generation_content(prompt: str) -> str:
+    lines = str(prompt or "").splitlines()
+    for index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if re.match(r"^#{1,6}\s+\S+", line) or line.startswith("```"):
+            return "\n".join(lines[index:]).strip()
+    for index, raw_line in enumerate(lines):
+        if not raw_line.strip() and index + 1 < len(lines):
+            tail = "\n".join(lines[index + 1:]).strip()
+            if len(tail) >= 200:
+                return tail
+    return ""
+
+
+def build_generation_requests_from_inline_prompt(prompt: str) -> List[Dict[str, object]]:
+    if not is_model_file_generation_request(prompt):
+        return []
+    content = extract_inline_generation_content(prompt)
+    if not content:
+        return []
+    title = extract_model_document_title(content, prompt)
+    return parse_generation_requests({"prompt": prompt, "title": title, "content": content})
+
+
 def clean_document_inline(text: str) -> str:
     cleaned = strip_reasoning_blocks(text)
     cleaned = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", cleaned)
@@ -7133,6 +7157,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     and project_root is not None
                     and STATE.ui_state == "ready"
                 )
+                direct_generation_requests = build_generation_requests_from_inline_prompt(message) if file_generation_requested else []
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
@@ -7160,6 +7185,26 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 context_coverage = with_memory_coverage(context_coverage, snapshot, model_key) if not continuation_message else context_coverage
             if attachment_ids and not attachments:
                 raise ValueError("Uploaded file not found. Please upload the file again.")
+            if direct_generation_requests and project_root is not None:
+                actions = [create_generated_file_preview(project_root.resolve(), request) for request in direct_generation_requests]
+                public_actions = [public_generated_action(action) for action in actions]
+                reply = "已根據你貼上的內容建立檔案預覽，確認後才會寫入。"
+                with STATE_LOCK:
+                    append_chat_exchange_locked(model_key, message, attachments, "", reply)
+                json_response(
+                    self,
+                    {
+                        "ok": True,
+                        "data": {
+                            "reply": reply,
+                            "modelKey": model_key,
+                            "contextCoverage": {"mode": "direct-file-generation", "files": len(public_actions)},
+                            "pendingAction": public_actions[0] if public_actions else None,
+                            "pendingActions": public_actions,
+                        },
+                    },
+                )
+                return
             ensure_local_model_server(model_key, port=get_model_port(model_key))
             model_alias = get_model_alias(model_key)
             attachments = prepare_attachments_for_model(snapshot.model_key, attachments)
@@ -7259,6 +7304,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     and project_root is not None
                     and STATE.ui_state == "ready"
                 )
+                direct_generation_requests = build_generation_requests_from_inline_prompt(message) if file_generation_requested else []
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
@@ -7306,6 +7352,27 @@ class WebUIHandler(BaseHTTPRequestHandler):
         content_parts: List[str] = []
         reasoning_open = False
         try:
+            if direct_generation_requests and project_root is not None:
+                actions = [create_generated_file_preview(project_root.resolve(), request) for request in direct_generation_requests]
+                public_actions = [public_generated_action(action) for action in actions]
+                reply = "已根據你貼上的內容建立檔案預覽，確認後才會寫入。"
+                write_sse_event(self, "context", {"contextCoverage": {"mode": "direct-file-generation", "files": len(public_actions)}})
+                write_sse_event(self, "model", {"modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key))})
+                write_sse_event(self, "content", {"text": reply})
+                if public_actions:
+                    write_sse_event(
+                        self,
+                        "generated_file_preview",
+                        {
+                            "pendingAction": public_actions[0],
+                            "pendingActions": public_actions,
+                            "message": "已根據你貼上的內容建立檔案預覽，確認後才會寫入。",
+                        },
+                    )
+                with STATE_LOCK:
+                    append_chat_exchange_locked(model_key, message, attachments, "", reply)
+                write_sse_event(self, "done", {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": {"mode": "direct-file-generation", "files": len(public_actions)}})
+                return
             write_sse_event(self, "status", {"message": "啟動本地模型", "modelKey": model_key})
             ensure_local_model_server(model_key, port=get_model_port(model_key))
             model_alias = get_model_alias(model_key)

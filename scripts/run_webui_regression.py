@@ -747,6 +747,20 @@ def test_generated_docx_and_text_previews_can_be_created():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_inline_docx_generation_uses_pasted_content_without_model():
+    prompt = (
+        "請把上面的內容生成docx檔給我\n"
+        "# CodeWorker 產品說明書\n\n"
+        "## 1. 產品概述\n"
+        "CodeWorker 是本機 AI 程式碼助理。\n"
+    )
+    requests = server.build_generation_requests_from_inline_prompt(prompt)
+    assert_true(len(requests) == 1, "inline docx request should create one generation request")
+    assert_true(requests[0]["targetPath"].endswith(".docx"), "inline docx request should create a .docx target")
+    assert_true(requests[0]["title"] == "CodeWorker 產品說明書", "inline docx should use the pasted heading as title")
+    assert_true("CodeWorker 是本機 AI 程式碼助理" in requests[0]["content"], "inline docx should use pasted content directly")
+
+
 def test_generated_pdf_keeps_chinese_text_extractable():
     root = ROOT / ".tmp" / "regression-generate-pdf"
     shutil.rmtree(root, ignore_errors=True)
@@ -846,6 +860,7 @@ def main():
         test_generation_with_previous_keyword_is_not_continuation,
         test_generation_common_text_aliases,
         test_generated_docx_and_text_previews_can_be_created,
+        test_inline_docx_generation_uses_pasted_content_without_model,
         test_generated_pdf_keeps_chinese_text_extractable,
         test_document_generation_cleans_markdown_for_pptx,
         test_document_generation_splits_long_pptx_sections,
