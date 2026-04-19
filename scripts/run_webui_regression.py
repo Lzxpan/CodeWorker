@@ -781,6 +781,75 @@ def test_previous_answer_docx_generation_uses_history_without_model():
     assert_true("CodeWorker 是本機 AI 程式碼助理" in requests[0]["content"], "previous-answer docx should use assistant content directly")
 
 
+def test_thread_continuation_generation_loads_requested_thread_history():
+    old_threads_dir = server.THREADS_DIR
+    old_active_thread_id = server.ACTIVE_THREAD_ID
+    old_state = (
+        server.STATE.project_path,
+        server.STATE.model_key,
+        server.STATE.model_alias,
+        list(server.STATE.history),
+        server.STATE.memory_summary,
+        server.STATE.memory_compacted_count,
+    )
+    root = ROOT / ".tmp" / "regression-thread-generation"
+    threads_dir = root / "threads"
+    shutil.rmtree(root, ignore_errors=True)
+    threads_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.THREADS_DIR = threads_dir
+        server.ACTIVE_THREAD_ID = "other-thread"
+        thread_history = [
+            {"role": "user", "content": "請寫產品說明"},
+            {"role": "assistant", "content": "# CodeWorker 產品說明書\n\nCodeWorker 是本機 AI 程式碼助理。"},
+        ]
+        server.save_thread_file(
+            {
+                "id": "target-thread",
+                "title": "產品說明",
+                "createdAt": 1,
+                "updatedAt": 2,
+                "modelKey": "gemma4",
+                "modelName": "Gemma 4 26B",
+                "projectPath": str(root),
+                "history": thread_history,
+                "memorySummary": "",
+                "memoryCompactedCount": 0,
+            }
+        )
+        with server.STATE_LOCK:
+            server.STATE.history = []
+            server.activate_thread_for_request_locked("target-thread")
+            requests = server.build_generation_requests_without_model("請把上面的內容生成docx檔給我", list(server.STATE.history))
+        assert_true(server.ACTIVE_THREAD_ID == "target-thread", "chat request should activate the requested thread")
+        assert_true(len(requests) == 1, "generation should use history from the requested thread")
+        assert_true("CodeWorker 是本機 AI 程式碼助理" in requests[0]["content"], "requested thread history should provide generation content")
+    finally:
+        server.THREADS_DIR = old_threads_dir
+        server.ACTIVE_THREAD_ID = old_active_thread_id
+        with server.STATE_LOCK:
+            (
+                server.STATE.project_path,
+                server.STATE.model_key,
+                server.STATE.model_alias,
+                server.STATE.history,
+                server.STATE.memory_summary,
+                server.STATE.memory_compacted_count,
+            ) = old_state
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_generic_previous_answer_file_generation_defaults_to_markdown():
+    history = [
+        {"role": "user", "content": "請寫產品說明"},
+        {"role": "assistant", "content": "# CodeWorker 產品說明書\n\nCodeWorker 是本機 AI 程式碼助理。"},
+    ]
+    requests = server.build_generation_requests_without_model("請把上面的內容生成檔案給我", history)
+    assert_true(len(requests) == 1, "generic file generation should still create a direct preview from previous answer")
+    assert_true(requests[0]["targetPath"].endswith(".md"), "generic generated file should default to markdown")
+    assert_true(not server.is_model_file_generation_request("請問檔案生成的 code 在哪裡？"), "source-code questions about file generation must not become generation actions")
+
+
 def test_generated_pdf_keeps_chinese_text_extractable():
     root = ROOT / ".tmp" / "regression-generate-pdf"
     shutil.rmtree(root, ignore_errors=True)
@@ -882,6 +951,8 @@ def main():
         test_generated_docx_and_text_previews_can_be_created,
         test_inline_docx_generation_uses_pasted_content_without_model,
         test_previous_answer_docx_generation_uses_history_without_model,
+        test_thread_continuation_generation_loads_requested_thread_history,
+        test_generic_previous_answer_file_generation_defaults_to_markdown,
         test_generated_pdf_keeps_chinese_text_extractable,
         test_document_generation_cleans_markdown_for_pptx,
         test_document_generation_splits_long_pptx_sections,
