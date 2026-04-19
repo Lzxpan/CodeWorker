@@ -68,7 +68,6 @@ const I18N = {
       clearChat: "清空對話",
       attachImage: "上傳檔案",
       removeImage: "移除附件",
-      generateFile: "生成檔案",
       newThread: "新增",
       renameThread: "重新命名",
       deleteThread: "刪除",
@@ -205,7 +204,6 @@ const I18N = {
       clearChat: "Clear chat",
       attachImage: "Attach file",
       removeImage: "Remove attachments",
-      generateFile: "Generate file",
       newThread: "New",
       renameThread: "Rename",
       deleteThread: "Delete",
@@ -629,7 +627,6 @@ const elements = {
   chatImagePasteHint: document.getElementById("chatImagePasteHint"),
   chatImagePreview: document.getElementById("chatImagePreview"),
   removeChatImageBtn: document.getElementById("removeChatImageBtn"),
-  generateFileBtn: document.getElementById("generateFileBtn"),
   contextWindowLabel: document.getElementById("contextWindowLabel"),
   contextWindowSelect: document.getElementById("contextWindowSelect"),
   sendChatBtn: document.getElementById("sendChatBtn"),
@@ -1012,7 +1009,6 @@ function setUiState(nextState) {
   elements.clearChatBtn.disabled = busy;
   elements.attachImageBtn.disabled = !canChat;
   elements.removeChatImageBtn.disabled = !canChat;
-  if (elements.generateFileBtn) elements.generateFileBtn.disabled = !canChat || !ready;
   if (elements.contextWindowSelect) elements.contextWindowSelect.disabled = opening;
   if (elements.newThreadBtn) elements.newThreadBtn.disabled = busy;
 }
@@ -1502,7 +1498,6 @@ function applyTranslations() {
   elements.attachImageBtn.textContent = t("buttons.attachImage");
   elements.chatImagePasteHint.textContent = t("hints.imagePasteHint");
   elements.removeChatImageBtn.textContent = t("buttons.removeImage");
-  if (elements.generateFileBtn) elements.generateFileBtn.textContent = t("buttons.generateFile");
   if (elements.contextWindowLabel) elements.contextWindowLabel.textContent = t("labels.contextWindow");
   if (elements.newThreadBtn) elements.newThreadBtn.textContent = t("buttons.newThread");
   elements.sendChatBtn.textContent = t("buttons.send");
@@ -1734,36 +1729,6 @@ async function deleteThread(threadId) {
     setStatus(t("statuses.threadDeleted"));
   } catch (error) {
     showError(normalizeError(error, "THREAD_DELETE_FAILED", t("errors.threadFailed")));
-  }
-}
-
-async function generateFileFromPrompt() {
-  const prompt = elements.chatInput.value.trim();
-  if (!prompt) {
-    showError({ code: "FILE_GENERATION_FAILED", message: t("errors.fileGenerationFailed"), details: state.language === "en" ? "Enter the file content or request first." : "請先在對話輸入填入要生成的檔案內容或需求。" });
-    return;
-  }
-  if (state.uiState !== "ready") {
-    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
-    return;
-  }
-  clearError();
-  setStatus(t("statuses.generatingFile"), true);
-  try {
-    const data = await requestJson("/api/files/generate/plan", {
-      method: "POST",
-      body: JSON.stringify({ prompt }),
-    });
-    const actions = Array.isArray(data.pendingActions)
-      ? data.pendingActions
-      : (data.pendingAction ? [data.pendingAction] : []);
-    renderGeneratedFileActions(actions);
-    setStatus(actions.length > 1
-      ? (state.language === "en" ? `${actions.length} file previews created` : `已建立 ${actions.length} 個檔案預覽`)
-      : t("statuses.fileGenerated"));
-  } catch (error) {
-    setStatus(t("statuses.chatFailed"));
-    showError(normalizeError(error, "FILE_GENERATION_FAILED", t("errors.fileGenerationFailed")));
   }
 }
 
@@ -2131,6 +2096,21 @@ async function sendChat(event) {
         appendLiveText(liveTarget.content, text);
       } else if (eventName === "content") {
         appendLiveText(liveTarget.content, data.text || "");
+      } else if (eventName === "generated_file_preview") {
+        const actions = Array.isArray(data.pendingActions)
+          ? data.pendingActions
+          : (data.pendingAction ? [data.pendingAction] : []);
+        renderGeneratedFileActions(actions);
+        const countText = actions.length > 1
+          ? (state.language === "en" ? `${actions.length} file previews are ready.` : `已準備 ${actions.length} 個檔案預覽。`)
+          : (state.language === "en" ? "File preview is ready." : "檔案預覽已準備完成。");
+        appendLiveText(
+          liveTarget.content,
+          `\n\n${countText}${state.language === "en" ? " Confirm the preview below before writing." : " 請在下方預覽確認後再寫入。"}\n`
+        );
+      } else if (eventName === "generated_file_error") {
+        const normalized = normalizeError(data, "FILE_GENERATION_FAILED", t("errors.fileGenerationFailed"));
+        appendLiveText(liveTarget.content, `\n\n${state.language === "en" ? "File preview failed:" : "檔案預覽建立失敗："} ${localizeError(normalized).message}\n`);
       } else if (eventName === "done") {
         completed = true;
         if (data.modelKey) {
@@ -2212,7 +2192,6 @@ elements.chatImageInput.addEventListener("change", async (event) => {
   }
 });
 elements.removeChatImageBtn.addEventListener("click", () => clearChatImage());
-elements.generateFileBtn?.addEventListener("click", generateFileFromPrompt);
 elements.newThreadBtn?.addEventListener("click", newThread);
 elements.chatInput.addEventListener("paste", async (event) => {
   const items = [...(event.clipboardData?.items || [])];

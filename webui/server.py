@@ -2652,6 +2652,32 @@ def parse_generation_request(payload: Dict[str, object]) -> Dict[str, object]:
     return parse_generation_requests(payload)[0]
 
 
+def is_model_file_generation_request(prompt: str) -> bool:
+    return looks_like_generation_command(prompt) and any(
+        extension in GENERATABLE_BINARY_EXTENSIONS or extension in GENERATABLE_TEXT_EXTENSIONS
+        for extension in infer_generation_extensions(prompt, "")
+    )
+
+
+def extract_model_document_title(reply: str, prompt: str) -> str:
+    for kind, text in iter_document_lines(reply):
+        if kind == "heading" and text:
+            return text[:80]
+    for raw_line in strip_reasoning_blocks(reply).splitlines():
+        cleaned = clean_document_inline(raw_line)
+        if cleaned and len(cleaned) <= 80:
+            return cleaned
+    return infer_generation_basename(prompt, "", "generated")
+
+
+def build_generation_requests_from_model_reply(prompt: str, reply_content: str) -> List[Dict[str, object]]:
+    visible = strip_reasoning_blocks(reply_content).strip()
+    if not visible:
+        return []
+    title = extract_model_document_title(visible, prompt)
+    return parse_generation_requests({"prompt": prompt, "title": title, "content": visible})
+
+
 def clean_document_inline(text: str) -> str:
     cleaned = strip_reasoning_blocks(text)
     cleaned = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", cleaned)
@@ -3597,13 +3623,24 @@ def get_request_max_tokens(payload: Dict[str, object], default_value: int) -> in
     return max(16, min(default_value, requested))
 
 
-def build_chat_system_prompt(model_key: str) -> str:
-    return (
+FILE_GENERATION_SYSTEM_PROMPT = (
+    "如果使用者要求生成、輸出、建立或製作文件檔案，請先產出可直接放入文件的完整內容。"
+    "第一行請用 Markdown H1 標題格式，例如「# 專案功能介紹」，CodeWorker 會用這個標題自動命名檔案。"
+    "請不要宣稱檔案已經寫入；CodeWorker 會在你回答後建立檔案預覽，並等待使用者確認後才真正寫入。"
+    "內容請保持乾淨，不要輸出任意 Python 腳本作為生成手段。"
+)
+
+
+def build_chat_system_prompt(model_key: str, file_generation_requested: bool = False) -> str:
+    prompt = (
         "請只根據本輪實際提供給你的文字、圖片、文件抽取內容與 keyframes 回答。"
         "若使用者貼的是 URL/連結，而系統沒有提供網頁內容、影片 keyframes 或逐字稿，"
         "只能說明目前只看得到連結本身，不得根據網址、檔名或標題猜測影片內容。"
         "若附件只有 metadata 而沒有像素、音訊逐字稿或文字抽取內容，請明確說明限制，不要編造內容。"
     )
+    if file_generation_requested:
+        prompt = f"{prompt}\n\n{FILE_GENERATION_SYSTEM_PROMPT}"
+    return prompt
 
 
 def strip_think_blocks(content: str) -> str:
@@ -7073,6 +7110,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     ui_state=STATE.ui_state,
                 )
                 effective_message = message
+                file_generation_requested = (
+                    bool(message)
+                    and not is_continue_request(message)
+                    and is_model_file_generation_request(message)
+                    and project_root is not None
+                    and STATE.ui_state == "ready"
+                )
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
@@ -7109,7 +7153,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 context,
                 effective_message,
                 attachments,
-                build_chat_system_prompt(snapshot.model_key),
+                build_chat_system_prompt(snapshot.model_key, file_generation_requested=file_generation_requested),
                 max_tokens=max_tokens,
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
                 continue_on_length=get_continue_on_length(snapshot.model_key),
@@ -7300,6 +7344,33 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 raise ModelReplyError(make_error("MODEL_EMPTY_REPLY", "模型沒有產生可顯示的最終答案。", "", extra={"modelKey": model_key}))
             with STATE_LOCK:
                 append_chat_exchange_locked(model_key, message, attachments, context, reply)
+            if file_generation_requested and project_root is not None:
+                try:
+                    generation_requests = build_generation_requests_from_model_reply(message, content or reply)
+                    generated_actions = [create_generated_file_preview(project_root.resolve(), request) for request in generation_requests]
+                    public_actions = [public_generated_action(action) for action in generated_actions]
+                    if public_actions:
+                        write_sse_event(
+                            self,
+                            "generated_file_preview",
+                            {
+                                "pendingAction": public_actions[0],
+                                "pendingActions": public_actions,
+                                "message": "已根據模型回覆建立檔案預覽，確認後才會寫入。",
+                            },
+                        )
+                except ImportError as exc:
+                    write_sse_event(
+                        self,
+                        "generated_file_error",
+                        make_error("FILE_GENERATION_DEPENDENCY_MISSING", "A document generation package is missing.", str(exc)),
+                    )
+                except Exception as exc:
+                    write_sse_event(
+                        self,
+                        "generated_file_error",
+                        make_error("FILE_GENERATION_FAILED", "File generation planning failed.", str(exc)),
+                    )
             write_sse_event(self, "done", {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage})
         except ModelReplyError as exc:
             write_sse_event(self, "error", exc.error)

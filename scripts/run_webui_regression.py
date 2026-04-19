@@ -730,6 +730,23 @@ def test_document_generation_splits_long_pptx_sections():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_model_initiated_generation_uses_model_title_for_filename():
+    prompt = "我要生成一個專案功能介紹的PPT文件"
+    reply = "# CodeWorker 專案功能介紹\n\n- 本機模型服務\n- 全專案 RAG"
+    requests = server.build_generation_requests_from_model_reply(prompt, reply)
+    assert_true(len(requests) == 1, "model-initiated PPT request should create one request")
+    assert_true(requests[0]["targetPath"].endswith(".pptx"), "PPT request should create a .pptx target")
+    assert_true("CodeWorker-專案功能介紹" in requests[0]["targetPath"], "generated filename should come from the model title")
+    assert_true("本機模型服務" in requests[0]["content"], "generated content should come from model reply")
+
+
+def test_generation_system_prompt_is_only_added_for_generation_requests():
+    normal_prompt = server.build_chat_system_prompt("gemma4")
+    generation_prompt = server.build_chat_system_prompt("gemma4", file_generation_requested=True)
+    assert_true("CodeWorker 會在你回答後建立檔案預覽" not in normal_prompt, "normal chat system prompt should not mention file preview")
+    assert_true("CodeWorker 會在你回答後建立檔案預覽" in generation_prompt, "generation chat prompt should instruct model to prepare content")
+
+
 def main():
     tests = [
         test_no_context_chat_payload,
@@ -750,6 +767,8 @@ def main():
         test_generated_pdf_keeps_chinese_text_extractable,
         test_document_generation_cleans_markdown_for_pptx,
         test_document_generation_splits_long_pptx_sections,
+        test_model_initiated_generation_uses_model_title_for_filename,
+        test_generation_system_prompt_is_only_added_for_generation_requests,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
         test_video_metadata_fallback_blocks_guessing,
