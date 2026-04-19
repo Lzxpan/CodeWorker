@@ -2083,6 +2083,7 @@ async function sendChat(event) {
     await streamChat({
       message,
       modelKey: selectedModelKey,
+      threadId: state.activeThreadId || "",
       attachmentIds: attachments.map((entry) => entry.id).filter(Boolean),
     }, (eventName, data) => {
       if (eventName === "context") {

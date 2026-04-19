@@ -2554,8 +2554,16 @@ def looks_like_generation_command(prompt: str) -> bool:
         for aliases in GENERATABLE_EXTENSION_ALIASES.values()
         for alias in aliases
     )
+    has_generic_file = any(
+        marker in lowered
+        for marker in (
+            "生成檔案", "產生檔案", "輸出檔案", "存成檔案", "建立檔案", "製作檔案", "匯出檔案",
+            "生成文件", "產生文件", "輸出文件", "存成文件", "建立文件", "製作文件", "匯出文件",
+            "generate file", "create file", "export file", "generate document", "create document", "export document",
+        )
+    )
     has_explicit_content = any(marker in prompt for marker in ("內容是", "內容：", "content:", "content is"))
-    return has_command and has_format and not has_explicit_content
+    return has_command and (has_format or has_generic_file) and not has_explicit_content
 
 
 def infer_generation_extensions(prompt: str, file_type: str) -> List[str]:
@@ -4047,6 +4055,24 @@ def select_thread_locked(thread_id: str) -> Dict[str, object]:
     ACTIVE_THREAD_ID = thread_id
     apply_thread_to_state_locked(thread)
     return thread_list_payload_locked()
+
+
+def activate_thread_for_request_locked(thread_id: object) -> None:
+    global ACTIVE_THREAD_ID
+    requested = safe_thread_id(thread_id)
+    if not requested:
+        ensure_active_thread_locked()
+        return
+    path = thread_path(requested)
+    thread = load_thread_file(path)
+    if not thread:
+        raise ValueError("Thread not found.")
+    if ACTIVE_THREAD_ID != requested:
+        save_current_thread_locked()
+        ACTIVE_THREAD_ID = requested
+        apply_thread_to_state_locked(thread)
+    elif not STATE.history and thread.get("history"):
+        apply_thread_to_state_locked(thread)
 
 
 def update_thread_locked(thread_id: str, title: str) -> Dict[str, object]:
@@ -7146,6 +7172,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             message = str(payload.get("message", "")).strip()
             requested_model_key = str(payload.get("modelKey", "")).strip().lower()
+            requested_thread_id = payload.get("threadId", "")
             image_id = str(payload.get("imageId", "")).strip()
             attachment_ids = payload.get("attachmentIds", [])
             if not isinstance(attachment_ids, list):
@@ -7161,6 +7188,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 model_key = requested_model_key or STATE.model_key
                 if model_key not in SUPPORTED_MODEL_KEYS:
                     raise ValueError("Unsupported model.")
+                activate_thread_for_request_locked(requested_thread_id)
                 project_root = Path(STATE.project_path) if STATE.project_path else None
                 snapshot = SessionState(
                     project_path=STATE.project_path,
@@ -7278,6 +7306,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             elif details.startswith("Unsupported model"):
                 code = "MODEL_INVALID"
                 message = "Model validation failed."
+            elif details == "Thread not found.":
+                code = "THREAD_NOT_FOUND"
+                message = "Thread not found."
             elif details == "message or image is required.":
                 code = "CHAT_EMPTY"
                 message = "message or image is required."
@@ -7293,6 +7324,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             message = str(payload.get("message", "")).strip()
             requested_model_key = str(payload.get("modelKey", "")).strip().lower()
+            requested_thread_id = payload.get("threadId", "")
             image_id = str(payload.get("imageId", "")).strip()
             attachment_ids = payload.get("attachmentIds", [])
             if not isinstance(attachment_ids, list):
@@ -7308,6 +7340,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 model_key = requested_model_key or STATE.model_key
                 if model_key not in SUPPORTED_MODEL_KEYS:
                     raise ValueError("Unsupported model.")
+                activate_thread_for_request_locked(requested_thread_id)
                 project_root = Path(STATE.project_path) if STATE.project_path else None
                 snapshot = SessionState(
                     project_path=STATE.project_path,
@@ -7363,8 +7396,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 raise ValueError("Uploaded file not found. Please upload the file again.")
         except ValueError as exc:
             details = str(exc)
-            code = "MODEL_INVALID" if details.startswith("Unsupported model") else "CHAT_FAILED"
-            error_response(self, make_error(code, "Chat failed.", details))
+            if details.startswith("Unsupported model"):
+                code = "MODEL_INVALID"
+                message_text = "Model validation failed."
+            elif details == "Thread not found.":
+                code = "THREAD_NOT_FOUND"
+                message_text = "Thread not found."
+            else:
+                code = "CHAT_FAILED"
+                message_text = "Chat failed."
+            error_response(self, make_error(code, message_text, details))
             return
         except Exception as exc:
             error_response(self, make_error("CHAT_FAILED", "Chat failed.", str(exc)))
