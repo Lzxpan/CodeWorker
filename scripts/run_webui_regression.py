@@ -850,6 +850,31 @@ def test_generic_previous_answer_file_generation_defaults_to_markdown():
     assert_true(not server.is_model_file_generation_request("請問檔案生成的 code 在哪裡？"), "source-code questions about file generation must not become generation actions")
 
 
+def test_generation_without_project_uses_app_root_and_previous_answer():
+    old_state = (
+        server.STATE.project_path,
+        server.STATE.ui_state,
+        list(server.STATE.history),
+    )
+    try:
+        with server.STATE_LOCK:
+            server.STATE.project_path = None
+            server.STATE.ui_state = "idle"
+            server.STATE.history = [
+                {"role": "user", "content": "請長篇說明"},
+                {"role": "assistant", "content": "# 魔術方塊操作說明\n\n## Slide 1\n- 版本與 Hold 功能"},
+            ]
+            generation_root = server.get_generation_root_locked()
+            requests = server.build_generation_requests_without_model("請將上面的內容生成doc、ppt、pdf給我", list(server.STATE.history))
+        suffixes = {Path(str(item["targetPath"])).suffix.lower() for item in requests}
+        assert_true(generation_root == server.ROOT_DIR.resolve(), "file generation without an open project should use the CodeWorker app root")
+        assert_true(suffixes == {".docx", ".pptx", ".pdf"}, "previous-answer multi-format generation should create docx, pptx, and pdf requests")
+        assert_true(all("版本與 Hold 功能" in str(item["content"]) for item in requests), "multi-format generation should use previous assistant content")
+    finally:
+        with server.STATE_LOCK:
+            server.STATE.project_path, server.STATE.ui_state, server.STATE.history = old_state
+
+
 def test_generated_pdf_keeps_chinese_text_extractable():
     root = ROOT / ".tmp" / "regression-generate-pdf"
     shutil.rmtree(root, ignore_errors=True)
@@ -922,7 +947,8 @@ def test_generation_system_prompt_is_only_added_for_generation_requests():
 
 def test_stream_chat_initializes_model_generation_flag():
     source = inspect.getsource(server.WebUIHandler.handle_chat_stream)
-    assert_true("file_generation_requested = (" in source, "stream chat must initialize file_generation_requested before preview creation")
+    assert_true("file_generation_requested = file_generation_intent" in source, "stream chat must initialize file_generation_requested before preview creation")
+    assert_true("generation_root = get_generation_root_locked()" in source, "stream chat must choose a generation root before preview creation")
     assert_true(
         "build_chat_system_prompt(snapshot.model_key, file_generation_requested=file_generation_requested)" in source,
         "stream chat must pass the generation flag into the model system prompt",
@@ -953,6 +979,7 @@ def main():
         test_previous_answer_docx_generation_uses_history_without_model,
         test_thread_continuation_generation_loads_requested_thread_history,
         test_generic_previous_answer_file_generation_defaults_to_markdown,
+        test_generation_without_project_uses_app_root_and_previous_answer,
         test_generated_pdf_keeps_chinese_text_extractable,
         test_document_generation_cleans_markdown_for_pptx,
         test_document_generation_splits_long_pptx_sections,

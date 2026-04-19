@@ -2507,6 +2507,12 @@ def ensure_project_relative_target(project_root: Path, relative_path: str) -> Pa
     return target
 
 
+def get_generation_root_locked() -> Path:
+    if STATE.project_path and STATE.ui_state == "ready":
+        return Path(STATE.project_path).resolve()
+    return ROOT_DIR.resolve()
+
+
 def normalize_generation_extension(value: str) -> str:
     extension = value.strip().lower()
     if not extension:
@@ -6914,9 +6920,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             with STATE_LOCK:
-                if STATE.ui_state != "ready" or not STATE.project_path:
-                    raise ValueError("請先完成開啟專案。")
-                project_root = Path(STATE.project_path).resolve()
+                project_root = get_generation_root_locked()
                 history_snapshot = [dict(item) for item in STATE.history]
             requests = parse_generation_requests(payload, history_snapshot)
             actions = [create_generated_file_preview(project_root, request) for request in requests]
@@ -6932,9 +6936,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 },
             )
         except ValueError as exc:
-            code = "PROJECT_NOT_READY" if str(exc) == "請先完成開啟專案。" else "FILE_GENERATION_INVALID"
-            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "File generation request is invalid."
-            error_response(self, make_error(code, message, str(exc)))
+            error_response(self, make_error("FILE_GENERATION_INVALID", "File generation request is invalid.", str(exc)))
         except ImportError as exc:
             error_response(self, make_error("FILE_GENERATION_DEPENDENCY_MISSING", "A document generation package is missing.", str(exc)))
         except Exception as exc:
@@ -7190,6 +7192,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     raise ValueError("Unsupported model.")
                 activate_thread_for_request_locked(requested_thread_id)
                 project_root = Path(STATE.project_path) if STATE.project_path else None
+                generation_root = get_generation_root_locked()
                 snapshot = SessionState(
                     project_path=STATE.project_path,
                     model_key=model_key,
@@ -7209,11 +7212,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 )
                 effective_message = message
                 file_generation_intent = bool(message) and is_model_file_generation_request(message)
-                file_generation_requested = (
-                    file_generation_intent
-                    and project_root is not None
-                    and STATE.ui_state == "ready"
-                )
+                file_generation_requested = file_generation_intent
                 direct_generation_requests = build_generation_requests_without_model(message, snapshot.history) if file_generation_requested else []
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
@@ -7242,8 +7241,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 context_coverage = with_memory_coverage(context_coverage, snapshot, model_key) if not continuation_message else context_coverage
             if attachment_ids and not attachments:
                 raise ValueError("Uploaded file not found. Please upload the file again.")
-            if direct_generation_requests and project_root is not None:
-                actions = [create_generated_file_preview(project_root.resolve(), request) for request in direct_generation_requests]
+            if direct_generation_requests:
+                actions = [create_generated_file_preview(generation_root, request) for request in direct_generation_requests]
                 public_actions = [public_generated_action(action) for action in actions]
                 reply = "已根據你貼上的內容建立檔案預覽，確認後才會寫入。"
                 with STATE_LOCK:
@@ -7342,6 +7341,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     raise ValueError("Unsupported model.")
                 activate_thread_for_request_locked(requested_thread_id)
                 project_root = Path(STATE.project_path) if STATE.project_path else None
+                generation_root = get_generation_root_locked()
                 snapshot = SessionState(
                     project_path=STATE.project_path,
                     model_key=model_key,
@@ -7361,11 +7361,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 )
                 effective_message = message
                 file_generation_intent = bool(message) and is_model_file_generation_request(message)
-                file_generation_requested = (
-                    file_generation_intent
-                    and project_root is not None
-                    and STATE.ui_state == "ready"
-                )
+                file_generation_requested = file_generation_intent
                 direct_generation_requests = build_generation_requests_without_model(message, snapshot.history) if file_generation_requested else []
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
@@ -7422,8 +7418,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         content_parts: List[str] = []
         reasoning_open = False
         try:
-            if direct_generation_requests and project_root is not None:
-                actions = [create_generated_file_preview(project_root.resolve(), request) for request in direct_generation_requests]
+            if direct_generation_requests:
+                actions = [create_generated_file_preview(generation_root, request) for request in direct_generation_requests]
                 public_actions = [public_generated_action(action) for action in actions]
                 reply = "已根據你貼上的內容建立檔案預覽，確認後才會寫入。"
                 write_sse_event(self, "context", {"contextCoverage": {"mode": "direct-file-generation", "files": len(public_actions)}})
@@ -7503,10 +7499,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 raise ModelReplyError(make_error("MODEL_EMPTY_REPLY", "模型沒有產生可顯示的最終答案。", "", extra={"modelKey": model_key}))
             with STATE_LOCK:
                 append_chat_exchange_locked(model_key, message, attachments, context, reply)
-            if file_generation_requested and project_root is not None:
+            if file_generation_requested:
                 try:
                     generation_requests = build_generation_requests_from_model_reply(message, content or reply)
-                    generated_actions = [create_generated_file_preview(project_root.resolve(), request) for request in generation_requests]
+                    generated_actions = [create_generated_file_preview(generation_root, request) for request in generation_requests]
                     public_actions = [public_generated_action(action) for action in generated_actions]
                     if public_actions:
                         write_sse_event(
