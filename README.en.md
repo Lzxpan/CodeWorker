@@ -19,7 +19,7 @@ Core capabilities:
 - Focused context: checked files in the `File tree` become pinned context and take priority over broad RAG.
 - Attachments: code, config, documents, images, audio, and video can be attached. CodeWorker sends extracted text, keyframes, or transcripts when available, otherwise metadata fallback.
 - Threads: the right `240px` thread panel can create, switch, rename, and delete conversations. Each thread keeps its own history and memory.
-- File generation: `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx` are generated through preview + confirmation, and one request can create multiple formats.
+- File generation: `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx` are generated through preview + confirmation. One request can create multiple formats, Markdown markers are cleaned, and PDFs use a CJK-capable font.
 - Agent safety: writes, patches, deletes, and commands become pending actions and only run after user confirmation.
 
 ---
@@ -51,7 +51,7 @@ This prepares the components defined in `config\bootstrap.manifest.json`:
 - `FFmpeg`
 - `whisper.cpp` plus the speech-to-text model
 - `Gemma 4 26B` / `Qwen 3.5 9B Vision` GGUF files and `mmproj`
-- Python document packages: `pypdf`, `python-docx`, `reportlab`, `python-pptx`, `openpyxl`
+- Python document packages: `pypdf`, `pdfplumber`, `python-docx`, `reportlab`, `python-pptx`, `openpyxl`
 
 ### Launch the Web UI
 
@@ -123,7 +123,7 @@ Suggested prompts:
 
 1. Open a project.
 2. Describe the content source and target format in the chat input, for example: `Create docs/spec.md with a login-flow spec.`
-3. To export the previous assistant answer, write: `Turn the previous explanation and use cases into PPTX and PDF files.`
+3. To export the previous assistant answer, write: `Turn the previous explanation and use cases into PPTX and PDF files.` or `Generate a Word document from the explanation.`
 4. If one request mentions multiple formats, CodeWorker creates multiple pending previews, such as one `.pptx` and one `.pdf`.
 5. For Excel, mention `Excel`, `xlsx`, `spreadsheet`, or the target extension, for example: `Turn the test checklist into an Excel spreadsheet.`
 6. Click `Generate file`.
@@ -195,7 +195,7 @@ Workflow rules:
 - With an opened project and no pinned files, RAG searches paths, symbols, summaries, and chunks.
 - With pinned files, pinned context takes priority.
 - Long-answer continuation uses the previous answer tail instead of resending large `PROJECT RAG CONTEXT`.
-- File generation can use either the prompt or the previous assistant answer as the content source. Multi-format requests create multiple pending previews and write only after confirmation.
+- File generation can use either the prompt or the previous assistant answer as the content source. Multi-format requests create multiple pending previews. Document outputs clean Markdown markers and use a CJK-capable PDF font.
 
 ---
 
@@ -209,7 +209,8 @@ Workflow rules:
 - added the right `240px` thread panel with create, switch, rename, and delete operations.
 - added the file generation pending workflow for text/code, `.docx`, `.pdf`, `.pptx`, and `.xlsx`.
 - added parsing for multi-format generation requests such as `PPTX and PDF`, and previous-answer export when the prompt references `previous` or `last answer`.
-- added `reportlab`, `python-pptx`, and `openpyxl` to `scripts\bootstrap.ps1`.
+- fixed garbled Chinese text in generated PDFs, raw Markdown markers in PPTX / DOCX, and Word generation prompts that should use the previous answer.
+- added `pdfplumber`, `reportlab`, `python-pptx`, and `openpyxl` to `scripts\bootstrap.ps1`.
 - refreshed README, workflow diagrams, file structure, and usage guidance for V1.01.000.
 
 ### V1.00.000

@@ -581,7 +581,7 @@ if (-not $SkipRuntime) {
 }
 
 if (-not $SkipWinPython) {
-    Install-PythonPackages -Packages @("pypdf", "python-docx", "reportlab", "python-pptx", "openpyxl")
+    Install-PythonPackages -Packages @("pypdf", "pdfplumber", "python-docx", "reportlab", "python-pptx", "openpyxl")
 } else {
     Write-Step "Skipping Python document parser packages because -SkipWinPython was provided."
 }

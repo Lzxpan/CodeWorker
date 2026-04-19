@@ -666,6 +666,70 @@ def test_generation_prompt_infers_excel():
     assert_true(requests[0]["targetPath"].endswith(".xlsx"), "Excel request should create an .xlsx target")
 
 
+def test_generation_word_prompt_uses_previous_answer():
+    history = [
+        {"role": "user", "content": "請說明 CodeWorker"},
+        {"role": "assistant", "content": "<think>hidden</think>\n\nCodeWorker 是本機 AI 助理。"},
+    ]
+    requests = server.parse_generation_requests({"prompt": "幫我把說明生成word檔"}, history)
+    assert_true(requests[0]["targetPath"].endswith(".docx"), "word request should create a .docx target")
+    assert_true("CodeWorker 是本機 AI 助理" in requests[0]["content"], "word request should use previous assistant answer")
+    assert_true("hidden" not in requests[0]["content"], "word generation should strip reasoning")
+
+
+def test_generated_pdf_keeps_chinese_text_extractable():
+    root = ROOT / ".tmp" / "regression-generate-pdf"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "sample.pdf"
+    try:
+        server.write_pdf(target, "測試文件", "### 標題\n\n您好！我是 CodeWorker。\n\n- 支援 PDF\n- 支援 PPTX")
+        from pypdf import PdfReader
+
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(str(target)).pages)
+        assert_true("測試文件" in text and "您好" in text, "generated PDF should preserve extractable Chinese text")
+        assert_true("ЁН" not in text, "generated PDF should not produce garbled CJK glyph text")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_document_generation_cleans_markdown_for_pptx():
+    root = ROOT / ".tmp" / "regression-generate-pptx"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "sample.pptx"
+    try:
+        server.write_pptx(target, "測試簡報", "### 核心功能\n\n- **本機模型**\n- `RAG` 搜尋")
+        from pptx import Presentation
+
+        texts = []
+        for slide in Presentation(str(target)).slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    texts.append(shape.text)
+        combined = "\n".join(texts)
+        assert_true("核心功能" in combined and "本機模型" in combined, "PPTX should keep headings and bullets")
+        assert_true("**" not in combined and "`" not in combined, "PPTX should not expose raw Markdown markers")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_document_generation_splits_long_pptx_sections():
+    root = ROOT / ".tmp" / "regression-generate-pptx-long"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "sample.pptx"
+    try:
+        long_content = "\n".join(f"- 第 {index} 項內容很長，用來確認投影片不會把全部文字塞在同一頁。" for index in range(1, 16))
+        server.write_pptx(target, "長內容簡報", long_content)
+        from pptx import Presentation
+
+        presentation = Presentation(str(target))
+        assert_true(len(presentation.slides) > 2, "long PPTX content should be split across multiple slides")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     tests = [
         test_no_context_chat_payload,
@@ -682,6 +746,10 @@ def main():
         test_generated_text_file_requires_confirmation,
         test_generation_prompt_infers_multiple_documents_from_previous_answer,
         test_generation_prompt_infers_excel,
+        test_generation_word_prompt_uses_previous_answer,
+        test_generated_pdf_keeps_chinese_text_extractable,
+        test_document_generation_cleans_markdown_for_pptx,
+        test_document_generation_splits_long_pptx_sections,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
         test_video_metadata_fallback_blocks_guessing,

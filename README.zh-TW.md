@@ -19,7 +19,7 @@
 - 聚焦上下文：在 `檔案樹` 勾選檔案時，pinned files 會優先於全專案 RAG。
 - 附件分析：支援程式碼、設定、文件、圖片、音訊與影片；可抽文字、keyframes 或 transcript 時會送入模型，否則送 metadata fallback。
 - 多對話串：右側 `240px` thread panel 可新增、切換、重新命名、刪除對話串，每個 thread 保留自己的 history 與 memory。
-- 檔案生成：可先預覽再確認寫入 `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx`，同一句需求可建立多個格式。
+- 檔案生成：可先預覽再確認寫入 `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx`，同一句需求可建立多個格式，並會清理 Markdown 標記與使用 CJK PDF 字型。
 - Agent 安全機制：寫檔、patch、刪檔與執行 command 前都會建立 pending action，使用者確認後才執行。
 
 ---
@@ -51,7 +51,7 @@ scripts\bootstrap.cmd
 - `FFmpeg`
 - `whisper.cpp` 與 speech-to-text model
 - `Gemma 4 26B` / `Qwen 3.5 9B Vision` GGUF 與 `mmproj`
-- Python 文件套件：`pypdf`、`python-docx`、`reportlab`、`python-pptx`、`openpyxl`
+- Python 文件套件：`pypdf`、`pdfplumber`、`python-docx`、`reportlab`、`python-pptx`、`openpyxl`
 
 ### 啟動 Web UI
 
@@ -123,7 +123,7 @@ scripts\install-aider.cmd
 
 1. 開啟專案。
 2. 在對話輸入框寫清楚來源內容與目標格式，例如：「產生 `docs/spec.md`，內容是登入流程規格」。
-3. 若要把上一則回答輸出成文件，可以直接寫：「把剛剛的說明與使用場景做成一個 PPTX 跟 PDF 檔」。
+3. 若要把上一則回答輸出成文件，可以直接寫：「把剛剛的說明與使用場景做成一個 PPTX 跟 PDF 檔」或「幫我把說明生成 Word 檔」。
 4. 若同一句話提到多個格式，CodeWorker 會建立多個 pending preview，例如 `.pptx` 與 `.pdf` 各一個。
 5. Excel 請寫明 `Excel`、`xlsx`、`試算表` 或目標副檔名，例如：「把測試清單做成 Excel 試算表」。
 6. 點 `生成檔案`。
@@ -195,7 +195,7 @@ flowchart LR
 - 開啟專案但沒有 pinned files 時，RAG index 會依問題搜尋相關檔案、symbols、summary 與 chunks。
 - 有 pinned files 時，會優先使用 pinned context。
 - 長回答續寫使用上一段回答 tail，不再重送大型 `PROJECT RAG CONTEXT`。
-- 檔案生成可從 prompt 或上一則 assistant 回覆取內容；同一句多格式需求會建立多個 pending preview，確認後才寫入。
+- 檔案生成可從 prompt 或上一則 assistant 回覆取內容；同一句多格式需求會建立多個 pending preview，文件輸出會清理 Markdown 標記並使用可顯示中文的 PDF 字型。
 
 ---
 
@@ -209,7 +209,8 @@ flowchart LR
 - 新增右側 `240px` 對話串面板，支援新增、切換、重新命名與刪除 thread。
 - 新增 file generation pending workflow，支援 text/code、`.docx`、`.pdf`、`.pptx`、`.xlsx`。
 - 檔案生成可解析「PPTX 跟 PDF」等多格式需求，並在提到「剛剛 / 上一則」時使用上一則 assistant 可見回答當內容來源。
-- `scripts\bootstrap.ps1` 新增 `reportlab`、`python-pptx` 與 `openpyxl`。
+- 修正 PDF 中文亂碼、PPTX / DOCX 暴露 Markdown 標記，以及「把說明生成 Word 檔」未使用上一則回答的問題。
+- `scripts\bootstrap.ps1` 新增 `pdfplumber`、`reportlab`、`python-pptx` 與 `openpyxl`。
 - README、流程圖、檔案結構與使用教學更新到 V1.01.000。
 
 ### V1.00.000

@@ -2478,7 +2478,11 @@ GENERATABLE_EXTENSION_ALIASES: Dict[str, Tuple[str, ...]] = {
 }
 PREVIOUS_ANSWER_KEYWORDS = (
     "剛剛", "剛才", "上一則", "上一段", "上面", "上述", "前面", "前一個", "前一則", "剛", "剛才的",
-    "previous", "last answer", "above", "earlier",
+    "回復", "回覆", "回答", "說明", "這份", "這個",
+    "previous", "last answer", "above", "earlier", "this answer", "that answer",
+)
+GENERATION_COMMAND_KEYWORDS = (
+    "生成", "產生", "輸出", "存成", "做成", "轉成", "建立", "製作", "匯出", "generate", "create", "export", "turn",
 )
 
 
@@ -2532,6 +2536,18 @@ def should_use_previous_answer(prompt: str) -> bool:
     return any(keyword.lower() in lowered for keyword in PREVIOUS_ANSWER_KEYWORDS)
 
 
+def looks_like_generation_command(prompt: str) -> bool:
+    lowered = prompt.lower()
+    has_command = any(keyword.lower() in lowered for keyword in GENERATION_COMMAND_KEYWORDS)
+    has_format = any(
+        (alias.lower() in lowered)
+        for aliases in GENERATABLE_EXTENSION_ALIASES.values()
+        for alias in aliases
+    )
+    has_explicit_content = any(marker in prompt for marker in ("內容是", "內容：", "content:", "content is"))
+    return has_command and has_format and not has_explicit_content
+
+
 def infer_generation_extensions(prompt: str, file_type: str) -> List[str]:
     explicit = normalize_generation_extension(file_type)
     if explicit in GENERATABLE_EXTENSIONS:
@@ -2583,7 +2599,7 @@ def infer_generation_basename(prompt: str, title: str, fallback: str = "generate
 def build_generation_content(prompt: str, content: str, history: List[Dict[str, object]]) -> Tuple[str, str]:
     if content.strip():
         return content.strip(), "payload"
-    if should_use_previous_answer(prompt):
+    if should_use_previous_answer(prompt) or looks_like_generation_command(prompt):
         previous = get_last_assistant_visible_answer(history)
         if previous:
             return previous, "previous-assistant"
@@ -2636,36 +2652,170 @@ def parse_generation_request(payload: Dict[str, object]) -> Dict[str, object]:
     return parse_generation_requests(payload)[0]
 
 
+def clean_document_inline(text: str) -> str:
+    cleaned = strip_reasoning_blocks(text)
+    cleaned = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = cleaned.replace("**", "").replace("__", "").replace("`", "")
+    cleaned = cleaned.replace("---", "").strip()
+    return cleaned
+
+
+def iter_document_lines(content: str) -> List[Tuple[str, str]]:
+    lines: List[Tuple[str, str]] = []
+    in_code_block = False
+    for raw_line in strip_reasoning_blocks(content).splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if not line or line == "---":
+            lines.append(("blank", ""))
+            continue
+        if in_code_block:
+            lines.append(("code", raw_line.rstrip()))
+            continue
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading_match:
+            lines.append(("heading", clean_document_inline(heading_match.group(2))))
+            continue
+        bullet_match = re.match(r"^[-*]\s+(.+)$", line)
+        if bullet_match:
+            lines.append(("bullet", clean_document_inline(bullet_match.group(1))))
+            continue
+        numbered_match = re.match(r"^\d+[.)]\s+(.+)$", line)
+        if numbered_match:
+            lines.append(("numbered", clean_document_inline(numbered_match.group(1))))
+            continue
+        lines.append(("paragraph", clean_document_inline(line)))
+    while lines and lines[-1][0] == "blank":
+        lines.pop()
+    return lines
+
+
+def document_sections(content: str, default_title: str) -> List[Dict[str, object]]:
+    sections: List[Dict[str, object]] = []
+    current: Optional[Dict[str, object]] = None
+    for kind, text in iter_document_lines(content):
+        if kind == "blank":
+            continue
+        if kind == "heading":
+            if current:
+                sections.append(current)
+            current = {"title": text or default_title, "items": []}
+            continue
+        if current is None:
+            current = {"title": default_title, "items": []}
+        current["items"].append((kind, text))
+    if current:
+        sections.append(current)
+    return sections or [{"title": default_title, "items": [("paragraph", clean_document_inline(content))]}]
+
+
+def split_slide_line(text: str, max_chars: int = 130) -> List[str]:
+    cleaned = clean_document_inline(text)
+    if len(cleaned) <= max_chars:
+        return [cleaned]
+    parts: List[str] = []
+    remaining = cleaned
+    while len(remaining) > max_chars:
+        split_at = max(
+            remaining.rfind("。", 0, max_chars),
+            remaining.rfind("；", 0, max_chars),
+            remaining.rfind("，", 0, max_chars),
+            remaining.rfind(" ", 0, max_chars),
+        )
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        parts.append(remaining[:split_at].strip(" ，。；"))
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def chunk_slide_items(items: List[str], max_items: int = 6) -> List[List[str]]:
+    expanded: List[str] = []
+    for item in items:
+        expanded.extend(split_slide_line(item))
+    return [expanded[index:index + max_items] for index in range(0, len(expanded), max_items)] or [[]]
+
+
+def get_pdf_font_name() -> str:
+    from reportlab.pdfbase import pdfmetrics  # type: ignore
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont  # type: ignore
+    from reportlab.pdfbase.ttfonts import TTFont  # type: ignore
+
+    windows_fonts = (
+        ROOT_DIR / "runtime" / "fonts" / "NotoSansCJKtc-Regular.otf",
+        Path(r"C:\Windows\Fonts\msjh.ttc"),
+        Path(r"C:\Windows\Fonts\mingliu.ttc"),
+        Path(r"C:\Windows\Fonts\simsun.ttc"),
+    )
+    for font_path in windows_fonts:
+        if not font_path.exists():
+            continue
+        try:
+            font_name = "CodeWorkerCJK"
+            try:
+                pdfmetrics.getFont(font_name)
+            except KeyError:
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+            return font_name
+        except Exception:
+            continue
+
+    for font_name in ("MSung-Light", "STSong-Light"):
+        try:
+            pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+            return font_name
+        except Exception:
+            continue
+    return "Helvetica"
+
+
 def write_docx(path: Path, title: str, content: str) -> None:
     from docx import Document  # type: ignore
 
     document = Document()
-    document.add_heading(title, level=1)
-    for block in content.split("\n\n"):
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if not lines:
+    document.add_heading(clean_document_inline(title), level=1)
+    for kind, text in iter_document_lines(content):
+        if kind == "blank":
             continue
-        if all(line.startswith(("-", "*")) for line in lines):
-            for line in lines:
-                document.add_paragraph(line.lstrip("-* ").strip(), style="List Bullet")
+        if kind == "heading":
+            document.add_heading(text, level=2)
+        elif kind == "bullet":
+            document.add_paragraph(text, style="List Bullet")
+        elif kind == "numbered":
+            document.add_paragraph(text, style="List Number")
         else:
-            document.add_paragraph("\n".join(lines))
+            document.add_paragraph(text)
     document.save(str(path))
 
 
 def write_pdf(path: Path, title: str, content: str) -> None:
     from reportlab.lib.pagesizes import A4  # type: ignore
-    from reportlab.lib.styles import getSampleStyleSheet  # type: ignore
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet  # type: ignore
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer  # type: ignore
 
+    font_name = get_pdf_font_name()
     styles = getSampleStyleSheet()
-    doc = SimpleDocTemplate(str(path), pagesize=A4)
-    story = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
-    for block in content.split("\n\n"):
-        safe = escape_xml_text(block.strip()).replace("\n", "<br/>")
-        if safe:
-            story.append(Paragraph(safe, styles["BodyText"]))
-            story.append(Spacer(1, 8))
+    title_style = ParagraphStyle("CodeWorkerTitle", parent=styles["Title"], fontName=font_name, leading=26)
+    heading_style = ParagraphStyle("CodeWorkerHeading", parent=styles["Heading2"], fontName=font_name, leading=18, spaceBefore=10)
+    body_style = ParagraphStyle("CodeWorkerBody", parent=styles["BodyText"], fontName=font_name, leading=15, spaceAfter=6)
+    bullet_style = ParagraphStyle("CodeWorkerBullet", parent=body_style, leftIndent=16, firstLineIndent=-8)
+    doc = SimpleDocTemplate(str(path), pagesize=A4, leftMargin=42, rightMargin=42, topMargin=42, bottomMargin=42)
+    story = [Paragraph(escape_xml_text(clean_document_inline(title)), title_style), Spacer(1, 12)]
+    for kind, text in iter_document_lines(content):
+        safe = escape_xml_text(text)
+        if not safe:
+            continue
+        if kind == "heading":
+            story.append(Paragraph(safe, heading_style))
+        elif kind in {"bullet", "numbered"}:
+            story.append(Paragraph(f"- {safe}", bullet_style))
+        else:
+            story.append(Paragraph(safe, body_style))
     doc.build(story)
 
 
@@ -2678,18 +2828,32 @@ def write_pptx(path: Path, title: str, content: str) -> None:
 
     presentation = Presentation()
     title_slide = presentation.slides.add_slide(presentation.slide_layouts[0])
-    title_slide.shapes.title.text = title
+    title_slide.shapes.title.text = clean_document_inline(title)
     title_slide.placeholders[1].text = "Generated by CodeWorker"
-    chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", content) if chunk.strip()]
-    for index, chunk in enumerate(chunks[:12], start=1):
-        slide = presentation.slides.add_slide(presentation.slide_layouts[1])
-        slide.shapes.title.text = f"{title} {index}" if len(chunks) > 1 else title
-        body = slide.shapes.placeholders[1].text_frame
-        body.clear()
-        for line_index, line in enumerate(chunk.splitlines()[:8]):
-            paragraph = body.paragraphs[0] if line_index == 0 else body.add_paragraph()
-            paragraph.text = line.lstrip("-* ").strip()
-            paragraph.level = 0
+    sections = document_sections(content, clean_document_inline(title))
+    slide_count = 0
+    for section in sections:
+        items = [str(item[1]).strip() for item in section.get("items", []) if str(item[1]).strip()]
+        if not items and not str(section.get("title", "")).strip():
+            continue
+        slide_title = str(section.get("title") or title)
+        if not items:
+            items = [slide_title]
+        for chunk_index, chunk in enumerate(chunk_slide_items(items), start=1):
+            if slide_count >= 12:
+                break
+            slide_count += 1
+            slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+            suffix = f" ({chunk_index})" if len(items) > 6 and chunk_index > 1 else ""
+            slide.shapes.title.text = f"{slide_title[:100]}{suffix}"
+            body = slide.shapes.placeholders[1].text_frame
+            body.clear()
+            for line_index, line in enumerate(chunk):
+                paragraph = body.paragraphs[0] if line_index == 0 else body.add_paragraph()
+                paragraph.text = clean_document_inline(line)[:220]
+                paragraph.level = 0
+        if slide_count >= 12:
+            break
     presentation.save(str(path))
 
 
@@ -2709,16 +2873,14 @@ def write_xlsx(path: Path, title: str, content: str) -> None:
         cell.font = Font(bold=True)
         cell.fill = PatternFill("solid", fgColor="E8F0F0")
     row = 4
-    sections = [section.strip() for section in re.split(r"\n\s*\n", content) if section.strip()] or [content.strip()]
-    for section in sections:
-        lines = [line.strip().lstrip("-* ").strip() for line in section.splitlines() if line.strip()]
+    for section in document_sections(content, clean_document_inline(title)):
+        lines = [str(item[1]).strip() for item in section.get("items", []) if str(item[1]).strip()]
         if not lines:
-            continue
-        section_title = lines[0][:120]
+            lines = [str(section.get("title", "")).strip()]
         for line_index, line in enumerate(lines, start=1):
-            worksheet.cell(row=row, column=1, value=section_title if line_index == 1 else "")
+            worksheet.cell(row=row, column=1, value=str(section.get("title", "")) if line_index == 1 else "")
             worksheet.cell(row=row, column=2, value=line_index)
-            content_cell = worksheet.cell(row=row, column=3, value=line)
+            content_cell = worksheet.cell(row=row, column=3, value=clean_document_inline(line))
             content_cell.alignment = Alignment(wrap_text=True, vertical="top")
             row += 1
     worksheet.column_dimensions["A"].width = 28
