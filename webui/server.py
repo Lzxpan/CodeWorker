@@ -24,7 +24,7 @@ import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
 from core.models import (
@@ -3038,6 +3038,18 @@ def public_generated_action(action: Dict[str, object]) -> Dict[str, object]:
     }
 
 
+def infer_generation_root_from_action(action: Dict[str, object], target: Path) -> Optional[Path]:
+    root_path = str(action.get("rootPath") or "").strip()
+    if root_path:
+        return Path(root_path).resolve()
+    relative_text = str(action.get("targetPath") or "").replace("\\", "/").strip("/")
+    if relative_text:
+        relative_parts = [part for part in PurePosixPath(relative_text).parts if part not in ("", ".")]
+        if relative_parts and len(target.parents) >= len(relative_parts):
+            return target.parents[len(relative_parts) - 1].resolve()
+    return None
+
+
 def confirm_generated_file(action_id: str) -> Dict[str, object]:
     with GENERATED_FILE_ACTIONS_LOCK:
         action = GENERATED_FILE_ACTIONS.get(action_id)
@@ -3046,10 +3058,8 @@ def confirm_generated_file(action_id: str) -> Dict[str, object]:
     if action.get("status") != "pending":
         raise ValueError("Generated file action is not pending.")
     target = Path(str(action.get("absoluteTargetPath", ""))).resolve()
-    root_path = str(action.get("rootPath") or "").strip()
-    if root_path:
-        project_root = Path(root_path).resolve()
-    else:
+    project_root = infer_generation_root_from_action(action, target)
+    if project_root is None:
         with STATE_LOCK:
             project_root = get_generation_root_locked()
     try:

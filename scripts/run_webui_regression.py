@@ -879,6 +879,12 @@ def test_generation_without_project_uses_app_root_and_previous_answer():
         results = [server.confirm_generated_file(str(action["id"])) for action in actions]
         assert_true(all(Path(str(result["path"])).exists() for result in results), "confirm should write generated files even when no project is open")
         assert_true(all(str(result["path"]).startswith(str(root)) for result in results), "no-project generated files should stay under the app root")
+        legacy_action = server.create_generated_file_preview(generation_root, requests[0])
+        legacy_action.pop("rootPath", None)
+        with server.GENERATED_FILE_ACTIONS_LOCK:
+            server.GENERATED_FILE_ACTIONS[str(legacy_action["id"])] = legacy_action
+        legacy_result = server.confirm_generated_file(str(legacy_action["id"]))
+        assert_true(Path(str(legacy_result["path"])).exists(), "legacy previews without rootPath should still confirm using targetPath")
     finally:
         server.ROOT_DIR = old_root_dir
         with server.STATE_LOCK:
