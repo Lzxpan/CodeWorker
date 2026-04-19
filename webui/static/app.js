@@ -1754,8 +1754,13 @@ async function generateFileFromPrompt() {
       method: "POST",
       body: JSON.stringify({ prompt }),
     });
-    renderGeneratedFileAction(data.pendingAction);
-    setStatus(t("statuses.fileGenerated"));
+    const actions = Array.isArray(data.pendingActions)
+      ? data.pendingActions
+      : (data.pendingAction ? [data.pendingAction] : []);
+    renderGeneratedFileActions(actions);
+    setStatus(actions.length > 1
+      ? (state.language === "en" ? `${actions.length} file previews created` : `已建立 ${actions.length} 個檔案預覽`)
+      : t("statuses.fileGenerated"));
   } catch (error) {
     setStatus(t("statuses.chatFailed"));
     showError(normalizeError(error, "FILE_GENERATION_FAILED", t("errors.fileGenerationFailed")));
@@ -1763,13 +1768,38 @@ async function generateFileFromPrompt() {
 }
 
 function renderGeneratedFileAction(action) {
-  if (!action || !elements.pendingActionPanel) return;
+  renderGeneratedFileActions(action ? [action] : []);
+}
+
+function renderGeneratedFileActions(actions) {
+  if (!elements.pendingActionPanel) return;
+  const safeActions = Array.isArray(actions) ? actions.filter(Boolean) : [];
+  if (!safeActions.length) {
+    elements.pendingActionPanel.classList.add("hidden");
+    elements.pendingActionPanel.innerHTML = "";
+    return;
+  }
   elements.pendingActionPanel.classList.remove("hidden");
+  const title = safeActions.length > 1
+    ? (state.language === "en" ? "Generated file previews" : "生成檔案預覽")
+    : (state.language === "en" ? "Generated file preview" : "生成檔案預覽");
+  elements.pendingActionPanel.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    ${safeActions.map((action) => renderGeneratedFileActionCard(action)).join("")}
+  `;
+  safeActions.forEach((action) => {
+    elements.pendingActionPanel.querySelector(`[data-action-id="${CSS.escape(String(action.id || ""))}"] [data-action="confirm-generated"]`)?.addEventListener("click", () => confirmGeneratedFile(action.id));
+    elements.pendingActionPanel.querySelector(`[data-action-id="${CSS.escape(String(action.id || ""))}"] [data-action="cancel-generated"]`)?.addEventListener("click", () => cancelGeneratedFile(action.id));
+  });
+}
+
+function renderGeneratedFileActionCard(action) {
+  if (!action || !elements.pendingActionPanel) return;
   const overwriteText = action.overwrites
     ? (state.language === "en" ? "This will overwrite an existing file." : "這會覆蓋既有檔案。")
     : (state.language === "en" ? "This will create a new file." : "這會建立新檔案。");
-  elements.pendingActionPanel.innerHTML = `
-    <strong>${escapeHtml(state.language === "en" ? "Generated file preview" : "生成檔案預覽")}</strong>
+  return `
+    <div class="generated-action-card" data-action-id="${escapeHtml(String(action.id || ""))}">
     <div>${escapeHtml(action.targetPath || "")}</div>
     <div>${escapeHtml(overwriteText)}</div>
     <pre class="code-preview">${escapeHtml(action.preview || "")}</pre>
@@ -1777,9 +1807,17 @@ function renderGeneratedFileAction(action) {
       <button type="button" class="primary" data-action="confirm-generated">${escapeHtml(state.language === "en" ? "Confirm write" : "確認寫入")}</button>
       <button type="button" data-action="cancel-generated">${escapeHtml(state.language === "en" ? "Cancel" : "取消")}</button>
     </div>
+    </div>
   `;
-  elements.pendingActionPanel.querySelector('[data-action="confirm-generated"]')?.addEventListener("click", () => confirmGeneratedFile(action.id));
-  elements.pendingActionPanel.querySelector('[data-action="cancel-generated"]')?.addEventListener("click", () => cancelGeneratedFile(action.id));
+}
+
+function removeGeneratedActionCard(actionId) {
+  const card = elements.pendingActionPanel?.querySelector(`[data-action-id="${CSS.escape(String(actionId || ""))}"]`);
+  card?.remove();
+  if (!elements.pendingActionPanel?.querySelector(".generated-action-card")) {
+    elements.pendingActionPanel?.classList.add("hidden");
+    if (elements.pendingActionPanel) elements.pendingActionPanel.innerHTML = "";
+  }
 }
 
 async function confirmGeneratedFile(actionId) {
@@ -1788,8 +1826,7 @@ async function confirmGeneratedFile(actionId) {
       method: "POST",
       body: JSON.stringify({}),
     });
-    elements.pendingActionPanel.classList.add("hidden");
-    elements.pendingActionPanel.innerHTML = "";
+    removeGeneratedActionCard(actionId);
     setStatus(state.language === "en" ? "File written" : "檔案已寫入");
     await loadFileTree({ query: elements.fileTreeSearch?.value || "" });
     appendMessage("assistant", `${state.language === "en" ? "File written:" : "已寫入檔案："} ${data.targetPath || data.path}`);
@@ -1804,8 +1841,7 @@ async function cancelGeneratedFile(actionId) {
       method: "POST",
       body: JSON.stringify({}),
     });
-    elements.pendingActionPanel.classList.add("hidden");
-    elements.pendingActionPanel.innerHTML = "";
+    removeGeneratedActionCard(actionId);
     setStatus(state.language === "en" ? "File generation cancelled" : "已取消檔案生成");
   } catch (error) {
     showError(normalizeError(error, "FILE_GENERATION_CANCEL_FAILED", t("errors.fileGenerationFailed")));

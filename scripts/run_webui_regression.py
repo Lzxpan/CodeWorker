@@ -643,6 +643,29 @@ def test_generated_text_file_requires_confirmation():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_generation_prompt_infers_multiple_documents_from_previous_answer():
+    history = [
+        {"role": "user", "content": "請說明功能流程與使用場景"},
+        {"role": "assistant", "content": "<think>internal</think>\n\n功能流程：先分析，再產出。\n\n使用場景：報告與簡報。"},
+    ]
+    requests = server.parse_generation_requests(
+        {"prompt": "把剛剛的說明與使用場景做成一個PPTX跟PDF檔"},
+        history,
+    )
+    targets = {item["targetPath"] for item in requests}
+    assert_true(any(target.endswith(".pptx") for target in targets), "PPTX request should create a .pptx preview")
+    assert_true(any(target.endswith(".pdf") for target in targets), "PDF request should create a .pdf preview")
+    assert_true(not any(target.endswith(".md") for target in targets), "multi-format document request must not fall back to .md")
+    combined = "\n".join(str(item["content"]) for item in requests)
+    assert_true("功能流程" in combined and "internal" not in combined, "generation should use visible previous assistant content")
+
+
+def test_generation_prompt_infers_excel():
+    requests = server.parse_generation_requests({"prompt": "把測試清單做成 Excel 試算表"})
+    assert_true(len(requests) == 1, "Excel-only request should create one preview")
+    assert_true(requests[0]["targetPath"].endswith(".xlsx"), "Excel request should create an .xlsx target")
+
+
 def main():
     tests = [
         test_no_context_chat_payload,
@@ -657,6 +680,8 @@ def main():
         test_rag_chinese_game_speed_query_finds_code,
         test_project_rag_context_without_pins,
         test_generated_text_file_requires_confirmation,
+        test_generation_prompt_infers_multiple_documents_from_previous_answer,
+        test_generation_prompt_infers_excel,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
         test_video_metadata_fallback_blocks_guessing,

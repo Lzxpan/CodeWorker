@@ -531,6 +531,12 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
   font-size: 0.84rem;
 }
 
+.generated-action-card {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
 .chat-item {
   border-radius: 18px;
   padding: 14px 16px;

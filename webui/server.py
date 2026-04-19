@@ -2457,8 +2457,29 @@ def truncate_middle(text: str, max_chars: int) -> str:
 GENERATABLE_TEXT_EXTENSIONS = {
     ".txt", ".md", ".py", ".js", ".ts", ".json", ".html", ".css", ".yaml", ".yml", ".sql", ".cs",
 }
-GENERATABLE_BINARY_EXTENSIONS = {".docx", ".pdf", ".pptx"}
+GENERATABLE_BINARY_EXTENSIONS = {".docx", ".pdf", ".pptx", ".xlsx"}
 GENERATABLE_EXTENSIONS = GENERATABLE_TEXT_EXTENSIONS | GENERATABLE_BINARY_EXTENSIONS
+GENERATABLE_EXTENSION_ALIASES: Dict[str, Tuple[str, ...]] = {
+    ".pptx": ("pptx", "ppt", "powerpoint", "簡報", "投影片"),
+    ".pdf": ("pdf",),
+    ".docx": ("docx", "word", "word檔", "文件檔"),
+    ".xlsx": ("xlsx", "excel", "試算表", "工作表"),
+    ".md": ("markdown", "md"),
+    ".txt": ("txt", "文字檔"),
+    ".py": ("python", ".py"),
+    ".js": ("javascript", ".js"),
+    ".ts": ("typescript", ".ts"),
+    ".json": ("json",),
+    ".html": ("html",),
+    ".css": ("css",),
+    ".yaml": ("yaml", "yml"),
+    ".sql": ("sql",),
+    ".cs": ("c#", "csharp", ".cs"),
+}
+PREVIOUS_ANSWER_KEYWORDS = (
+    "剛剛", "剛才", "上一則", "上一段", "上面", "上述", "前面", "前一個", "前一則", "剛", "剛才的",
+    "previous", "last answer", "above", "earlier",
+)
 
 
 def slugify_filename(text: str, default: str = "generated") -> str:
@@ -2482,25 +2503,137 @@ def ensure_project_relative_target(project_root: Path, relative_path: str) -> Pa
     return target
 
 
-def parse_generation_request(payload: Dict[str, object]) -> Dict[str, object]:
+def normalize_generation_extension(value: str) -> str:
+    extension = value.strip().lower()
+    if not extension:
+        return ""
+    if not extension.startswith("."):
+        extension = f".{extension}"
+    return ".yaml" if extension == ".yml" else extension
+
+
+def strip_reasoning_blocks(text: str) -> str:
+    cleaned = re.sub(r"<think>[\s\S]*?</think>\s*", "", text or "", flags=re.IGNORECASE).strip()
+    return cleaned or (text or "").strip()
+
+
+def get_last_assistant_visible_answer(history: List[Dict[str, object]]) -> str:
+    for item in reversed(history or []):
+        if str(item.get("role", "")).lower() != "assistant":
+            continue
+        content = strip_reasoning_blocks(str(item.get("content") or ""))
+        if content:
+            return content
+    return ""
+
+
+def should_use_previous_answer(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(keyword.lower() in lowered for keyword in PREVIOUS_ANSWER_KEYWORDS)
+
+
+def infer_generation_extensions(prompt: str, file_type: str) -> List[str]:
+    explicit = normalize_generation_extension(file_type)
+    if explicit in GENERATABLE_EXTENSIONS:
+        return [explicit]
+    lowered = prompt.lower()
+    matches: List[str] = []
+    for extension, aliases in GENERATABLE_EXTENSION_ALIASES.items():
+        for alias in aliases:
+            alias_lower = alias.lower()
+            if alias_lower.startswith("."):
+                if alias_lower in lowered:
+                    matches.append(extension)
+                    break
+            elif alias_lower in lowered:
+                matches.append(extension)
+                break
+    unique: List[str] = []
+    for extension in matches:
+        if extension not in unique:
+            unique.append(extension)
+    return unique or [".md"]
+
+
+def extract_explicit_generation_targets(text: str) -> List[str]:
+    if not text:
+        return []
+    extensions = "|".join(re.escape(item.lstrip(".")) for item in sorted(GENERATABLE_EXTENSIONS, key=len, reverse=True))
+    pattern = re.compile(
+        rf"(?P<path>(?:generated/|docs/|doc/|output/|outputs/|reports/|exports/|[A-Za-z0-9_\-\u4e00-\u9fff]+/)?"
+        rf"[A-Za-z0-9_\-\u4e00-\u9fff][A-Za-z0-9_\-\u4e00-\u9fff ./\\()]*?\.({extensions}))",
+        re.IGNORECASE,
+    )
+    targets: List[str] = []
+    for match in pattern.finditer(text):
+        candidate = match.group("path").strip("`'\" \t\r\n，。；;:")
+        if candidate and not re.match(r"^[a-zA-Z]:", candidate) and candidate not in targets:
+            targets.append(candidate)
+    return targets
+
+
+def infer_generation_basename(prompt: str, title: str, fallback: str = "generated") -> str:
+    source = title.strip() or prompt.strip() or fallback
+    source = re.sub(r"(請|幫我|可以|把|將|做成|生成|產生|輸出|存成|建立|檔案|檔|一個|一份)", "", source)
+    source = re.sub(r"(pptx|ppt|pdf|docx|word|xlsx|excel|markdown|md|簡報|投影片|試算表|工作表)", "", source, flags=re.IGNORECASE)
+    source = source.replace("跟", " ").replace("和", " ").replace("與", " ")
+    return slugify_filename(source, fallback)
+
+
+def build_generation_content(prompt: str, content: str, history: List[Dict[str, object]]) -> Tuple[str, str]:
+    if content.strip():
+        return content.strip(), "payload"
+    if should_use_previous_answer(prompt):
+        previous = get_last_assistant_visible_answer(history)
+        if previous:
+            return previous, "previous-assistant"
+    return prompt.strip(), "prompt"
+
+
+def parse_generation_requests(payload: Dict[str, object], history: Optional[List[Dict[str, object]]] = None) -> List[Dict[str, object]]:
     prompt = str(payload.get("prompt") or payload.get("message") or "").strip()
     target_path = str(payload.get("targetPath") or payload.get("path") or "").strip()
     title = str(payload.get("title") or "").strip()
     content = str(payload.get("content") or "").strip()
     file_type = str(payload.get("fileType") or payload.get("format") or "").strip().lower()
-    if file_type and not file_type.startswith("."):
-        file_type = f".{file_type}"
-    if not target_path:
-        inferred_ext = file_type if file_type in GENERATABLE_EXTENSIONS else ".md"
-        inferred_title = title or prompt[:32] or "generated"
-        target_path = f"generated/{slugify_filename(inferred_title)}{inferred_ext}"
-    if not title:
-        title = Path(target_path).stem.replace("-", " ").replace("_", " ").strip() or "Generated file"
-    if not content:
-        content = prompt or title
-    if not content.strip():
+    history = history or []
+    generated_content, content_source = build_generation_content(prompt, content, history)
+    if not generated_content.strip():
         raise ValueError("prompt or content is required.")
-    return {"prompt": prompt, "targetPath": target_path, "title": title, "content": content}
+    explicit_targets = [target_path] if target_path else extract_explicit_generation_targets(prompt)
+    requests: List[Dict[str, object]] = []
+    if explicit_targets:
+        for target in explicit_targets:
+            extension = normalize_generation_extension(Path(target).suffix)
+            if extension not in GENERATABLE_EXTENSIONS:
+                raise ValueError(f"Unsupported generated file type: {extension}")
+            inferred_title = title or Path(target).stem.replace("-", " ").replace("_", " ").strip() or "Generated file"
+            requests.append({
+                "prompt": prompt,
+                "targetPath": target,
+                "title": inferred_title,
+                "content": generated_content,
+                "contentSource": content_source,
+            })
+        return requests
+
+    base = infer_generation_basename(prompt, title, "generated")
+    inferred_extensions = infer_generation_extensions(prompt, file_type)
+    for extension in inferred_extensions:
+        target = f"generated/{base}{extension}"
+        inferred_title = title or base.replace("-", " ").replace("_", " ").strip() or "Generated file"
+        requests.append({
+            "prompt": prompt,
+            "targetPath": target,
+            "title": inferred_title,
+            "content": generated_content,
+            "contentSource": content_source,
+        })
+    return requests
+
+
+def parse_generation_request(payload: Dict[str, object]) -> Dict[str, object]:
+    return parse_generation_requests(payload)[0]
 
 
 def write_docx(path: Path, title: str, content: str) -> None:
@@ -2560,6 +2693,40 @@ def write_pptx(path: Path, title: str, content: str) -> None:
     presentation.save(str(path))
 
 
+def write_xlsx(path: Path, title: str, content: str) -> None:
+    from openpyxl import Workbook  # type: ignore
+    from openpyxl.styles import Alignment, Font, PatternFill  # type: ignore
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = slugify_filename(title, "Sheet")[:31] or "Sheet"
+    worksheet["A1"] = title
+    worksheet["A1"].font = Font(bold=True, size=14)
+    worksheet.merge_cells("A1:C1")
+    headers = ("Section", "Line", "Content")
+    for column_index, header in enumerate(headers, start=1):
+        cell = worksheet.cell(row=3, column=column_index, value=header)
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="E8F0F0")
+    row = 4
+    sections = [section.strip() for section in re.split(r"\n\s*\n", content) if section.strip()] or [content.strip()]
+    for section in sections:
+        lines = [line.strip().lstrip("-* ").strip() for line in section.splitlines() if line.strip()]
+        if not lines:
+            continue
+        section_title = lines[0][:120]
+        for line_index, line in enumerate(lines, start=1):
+            worksheet.cell(row=row, column=1, value=section_title if line_index == 1 else "")
+            worksheet.cell(row=row, column=2, value=line_index)
+            content_cell = worksheet.cell(row=row, column=3, value=line)
+            content_cell.alignment = Alignment(wrap_text=True, vertical="top")
+            row += 1
+    worksheet.column_dimensions["A"].width = 28
+    worksheet.column_dimensions["B"].width = 10
+    worksheet.column_dimensions["C"].width = 90
+    workbook.save(str(path))
+
+
 def create_generated_file_preview(project_root: Path, request: Dict[str, object]) -> Dict[str, object]:
     target = ensure_project_relative_target(project_root, str(request["targetPath"]))
     extension = target.suffix.lower()
@@ -2589,6 +2756,8 @@ def create_generated_file_preview(project_root: Path, request: Dict[str, object]
             write_pdf(temp_path, title, content)
         elif extension == ".pptx":
             write_pptx(temp_path, title, content)
+        elif extension == ".xlsx":
+            write_xlsx(temp_path, title, content)
         payload["tempPath"] = str(temp_path)
         payload["sizeBytes"] = temp_path.stat().st_size if temp_path.exists() else 0
     with GENERATED_FILE_ACTIONS_LOCK:
@@ -6453,9 +6622,20 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
                 project_root = Path(STATE.project_path).resolve()
-            request = parse_generation_request(payload)
-            action = create_generated_file_preview(project_root, request)
-            json_response(self, {"ok": True, "data": {"pendingAction": public_generated_action(action)}})
+                history_snapshot = [dict(item) for item in STATE.history]
+            requests = parse_generation_requests(payload, history_snapshot)
+            actions = [create_generated_file_preview(project_root, request) for request in requests]
+            public_actions = [public_generated_action(action) for action in actions]
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "data": {
+                        "pendingAction": public_actions[0] if public_actions else None,
+                        "pendingActions": public_actions,
+                    },
+                },
+            )
         except ValueError as exc:
             code = "PROJECT_NOT_READY" if str(exc) == "請先完成開啟專案。" else "FILE_GENERATION_INVALID"
             message = "Project is not ready." if code == "PROJECT_NOT_READY" else "File generation request is invalid."
