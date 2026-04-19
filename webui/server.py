@@ -2719,6 +2719,19 @@ def build_generation_requests_from_inline_prompt(prompt: str) -> List[Dict[str, 
     return parse_generation_requests({"prompt": prompt, "title": title, "content": content})
 
 
+def build_generation_requests_without_model(prompt: str, history: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    inline_requests = build_generation_requests_from_inline_prompt(prompt)
+    if inline_requests:
+        return inline_requests
+    if not is_model_file_generation_request(prompt) or not should_use_previous_answer(prompt):
+        return []
+    previous = get_last_assistant_visible_answer(history)
+    if not previous:
+        return []
+    title = extract_model_document_title(previous, prompt)
+    return parse_generation_requests({"prompt": prompt, "title": title, "content": previous})
+
+
 def clean_document_inline(text: str) -> str:
     cleaned = strip_reasoning_blocks(text)
     cleaned = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", cleaned)
@@ -7157,7 +7170,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     and project_root is not None
                     and STATE.ui_state == "ready"
                 )
-                direct_generation_requests = build_generation_requests_from_inline_prompt(message) if file_generation_requested else []
+                direct_generation_requests = build_generation_requests_without_model(message, snapshot.history) if file_generation_requested else []
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
@@ -7304,7 +7317,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     and project_root is not None
                     and STATE.ui_state == "ready"
                 )
-                direct_generation_requests = build_generation_requests_from_inline_prompt(message) if file_generation_requested else []
+                direct_generation_requests = build_generation_requests_without_model(message, snapshot.history) if file_generation_requested else []
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
