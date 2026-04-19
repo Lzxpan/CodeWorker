@@ -19,7 +19,7 @@
 - 聚焦上下文：在 `檔案樹` 勾選檔案時，pinned files 會優先於全專案 RAG。
 - 附件分析：支援程式碼、設定、文件、圖片、音訊與影片；可抽文字、keyframes 或 transcript 時會送入模型，否則送 metadata fallback。
 - 多對話串：右側 `240px` thread panel 可新增、切換、重新命名、刪除對話串，每個 thread 保留自己的 history 與 memory。
-- 檔案生成：可先預覽再確認寫入 `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx`，同一句需求可建立多個格式，並會清理 Markdown 標記與使用 CJK PDF 字型。
+- 模型主導檔案生成：在一般對話中要求產生文件即可，模型會先產生內容與標題，CodeWorker 依模型標題自動命名並建立 pending preview；確認後才寫入 `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx`。
 - Agent 安全機制：寫檔、patch、刪檔與執行 command 前都會建立 pending action，使用者確認後才執行。
 
 ---
@@ -31,7 +31,7 @@
 - 建議至少 `32GB RAM` 等級；大型 context、圖片、影片 keyframes 與長回答都會增加記憶體壓力。
 - 未開啟專案時只做一般問答；已開啟專案且未釘選檔案時使用全專案 RAG；有 pinned files 時優先使用 pinned context。
 - 影片不是直接把 MP4 binary 丟給模型，而是先用 `FFmpeg` 抽 keyframes；音訊與影片音軌會嘗試 `whisper.cpp` speech-to-text。
-- 檔案生成與 Agent 寫入都必須確認後才會落到 project root。
+- 檔案生成與 Agent 寫入都必須確認後才會落到 project root；生成完成後 UI 會顯示實際檔案路徑與檔名。
 
 ---
 
@@ -122,12 +122,12 @@ scripts\install-aider.cmd
 ### 檔案生成
 
 1. 開啟專案。
-2. 在對話輸入框寫清楚來源內容與目標格式，例如：「產生 `docs/spec.md`，內容是登入流程規格」。
-3. 若要把上一則回答輸出成文件，可以直接寫：「把剛剛的說明與使用場景做成一個 PPTX 跟 PDF 檔」或「幫我把說明生成 Word 檔」。
-4. 若同一句話提到多個格式，CodeWorker 會建立多個 pending preview，例如 `.pptx` 與 `.pdf` 各一個。
-5. Excel 請寫明 `Excel`、`xlsx`、`試算表` 或目標副檔名，例如：「把測試清單做成 Excel 試算表」。
-6. 點 `生成檔案`。
-7. 確認 pending preview 後才會寫入 project root。
+2. 直接用一般聊天要求模型生成檔案，例如：「我要生成一個專案功能介紹的 PPT 文件」。
+3. 模型會先產生文件內容，第一行標題會作為自動命名依據；CodeWorker 會用這份回覆建立 pending preview。
+4. 若要把上一則回答輸出成文件，可以直接寫：「把剛剛的說明與使用場景做成一個 PPTX 跟 PDF 檔」或「幫我把說明生成 Word 檔」。
+5. 若同一句話提到多個格式，CodeWorker 會建立多個 pending preview，例如 `.pptx` 與 `.pdf` 各一個。
+6. Excel 請寫明 `Excel`、`xlsx`、`試算表` 或目標副檔名，例如：「把測試清單做成 Excel 試算表」。
+7. 檢查 pending preview 後按「確認寫入」；寫入完成後，對話中會顯示實際路徑與檔名。
 
 ---
 
@@ -175,13 +175,13 @@ flowchart LR
     O --> I["Local RAG index / cache"]
     W --> P["Pinned files"]
     W --> F["Attachments"]
-    W --> G["Generate file"]
+    W --> G["Model decides file generation"]
     I --> S["webui/server.py"]
     P --> S
     F --> S
     T --> S
     K --> S
-    G --> A["Pending preview"]
+    G --> A["Auto pending preview"]
     A --> Q["User confirmation"]
     Q --> D["Write generated file"]
     S --> C["Assemble memory / RAG / pinned context / attachments"]
@@ -195,7 +195,7 @@ flowchart LR
 - 開啟專案但沒有 pinned files 時，RAG index 會依問題搜尋相關檔案、symbols、summary 與 chunks。
 - 有 pinned files 時，會優先使用 pinned context。
 - 長回答續寫使用上一段回答 tail，不再重送大型 `PROJECT RAG CONTEXT`。
-- 檔案生成可從 prompt 或上一則 assistant 回覆取內容；同一句多格式需求會建立多個 pending preview，文件輸出會清理 Markdown 標記並使用可顯示中文的 PDF 字型。
+- 檔案生成由一般聊天觸發；模型先產生內容與標題，CodeWorker 再建立 pending preview。同一句多格式需求會建立多個 preview，文件輸出會清理 Markdown 標記並使用可顯示中文的 PDF 字型。
 
 ---
 
@@ -208,6 +208,8 @@ flowchart LR
 - 新增 KV cache type 設定，預設 `cacheTypeK=q4_0`、`cacheTypeV=q4_0`。
 - 新增右側 `240px` 對話串面板，支援新增、切換、重新命名與刪除 thread。
 - 新增 file generation pending workflow，支援 text/code、`.docx`、`.pdf`、`.pptx`、`.xlsx`。
+- 移除前端 `生成檔案` 按鈕，檔案生成改由模型在一般聊天中判斷並發起。
+- 檔名改由模型回覆的第一個 Markdown H1 標題自動命名，寫入完成後顯示實際檔案路徑。
 - 檔案生成可解析「PPTX 跟 PDF」等多格式需求，並在提到「剛剛 / 上一則」時使用上一則 assistant 可見回答當內容來源。
 - 修正 PDF 中文亂碼、PPTX / DOCX 暴露 Markdown 標記，以及「把說明生成 Word 檔」未使用上一則回答的問題。
 - `scripts\bootstrap.ps1` 新增 `pdfplumber`、`reportlab`、`python-pptx` 與 `openpyxl`。

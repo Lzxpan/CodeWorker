@@ -19,7 +19,7 @@ Core capabilities:
 - Focused context: checked files in the `File tree` become pinned context and take priority over broad RAG.
 - Attachments: code, config, documents, images, audio, and video can be attached. CodeWorker sends extracted text, keyframes, or transcripts when available, otherwise metadata fallback.
 - Threads: the right `240px` thread panel can create, switch, rename, and delete conversations. Each thread keeps its own history and memory.
-- File generation: `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx` are generated through preview + confirmation. One request can create multiple formats, Markdown markers are cleaned, and PDFs use a CJK-capable font.
+- Model-driven file generation: ask for a document in normal chat. The model produces the content and title, CodeWorker uses the title to name the file, creates a pending preview, and only writes `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx` after confirmation.
 - Agent safety: writes, patches, deletes, and commands become pending actions and only run after user confirmation.
 
 ---
@@ -31,7 +31,7 @@ Core capabilities:
 - `32GB RAM` class memory is recommended. Large context, images, video keyframes, and long answers increase memory pressure.
 - Without an opened project, chat behaves as normal Q&A. With an opened project and no pinned files, chat uses full-project RAG. With pinned files, pinned context takes priority.
 - Videos are analyzed through `FFmpeg` keyframes, not by sending raw MP4 binaries to the model. Audio and video audio tracks try `whisper.cpp` speech-to-text.
-- File generation and Agent writes require confirmation before touching the project root.
+- File generation and Agent writes require confirmation before touching the project root. After a file is written, the UI shows the final path and filename.
 
 ---
 
@@ -122,12 +122,12 @@ Suggested prompts:
 ### File Generation
 
 1. Open a project.
-2. Describe the content source and target format in the chat input, for example: `Create docs/spec.md with a login-flow spec.`
-3. To export the previous assistant answer, write: `Turn the previous explanation and use cases into PPTX and PDF files.` or `Generate a Word document from the explanation.`
-4. If one request mentions multiple formats, CodeWorker creates multiple pending previews, such as one `.pptx` and one `.pdf`.
-5. For Excel, mention `Excel`, `xlsx`, `spreadsheet`, or the target extension, for example: `Turn the test checklist into an Excel spreadsheet.`
-6. Click `Generate file`.
-7. Confirm the pending preview before CodeWorker writes into the project root.
+2. Ask in normal chat, for example: `Generate a project feature introduction PPT file.`
+3. The model first writes the document content. Its first heading is used as the automatic filename source, and CodeWorker creates a pending preview from that reply.
+4. To export the previous assistant answer, write: `Turn the previous explanation and use cases into PPTX and PDF files.` or `Generate a Word document from the explanation.`
+5. If one request mentions multiple formats, CodeWorker creates multiple pending previews, such as one `.pptx` and one `.pdf`.
+6. For Excel, mention `Excel`, `xlsx`, `spreadsheet`, or the target extension, for example: `Turn the test checklist into an Excel spreadsheet.`
+7. Review the pending preview and click `Confirm write`. After writing, the chat shows the final path and filename.
 
 ---
 
@@ -175,13 +175,13 @@ flowchart LR
     O --> I["Local RAG index / cache"]
     W --> P["Pinned files"]
     W --> F["Attachments"]
-    W --> G["Generate file"]
+    W --> G["Model decides file generation"]
     I --> S["webui/server.py"]
     P --> S
     F --> S
     T --> S
     K --> S
-    G --> A["Pending preview"]
+    G --> A["Auto pending preview"]
     A --> Q["User confirmation"]
     Q --> D["Write generated file"]
     S --> C["Assemble memory / RAG / pinned context / attachments"]
@@ -195,7 +195,7 @@ Workflow rules:
 - With an opened project and no pinned files, RAG searches paths, symbols, summaries, and chunks.
 - With pinned files, pinned context takes priority.
 - Long-answer continuation uses the previous answer tail instead of resending large `PROJECT RAG CONTEXT`.
-- File generation can use either the prompt or the previous assistant answer as the content source. Multi-format requests create multiple pending previews. Document outputs clean Markdown markers and use a CJK-capable PDF font.
+- File generation is triggered through normal chat. The model first produces content and a title, then CodeWorker creates the pending preview. Multi-format requests create multiple previews. Document outputs clean Markdown markers and use a CJK-capable PDF font.
 
 ---
 
@@ -208,6 +208,8 @@ Workflow rules:
 - added KV cache type settings with `cacheTypeK=q4_0` and `cacheTypeV=q4_0`.
 - added the right `240px` thread panel with create, switch, rename, and delete operations.
 - added the file generation pending workflow for text/code, `.docx`, `.pdf`, `.pptx`, and `.xlsx`.
+- removed the frontend `Generate file` button. File generation is now detected and initiated from normal model chat.
+- changed generated filenames to use the model reply's first Markdown H1 heading, and shows the final path after writing.
 - added parsing for multi-format generation requests such as `PPTX and PDF`, and previous-answer export when the prompt references `previous` or `last answer`.
 - fixed garbled Chinese text in generated PDFs, raw Markdown markers in PPTX / DOCX, and Word generation prompts that should use the previous answer.
 - added `pdfplumber`, `reportlab`, `python-pptx`, and `openpyxl` to `scripts\bootstrap.ps1`.
