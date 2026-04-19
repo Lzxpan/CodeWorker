@@ -31,7 +31,7 @@ if str(ROOT_DIR) not in sys.path:
 START_SERVER = ROOT_DIR / "scripts" / "start-server.cmd"
 GAME_DIR = Path(r"C:\Games")
 MODELS = ("qwen35", "gemma4")
-CONTEXTS = (4096, 8192, 12288, 16384)
+CONTEXTS = (4096, 8192, 16384, 32768, 65536, 131072, 262144)
 PORT_BASE = {
     "qwen35": 18080,
     "gemma4": 18180,
@@ -156,6 +156,16 @@ def request_chat(port: int, model: str, messages, max_tokens: int, timeout: int 
         return {"ok": False, "error": str(exc)}
 
 
+def request_json(port: int, path: str, timeout: int = 30):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as response:
+            return {"ok": True, "data": json.loads(response.read().decode("utf-8"))}
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "error": f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def probe_model(model_key: str, context_size: int, port: int, include_structured: bool = True):
     kill_bench_ports()
     start = subprocess.run(
@@ -168,15 +178,24 @@ def probe_model(model_key: str, context_size: int, port: int, include_structured
         check=False,
         timeout=420,
     )
+    startup_output = (start.stdout + start.stderr).strip()
+    startup_ok = start.returncode == 0 and "[ERROR_CODE]" not in startup_output
     result = {
-        "startup_ok": start.returncode == 0,
-        "startup_output": (start.stdout + start.stderr).strip(),
+        "startup_ok": startup_ok,
+        "startup_output": startup_output,
         "port": port,
         "context": context_size,
         "tests": {},
     }
-    if start.returncode != 0:
+    if not startup_ok:
         return result
+
+    result["models_endpoint"] = request_json(port, "/v1/models")
+    props = request_json(port, "/props")
+    result["props"] = props
+    if props.get("ok"):
+        settings = props.get("data", {}).get("default_generation_settings", {})
+        result["reported_n_ctx"] = settings.get("n_ctx")
 
     tests = {
         "entry": {
@@ -241,7 +260,9 @@ def build_summary(results, selected_models=None):
             lines.append("- 穩定可用 context：`未完成`")
         for item in model_results:
             status = "ok" if item["startup_ok"] and all(test.get("ok") for test in item["tests"].values()) else "fail"
-            lines.append(f"- {item['context']}: {status}")
+            reported = item.get("reported_n_ctx")
+            suffix = f" (reported n_ctx `{reported}`)" if reported is not None else ""
+            lines.append(f"- {item['context']}: {status}{suffix}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 

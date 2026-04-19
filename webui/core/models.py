@@ -18,6 +18,8 @@ class ModelConfig:
     alias: str
     port: int
     context_window: int
+    cache_type_k: str
+    cache_type_v: str
     file_pattern: str
     file_patterns: List[str]
     mmproj_patterns: List[str]
@@ -66,6 +68,8 @@ def get_model_configs(root_dir: Path) -> Dict[str, ModelConfig]:
             alias=str(raw.get("alias", f"{key}-local")).strip() or f"{key}-local",
             port=int(raw.get("port", 0) or 0),
             context_window=int(raw.get("contextWindow", raw.get("context", 4096)) or 4096),
+            cache_type_k=str(raw.get("cacheTypeK", "")).strip(),
+            cache_type_v=str(raw.get("cacheTypeV", "")).strip(),
             file_pattern=file_pattern,
             file_patterns=file_patterns,
             mmproj_patterns=_as_list(raw.get("mmprojPatterns")) or _as_list(raw.get("mmprojPattern")),
@@ -96,6 +100,8 @@ def public_model_capabilities(root_dir: Path) -> Dict[str, Dict[str, object]]:
             "modelId": config.model_id,
             "port": config.port,
             "contextWindow": config.context_window,
+            "cacheTypeK": config.cache_type_k,
+            "cacheTypeV": config.cache_type_v,
             "targetDir": config.target_dir,
             "generation": {
                 "temperature": config.temperature,

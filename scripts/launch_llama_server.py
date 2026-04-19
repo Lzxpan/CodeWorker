@@ -17,6 +17,8 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--mmproj")
     parser.add_argument("--context", default="8192")
+    parser.add_argument("--cache-type-k")
+    parser.add_argument("--cache-type-v")
     parser.add_argument("--threads", default=str(os.cpu_count() or 4))
     parser.add_argument("--log", required=True)
     parser.add_argument("--err", required=True)
@@ -55,6 +57,10 @@ def main() -> int:
         ]
         if mmproj_path is not None:
             command.extend(["--mmproj", str(mmproj_path)])
+        if args.cache_type_k:
+            command.extend(["--cache-type-k", str(args.cache_type_k)])
+        if args.cache_type_v:
+            command.extend(["--cache-type-v", str(args.cache_type_v)])
         command.extend([
             "-c",
             str(args.context),

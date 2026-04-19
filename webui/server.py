@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import traceback
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -67,9 +68,20 @@ MODEL_PORTS = {
     "qwen35": 8082,
 }
 MODEL_DEFAULT_CONTEXT = {
-    "gemma4": 16384,
-    "qwen35": 12288,
+    "gemma4": 262144,
+    "qwen35": 262144,
 }
+CONTEXT_OPTIONS = [
+    {"label": "4k", "value": 4096},
+    {"label": "8k", "value": 8192},
+    {"label": "16k", "value": 16384},
+    {"label": "32k", "value": 32768},
+    {"label": "64k", "value": 65536},
+    {"label": "128k", "value": 131072},
+    {"label": "256k", "value": 262144},
+]
+CONTEXT_OPTION_VALUES = {int(item["value"]) for item in CONTEXT_OPTIONS}
+DEFAULT_SELECTED_CONTEXT = 262144
 MODEL_CHAT_MAX_TOKENS = {
     "gemma4": 4096,
     "qwen35": 2048,
@@ -154,6 +166,9 @@ try:
 except Exception:
     SUPPORTED_MODEL_KEYS = set(MODEL_PORTS.keys())
 UPLOAD_DIR = ROOT_DIR / ".tmp" / "chat-uploads"
+MODEL_CONTEXT_SELECTIONS_PATH = DATA_DIR / "model-contexts.json"
+THREADS_DIR = DATA_DIR / "chat-threads"
+GENERATED_FILES_DIR = ROOT_DIR / ".tmp" / "generated-files"
 IMAGE_UPLOAD_DIR = UPLOAD_DIR
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_IMAGE_UPLOAD_BYTES = MAX_UPLOAD_BYTES
@@ -285,6 +300,8 @@ TASKS: Dict[str, TaskState] = {}
 AGENT_RUNS: Dict[str, Dict[str, object]] = {}
 STATE_LOCK = threading.Lock()
 TASK_LOCK = threading.Lock()
+MODEL_CONTEXT_SELECTIONS_LOCK = threading.Lock()
+THREAD_LOCK = threading.Lock()
 HF_API_HEADERS = {
     "User-Agent": "CodeWorkerWebUI/2.0",
     "Accept": "application/json",
@@ -296,6 +313,9 @@ FILE_UPLOADS: Dict[str, Dict[str, object]] = {}
 FILE_UPLOADS_LOCK = threading.Lock()
 IMAGE_UPLOADS = FILE_UPLOADS
 IMAGE_UPLOADS_LOCK = FILE_UPLOADS_LOCK
+ACTIVE_THREAD_ID: Optional[str] = None
+GENERATED_FILE_ACTIONS: Dict[str, Dict[str, object]] = {}
+GENERATED_FILE_ACTIONS_LOCK = threading.Lock()
 ANSWER_ONLY_SYSTEM_PROMPT = (
     "請只輸出最終答案，不要輸出 thinking、推理過程、分析步驟或 reasoning。"
     "若需要整理，直接給結論與可執行重點。"
@@ -392,6 +412,12 @@ def get_model_capabilities(model_key: str) -> Dict[str, object]:
 def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
     manifest_payload = public_model_capabilities(ROOT_DIR)
     if manifest_payload:
+        for key, item in manifest_payload.items():
+            selected = get_selected_model_context(key)
+            item["contextOptions"] = get_context_options_payload()
+            item["selectedContextWindow"] = selected
+            item["effectiveContextWindow"] = selected
+            item["contextWindow"] = selected
         return manifest_payload
     return {
         key: {
@@ -403,6 +429,9 @@ def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
             "modelId": get_model_alias(key),
             "port": get_model_port(key),
             "contextWindow": get_model_context_limit(key),
+            "contextOptions": get_context_options_payload(),
+            "selectedContextWindow": get_selected_model_context(key),
+            "effectiveContextWindow": get_model_context_limit(key),
             "targetDir": str(get_model_directory(key).relative_to(ROOT_DIR)),
         }
         for key in sorted(SUPPORTED_MODEL_KEYS)
@@ -430,11 +459,77 @@ def get_model_endpoint(model_name: str) -> str:
     return f"http://127.0.0.1:{get_model_port(model_name)}/v1/chat/completions"
 
 
-def get_model_context_limit(model_key: str) -> int:
+def normalize_context_window(value: object) -> int:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SELECTED_CONTEXT
+    if numeric in CONTEXT_OPTION_VALUES:
+        return numeric
+    return DEFAULT_SELECTED_CONTEXT
+
+
+def load_model_context_selections() -> Dict[str, int]:
+    try:
+        if not MODEL_CONTEXT_SELECTIONS_PATH.exists():
+            return {}
+        raw = json.loads(MODEL_CONTEXT_SELECTIONS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    selections: Dict[str, int] = {}
+    for key, value in raw.items():
+        model_key = get_model_key_from_alias(str(key))
+        if model_key in SUPPORTED_MODEL_KEYS:
+            selections[model_key] = normalize_context_window(value)
+    return selections
+
+
+def save_model_context_selections(selections: Dict[str, int]) -> None:
+    MODEL_CONTEXT_SELECTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_CONTEXT_SELECTIONS_PATH.write_text(json.dumps(selections, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_selected_model_context(model_key: str) -> int:
+    model_key = get_model_key_from_alias(model_key)
+    with MODEL_CONTEXT_SELECTIONS_LOCK:
+        selections = load_model_context_selections()
+    if model_key in selections:
+        return normalize_context_window(selections[model_key])
     config = get_registry_model_config(ROOT_DIR, model_key)
-    if config and config.context_window:
-        return config.context_window
-    return MODEL_DEFAULT_CONTEXT.get(model_key, MODEL_DEFAULT_CONTEXT[DEFAULT_MODEL_KEY])
+    configured = int(config.context_window) if config and config.context_window else MODEL_DEFAULT_CONTEXT.get(model_key, DEFAULT_SELECTED_CONTEXT)
+    if configured in CONTEXT_OPTION_VALUES:
+        return configured
+    return DEFAULT_SELECTED_CONTEXT
+
+
+def set_selected_model_context(model_key: str, context_window: object) -> int:
+    model_key = get_model_key_from_alias(model_key)
+    if model_key not in SUPPORTED_MODEL_KEYS:
+        raise ValueError("Unsupported model.")
+    normalized = normalize_context_window(context_window)
+    with MODEL_CONTEXT_SELECTIONS_LOCK:
+        selections = load_model_context_selections()
+        selections[model_key] = normalized
+        save_model_context_selections(selections)
+    return normalized
+
+
+def get_context_options_payload() -> List[Dict[str, object]]:
+    return [dict(item) for item in CONTEXT_OPTIONS]
+
+
+def get_model_context_limit(model_key: str) -> int:
+    return get_selected_model_context(model_key)
+
+
+def get_model_cache_types(model_key: str) -> Tuple[str, str]:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    return (
+        str(config.cache_type_k).strip() if config and config.cache_type_k else "",
+        str(config.cache_type_v).strip() if config and config.cache_type_v else "",
+    )
 
 
 def get_chat_history_limit(model_key: str) -> int:
@@ -2001,6 +2096,7 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
     ).stdout.strip() or "unknown"
     log_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.log"
     err_path = ROOT_DIR / "logs" / f"llama-server-{model_key}-{stamp}.err.log"
+    cache_type_k, cache_type_v = get_model_cache_types(model_key)
     launch_args = [
         sys.executable,
         str(SCRIPTS_DIR / "launch_llama_server.py"),
@@ -2014,6 +2110,10 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
         "--log", str(log_path),
         "--err", str(err_path),
     ]
+    if cache_type_k:
+        launch_args.extend(["--cache-type-k", cache_type_k])
+    if cache_type_v:
+        launch_args.extend(["--cache-type-v", cache_type_v])
     if mmproj_file is not None:
         launch_args.extend(["--mmproj", str(mmproj_file)])
     subprocess.Popen(
@@ -2352,6 +2452,203 @@ def truncate_middle(text: str, max_chars: int) -> str:
         return text[:max_chars]
     keep_each_side = (max_chars - 24) // 2
     return f"{text[:keep_each_side]}\n... [truncated] ...\n{text[-keep_each_side:]}"
+
+
+GENERATABLE_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".py", ".js", ".ts", ".json", ".html", ".css", ".yaml", ".yml", ".sql", ".cs",
+}
+GENERATABLE_BINARY_EXTENSIONS = {".docx", ".pdf", ".pptx"}
+GENERATABLE_EXTENSIONS = GENERATABLE_TEXT_EXTENSIONS | GENERATABLE_BINARY_EXTENSIONS
+
+
+def slugify_filename(text: str, default: str = "generated") -> str:
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff.-]+", "-", text.strip(), flags=re.UNICODE).strip(".-_")
+    return (cleaned or default)[:64]
+
+
+def ensure_project_relative_target(project_root: Path, relative_path: str) -> Path:
+    if not relative_path.strip():
+        raise ValueError("targetPath is required.")
+    normalized = relative_path.replace("\\", "/").lstrip("/")
+    if re.match(r"^[a-zA-Z]:", normalized):
+        raise ValueError("targetPath must be relative to the current project.")
+    target = (project_root / normalized).resolve()
+    try:
+        target.relative_to(project_root.resolve())
+    except ValueError as exc:
+        raise ValueError("targetPath must stay inside the current project.") from exc
+    if target.suffix.lower() not in GENERATABLE_EXTENSIONS:
+        raise ValueError(f"Unsupported generated file type: {target.suffix.lower()}")
+    return target
+
+
+def parse_generation_request(payload: Dict[str, object]) -> Dict[str, object]:
+    prompt = str(payload.get("prompt") or payload.get("message") or "").strip()
+    target_path = str(payload.get("targetPath") or payload.get("path") or "").strip()
+    title = str(payload.get("title") or "").strip()
+    content = str(payload.get("content") or "").strip()
+    file_type = str(payload.get("fileType") or payload.get("format") or "").strip().lower()
+    if file_type and not file_type.startswith("."):
+        file_type = f".{file_type}"
+    if not target_path:
+        inferred_ext = file_type if file_type in GENERATABLE_EXTENSIONS else ".md"
+        inferred_title = title or prompt[:32] or "generated"
+        target_path = f"generated/{slugify_filename(inferred_title)}{inferred_ext}"
+    if not title:
+        title = Path(target_path).stem.replace("-", " ").replace("_", " ").strip() or "Generated file"
+    if not content:
+        content = prompt or title
+    if not content.strip():
+        raise ValueError("prompt or content is required.")
+    return {"prompt": prompt, "targetPath": target_path, "title": title, "content": content}
+
+
+def write_docx(path: Path, title: str, content: str) -> None:
+    from docx import Document  # type: ignore
+
+    document = Document()
+    document.add_heading(title, level=1)
+    for block in content.split("\n\n"):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if all(line.startswith(("-", "*")) for line in lines):
+            for line in lines:
+                document.add_paragraph(line.lstrip("-* ").strip(), style="List Bullet")
+        else:
+            document.add_paragraph("\n".join(lines))
+    document.save(str(path))
+
+
+def write_pdf(path: Path, title: str, content: str) -> None:
+    from reportlab.lib.pagesizes import A4  # type: ignore
+    from reportlab.lib.styles import getSampleStyleSheet  # type: ignore
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer  # type: ignore
+
+    styles = getSampleStyleSheet()
+    doc = SimpleDocTemplate(str(path), pagesize=A4)
+    story = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
+    for block in content.split("\n\n"):
+        safe = escape_xml_text(block.strip()).replace("\n", "<br/>")
+        if safe:
+            story.append(Paragraph(safe, styles["BodyText"]))
+            story.append(Spacer(1, 8))
+    doc.build(story)
+
+
+def escape_xml_text(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def write_pptx(path: Path, title: str, content: str) -> None:
+    from pptx import Presentation  # type: ignore
+
+    presentation = Presentation()
+    title_slide = presentation.slides.add_slide(presentation.slide_layouts[0])
+    title_slide.shapes.title.text = title
+    title_slide.placeholders[1].text = "Generated by CodeWorker"
+    chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", content) if chunk.strip()]
+    for index, chunk in enumerate(chunks[:12], start=1):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+        slide.shapes.title.text = f"{title} {index}" if len(chunks) > 1 else title
+        body = slide.shapes.placeholders[1].text_frame
+        body.clear()
+        for line_index, line in enumerate(chunk.splitlines()[:8]):
+            paragraph = body.paragraphs[0] if line_index == 0 else body.add_paragraph()
+            paragraph.text = line.lstrip("-* ").strip()
+            paragraph.level = 0
+    presentation.save(str(path))
+
+
+def create_generated_file_preview(project_root: Path, request: Dict[str, object]) -> Dict[str, object]:
+    target = ensure_project_relative_target(project_root, str(request["targetPath"]))
+    extension = target.suffix.lower()
+    action_id = uuid.uuid4().hex
+    action_dir = GENERATED_FILES_DIR / action_id
+    action_dir.mkdir(parents=True, exist_ok=True)
+    title = str(request["title"])
+    content = str(request["content"])
+    payload: Dict[str, object] = {
+        "id": action_id,
+        "kind": "generate_file",
+        "status": "pending",
+        "targetPath": target.relative_to(project_root.resolve()).as_posix(),
+        "absoluteTargetPath": str(target),
+        "extension": extension,
+        "title": title,
+        "content": content if extension in GENERATABLE_TEXT_EXTENSIONS else "",
+        "preview": truncate_middle(content, 6000),
+        "overwrites": target.exists(),
+        "createdAt": current_timestamp(),
+    }
+    if extension in GENERATABLE_BINARY_EXTENSIONS:
+        temp_path = action_dir / target.name
+        if extension == ".docx":
+            write_docx(temp_path, title, content)
+        elif extension == ".pdf":
+            write_pdf(temp_path, title, content)
+        elif extension == ".pptx":
+            write_pptx(temp_path, title, content)
+        payload["tempPath"] = str(temp_path)
+        payload["sizeBytes"] = temp_path.stat().st_size if temp_path.exists() else 0
+    with GENERATED_FILE_ACTIONS_LOCK:
+        GENERATED_FILE_ACTIONS[action_id] = payload
+    return payload
+
+
+def public_generated_action(action: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "id": action.get("id"),
+        "kind": action.get("kind"),
+        "status": action.get("status"),
+        "targetPath": action.get("targetPath"),
+        "extension": action.get("extension"),
+        "title": action.get("title"),
+        "preview": action.get("preview"),
+        "overwrites": action.get("overwrites"),
+        "sizeBytes": action.get("sizeBytes", 0),
+    }
+
+
+def confirm_generated_file(action_id: str) -> Dict[str, object]:
+    with GENERATED_FILE_ACTIONS_LOCK:
+        action = GENERATED_FILE_ACTIONS.get(action_id)
+    if not action:
+        raise ValueError("Generated file action not found.")
+    if action.get("status") != "pending":
+        raise ValueError("Generated file action is not pending.")
+    target = Path(str(action.get("absoluteTargetPath", ""))).resolve()
+    with STATE_LOCK:
+        if not STATE.project_path:
+            raise ValueError("Project is not ready.")
+        project_root = Path(STATE.project_path).resolve()
+    try:
+        target.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError("Generated file target is outside the current project.") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+    extension = str(action.get("extension", "")).lower()
+    if extension in GENERATABLE_TEXT_EXTENSIONS:
+        target.write_text(str(action.get("content", "")), encoding="utf-8")
+    else:
+        temp_path = Path(str(action.get("tempPath", "")))
+        if not temp_path.exists():
+            raise ValueError("Generated temp file is missing.")
+        shutil.copyfile(temp_path, target)
+    action["status"] = "completed"
+    with GENERATED_FILE_ACTIONS_LOCK:
+        GENERATED_FILE_ACTIONS[action_id] = action
+    return {"path": str(target), "targetPath": action.get("targetPath"), "status": "completed"}
+
+
+def cancel_generated_file(action_id: str) -> Dict[str, object]:
+    with GENERATED_FILE_ACTIONS_LOCK:
+        action = GENERATED_FILE_ACTIONS.get(action_id)
+        if not action:
+            raise ValueError("Generated file action not found.")
+        action["status"] = "cancelled"
+        GENERATED_FILE_ACTIONS[action_id] = action
+    return {"id": action_id, "status": "cancelled"}
 
 
 def fit_text_to_limit(text: str, max_chars: int) -> str:
@@ -3144,6 +3441,201 @@ def append_chat_exchange_locked(
         "contextUsed": bool(context.strip()),
     })
     compact_session_memory_locked(model_key)
+    save_current_thread_locked()
+
+
+def current_timestamp() -> float:
+    return time.time()
+
+
+def format_thread_time(timestamp: object) -> str:
+    try:
+        numeric = float(timestamp)
+    except (TypeError, ValueError):
+        numeric = current_timestamp()
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(numeric))
+
+
+def safe_thread_id(value: object) -> str:
+    text = re.sub(r"[^a-zA-Z0-9_-]", "", str(value or ""))
+    return text[:64]
+
+
+def thread_path(thread_id: str) -> Path:
+    return THREADS_DIR / f"{safe_thread_id(thread_id)}.json"
+
+
+def serialize_current_thread_locked(thread_id: Optional[str] = None) -> Dict[str, object]:
+    now = current_timestamp()
+    title = ""
+    for item in STATE.history:
+        if str(item.get("role", "")) == "user" and str(item.get("content", "")).strip():
+            title = truncate_middle(str(item.get("content", "")).strip().replace("\n", " "), 46)
+            break
+    if not title:
+        title = "New chat"
+    return {
+        "id": thread_id or ACTIVE_THREAD_ID or uuid.uuid4().hex,
+        "title": title,
+        "createdAt": now,
+        "updatedAt": now,
+        "modelKey": STATE.model_key,
+        "modelName": str(get_model_capabilities(STATE.model_key).get("display_name", STATE.model_key)),
+        "projectPath": STATE.project_path,
+        "history": STATE.history,
+        "memorySummary": STATE.memory_summary,
+        "memoryCompactedCount": STATE.memory_compacted_count,
+    }
+
+
+def load_thread_file(path: Path) -> Optional[Dict[str, object]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not safe_thread_id(data.get("id")):
+        return None
+    return data
+
+
+def save_thread_file(thread: Dict[str, object]) -> None:
+    THREADS_DIR.mkdir(parents=True, exist_ok=True)
+    path = thread_path(str(thread.get("id", "")))
+    path.write_text(json.dumps(thread, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_current_thread_locked() -> None:
+    global ACTIVE_THREAD_ID
+    THREADS_DIR.mkdir(parents=True, exist_ok=True)
+    if not ACTIVE_THREAD_ID:
+        ACTIVE_THREAD_ID = uuid.uuid4().hex
+    path = thread_path(ACTIVE_THREAD_ID)
+    existing = load_thread_file(path) or {}
+    thread = serialize_current_thread_locked(ACTIVE_THREAD_ID)
+    thread["title"] = existing.get("title") or thread["title"]
+    thread["createdAt"] = existing.get("createdAt") or thread["createdAt"]
+    thread["updatedAt"] = current_timestamp()
+    save_thread_file(thread)
+
+
+def apply_thread_to_state_locked(thread: Dict[str, object]) -> None:
+    model_key = str(thread.get("modelKey") or STATE.model_key or DEFAULT_MODEL_KEY).lower()
+    if model_key not in SUPPORTED_MODEL_KEYS:
+        model_key = DEFAULT_MODEL_KEY
+    STATE.model_key = model_key
+    STATE.model_alias = get_model_alias(model_key)
+    STATE.history = list(thread.get("history") or [])
+    STATE.memory_summary = str(thread.get("memorySummary", ""))
+    STATE.memory_compacted_count = int(thread.get("memoryCompactedCount", 0) or 0)
+    project_path = str(thread.get("projectPath") or "").strip()
+    if project_path:
+        STATE.project_path = project_path
+
+
+def ensure_active_thread_locked() -> str:
+    global ACTIVE_THREAD_ID
+    THREADS_DIR.mkdir(parents=True, exist_ok=True)
+    if ACTIVE_THREAD_ID and thread_path(ACTIVE_THREAD_ID).exists():
+        return ACTIVE_THREAD_ID
+    candidates = []
+    for path in THREADS_DIR.glob("*.json"):
+        item = load_thread_file(path)
+        if item:
+            candidates.append(item)
+    if candidates:
+        candidates.sort(key=lambda item: float(item.get("updatedAt", 0) or 0), reverse=True)
+        ACTIVE_THREAD_ID = str(candidates[0]["id"])
+        apply_thread_to_state_locked(candidates[0])
+        return ACTIVE_THREAD_ID
+    ACTIVE_THREAD_ID = uuid.uuid4().hex
+    save_current_thread_locked()
+    return ACTIVE_THREAD_ID
+
+
+def thread_list_payload_locked() -> Dict[str, object]:
+    active_id = ensure_active_thread_locked()
+    items: List[Dict[str, object]] = []
+    for path in THREADS_DIR.glob("*.json"):
+        thread = load_thread_file(path)
+        if not thread:
+            continue
+        history = thread.get("history") if isinstance(thread.get("history"), list) else []
+        last_message = ""
+        for item in reversed(history):
+            content = str(item.get("content", "")).strip()
+            if content:
+                last_message = strip_think_blocks(content) or content
+                break
+        items.append({
+            "id": str(thread.get("id", "")),
+            "title": str(thread.get("title") or "New chat"),
+            "modelKey": str(thread.get("modelKey") or DEFAULT_MODEL_KEY),
+            "modelName": str(thread.get("modelName") or get_model_capabilities(str(thread.get("modelKey") or DEFAULT_MODEL_KEY)).get("display_name", DEFAULT_MODEL_KEY)),
+            "projectPath": str(thread.get("projectPath") or ""),
+            "updatedAt": thread.get("updatedAt") or 0,
+            "updatedAtText": format_thread_time(thread.get("updatedAt")),
+            "summary": truncate_middle(last_message.replace("\n", " "), 80),
+            "messageCount": len(history),
+            "active": str(thread.get("id", "")) == active_id,
+        })
+    items.sort(key=lambda item: float(item.get("updatedAt", 0) or 0), reverse=True)
+    return {"activeThreadId": active_id, "threads": items}
+
+
+def create_thread_locked(title: str = "") -> Dict[str, object]:
+    global ACTIVE_THREAD_ID
+    save_current_thread_locked()
+    thread_id = uuid.uuid4().hex
+    ACTIVE_THREAD_ID = thread_id
+    STATE.history = []
+    STATE.memory_summary = ""
+    STATE.memory_compacted_count = 0
+    STATE.pending_edit = None
+    thread = serialize_current_thread_locked(thread_id)
+    if title.strip():
+        thread["title"] = title.strip()[:80]
+    save_thread_file(thread)
+    return thread_list_payload_locked()
+
+
+def select_thread_locked(thread_id: str) -> Dict[str, object]:
+    global ACTIVE_THREAD_ID
+    thread_id = safe_thread_id(thread_id)
+    path = thread_path(thread_id)
+    thread = load_thread_file(path)
+    if not thread:
+        raise ValueError("Thread not found.")
+    save_current_thread_locked()
+    ACTIVE_THREAD_ID = thread_id
+    apply_thread_to_state_locked(thread)
+    return thread_list_payload_locked()
+
+
+def update_thread_locked(thread_id: str, title: str) -> Dict[str, object]:
+    thread_id = safe_thread_id(thread_id)
+    path = thread_path(thread_id)
+    thread = load_thread_file(path)
+    if not thread:
+        raise ValueError("Thread not found.")
+    thread["title"] = str(title or "").strip()[:80] or "New chat"
+    thread["updatedAt"] = current_timestamp()
+    save_thread_file(thread)
+    return thread_list_payload_locked()
+
+
+def delete_thread_locked(thread_id: str) -> Dict[str, object]:
+    global ACTIVE_THREAD_ID
+    thread_id = safe_thread_id(thread_id)
+    path = thread_path(thread_id)
+    if path.exists():
+        path.unlink()
+    if ACTIVE_THREAD_ID == thread_id:
+        ACTIVE_THREAD_ID = None
+        STATE.history = []
+        STATE.memory_summary = ""
+        STATE.memory_compacted_count = 0
+        STATE.pending_edit = None
+    return thread_list_payload_locked()
 
 
 def with_memory_coverage(coverage: Optional[Dict[str, object]], snapshot: SessionState, model_key: str) -> Optional[Dict[str, object]]:
@@ -5454,6 +5946,7 @@ def build_session_payload(
         STATE.memory_compacted_count = existing_memory_compacted_count if preserve_history else 0
         STATE.pending_edit = None
         STATE.ui_state = "ready"
+        save_current_thread_locked()
     return {
         "projectPath": str(project_root),
         "modelKey": model_key,
@@ -5604,13 +6097,16 @@ def start_background_task(kind: str, worker, *args: str) -> TaskState:
     return task
 
 
-def get_status_payload() -> Dict[str, object]:
-    with STATE_LOCK:
-        return {
+def get_status_payload_unlocked() -> Dict[str, object]:
+    threads = thread_list_payload_locked()
+    return {
             "projectPath": STATE.project_path,
             "modelKey": STATE.model_key,
             "modelAlias": STATE.model_alias,
             "models": get_public_model_capabilities(),
+            "contextOptions": get_context_options_payload(),
+            "selectedContextWindow": get_selected_model_context(STATE.model_key),
+            "effectiveContextWindow": get_model_context_limit(STATE.model_key),
             "summary": STATE.summary,
             "tree": STATE.tree,
             "entrypoints": STATE.entrypoints,
@@ -5623,7 +6119,14 @@ def get_status_payload() -> Dict[str, object]:
             "pendingEdit": STATE.pending_edit,
             "uiState": STATE.ui_state,
             "mediaAssessment": get_media_analysis_assessment(),
+            "activeThreadId": threads.get("activeThreadId"),
+            "threads": threads.get("threads", []),
         }
+
+
+def get_status_payload() -> Dict[str, object]:
+    with STATE_LOCK:
+        return get_status_payload_unlocked()
 
 
 def get_models_payload() -> Dict[str, object]:
@@ -5647,7 +6150,12 @@ def get_models_payload() -> Dict[str, object]:
             "ready": ready,
             "nativeImageReady": bool(mmproj and ready and model_supports_images(key)),
         }
-    return {"models": models, "defaultModelKey": DEFAULT_MODEL_KEY, "mediaAssessment": get_media_analysis_assessment()}
+    return {
+        "models": models,
+        "defaultModelKey": DEFAULT_MODEL_KEY,
+        "contextOptions": get_context_options_payload(),
+        "mediaAssessment": get_media_analysis_assessment(),
+    }
 
 
 def write_sse_event(handler: BaseHTTPRequestHandler, event: str, payload: Dict[str, object]) -> None:
@@ -5669,6 +6177,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/models":
             json_response(self, {"ok": True, "data": get_models_payload()})
+            return
+        if parsed.path == "/api/threads":
+            self.handle_threads_list()
             return
         if parsed.path == "/api/media-assessment":
             json_response(self, {"ok": True, "data": get_media_analysis_assessment()})
@@ -5710,6 +6221,24 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/models/ensure":
             self.handle_model_ensure()
             return
+        if parsed.path == "/api/models/context":
+            self.handle_model_context()
+            return
+        if parsed.path == "/api/files/generate/plan":
+            self.handle_generate_file_plan()
+            return
+        if parsed.path.startswith("/api/files/generate/") and parsed.path.endswith("/confirm"):
+            self.handle_generate_file_confirm(parsed.path.split("/")[-2])
+            return
+        if parsed.path.startswith("/api/files/generate/") and parsed.path.endswith("/cancel"):
+            self.handle_generate_file_cancel(parsed.path.split("/")[-2])
+            return
+        if parsed.path == "/api/threads":
+            self.handle_threads_create()
+            return
+        if parsed.path.startswith("/api/threads/") and parsed.path.endswith("/select"):
+            self.handle_threads_select(parsed.path.split("/")[-2])
+            return
         if parsed.path == "/api/index/rebuild":
             self.handle_index_rebuild()
             return
@@ -5745,6 +6274,20 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         error_response(self, make_error("NOT_FOUND", "Not found."), status=404)
 
+    def do_PATCH(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/api/threads/"):
+            self.handle_threads_update(parsed.path.rsplit("/", 1)[-1])
+            return
+        error_response(self, make_error("NOT_FOUND", "Not found."), status=404)
+
+    def do_DELETE(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/api/threads/"):
+            self.handle_threads_delete(parsed.path.rsplit("/", 1)[-1])
+            return
+        error_response(self, make_error("NOT_FOUND", "Not found."), status=404)
+
     def log_message(self, format: str, *args) -> None:
         return
 
@@ -5760,6 +6303,53 @@ class WebUIHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8"))
+
+    def handle_threads_list(self) -> None:
+        with STATE_LOCK:
+            data = thread_list_payload_locked()
+        json_response(self, {"ok": True, "data": data})
+
+    def handle_threads_create(self) -> None:
+        try:
+            payload = self.read_json_body()
+            title = str(payload.get("title", "")).strip()
+            with STATE_LOCK:
+                data = create_thread_locked(title)
+            json_response(self, {"ok": True, "data": data})
+        except Exception as exc:
+            error_response(self, make_error("THREAD_CREATE_FAILED", "Failed to create thread.", str(exc)))
+
+    def handle_threads_select(self, thread_id: str) -> None:
+        try:
+            with STATE_LOCK:
+                data = select_thread_locked(thread_id)
+                status = get_status_payload_unlocked()
+            json_response(self, {"ok": True, "data": {**data, "status": status}})
+        except ValueError as exc:
+            error_response(self, make_error("THREAD_NOT_FOUND", "Thread not found.", str(exc)), status=404)
+        except Exception as exc:
+            error_response(self, make_error("THREAD_SELECT_FAILED", "Failed to select thread.", str(exc)))
+
+    def handle_threads_update(self, thread_id: str) -> None:
+        try:
+            payload = self.read_json_body()
+            title = str(payload.get("title", "")).strip()
+            with STATE_LOCK:
+                data = update_thread_locked(thread_id, title)
+            json_response(self, {"ok": True, "data": data})
+        except ValueError as exc:
+            error_response(self, make_error("THREAD_NOT_FOUND", "Thread not found.", str(exc)), status=404)
+        except Exception as exc:
+            error_response(self, make_error("THREAD_UPDATE_FAILED", "Failed to update thread.", str(exc)))
+
+    def handle_threads_delete(self, thread_id: str) -> None:
+        try:
+            with STATE_LOCK:
+                data = delete_thread_locked(thread_id)
+                status = get_status_payload_unlocked()
+            json_response(self, {"ok": True, "data": {**data, "status": status}})
+        except Exception as exc:
+            error_response(self, make_error("THREAD_DELETE_FAILED", "Failed to delete thread.", str(exc)))
 
     def handle_task_status(self, path: str) -> None:
         task_id = path.rsplit("/", 1)[-1]
@@ -5836,6 +6426,62 @@ class WebUIHandler(BaseHTTPRequestHandler):
             error_response(self, error_payload)
         except Exception as exc:
             error_response(self, make_error("MODEL_START_FAILED", "Failed to ensure model.", str(exc)))
+
+    def handle_model_context(self) -> None:
+        try:
+            payload = self.read_json_body()
+            model_key = str(payload.get("modelKey", STATE.model_key or DEFAULT_MODEL_KEY)).strip().lower()
+            if model_key not in SUPPORTED_MODEL_KEYS:
+                raise ValueError("Unsupported model.")
+            requested = payload.get("contextWindow")
+            if int(requested) not in CONTEXT_OPTION_VALUES:
+                raise ValueError("Unsupported context window.")
+            selected = set_selected_model_context(model_key, requested)
+            with STATE_LOCK:
+                if STATE.model_key == model_key:
+                    STATE.model_alias = get_model_alias(model_key)
+            json_response(self, {"ok": True, "data": {"modelKey": model_key, "selectedContextWindow": selected, **get_models_payload()}})
+        except (TypeError, ValueError) as exc:
+            error_response(self, make_error("MODEL_CONTEXT_INVALID", "Model context validation failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("MODEL_CONTEXT_FAILED", "Failed to update model context.", str(exc)))
+
+    def handle_generate_file_plan(self) -> None:
+        try:
+            payload = self.read_json_body()
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                project_root = Path(STATE.project_path).resolve()
+            request = parse_generation_request(payload)
+            action = create_generated_file_preview(project_root, request)
+            json_response(self, {"ok": True, "data": {"pendingAction": public_generated_action(action)}})
+        except ValueError as exc:
+            code = "PROJECT_NOT_READY" if str(exc) == "請先完成開啟專案。" else "FILE_GENERATION_INVALID"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "File generation request is invalid."
+            error_response(self, make_error(code, message, str(exc)))
+        except ImportError as exc:
+            error_response(self, make_error("FILE_GENERATION_DEPENDENCY_MISSING", "A document generation package is missing.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("FILE_GENERATION_FAILED", "File generation planning failed.", traceback.format_exc() or str(exc)))
+
+    def handle_generate_file_confirm(self, action_id: str) -> None:
+        try:
+            result = confirm_generated_file(action_id)
+            json_response(self, {"ok": True, "data": result})
+        except ValueError as exc:
+            error_response(self, make_error("FILE_GENERATION_CONFIRM_FAILED", "Generated file confirmation failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("FILE_GENERATION_CONFIRM_FAILED", "Generated file confirmation failed.", str(exc)))
+
+    def handle_generate_file_cancel(self, action_id: str) -> None:
+        try:
+            result = cancel_generated_file(action_id)
+            json_response(self, {"ok": True, "data": result})
+        except ValueError as exc:
+            error_response(self, make_error("FILE_GENERATION_CANCEL_FAILED", "Generated file cancellation failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("FILE_GENERATION_CANCEL_FAILED", "Generated file cancellation failed.", str(exc)))
 
     def get_ready_project_root(self) -> Path:
         with STATE_LOCK:
@@ -6027,6 +6673,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "contextUsed": bool(context.strip()),
                 })
                 compact_session_memory_locked(model_key)
+                save_current_thread_locked()
             json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage}})
         except ModelReplyError as exc:
             error_response(self, exc.error)
@@ -6357,6 +7004,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 STATE.history.append({"role": "user", "content": message, "kind": "edit-request"})
                 STATE.history.append({"role": "assistant", "content": reply_text, "kind": "edit-plan"})
                 compact_session_memory_locked(STATE.model_key)
+                save_current_thread_locked()
             setattr(self.server, "_pending_edit_internal", plan)
             json_response(self, {"ok": True, "data": {"plan": public_plan}})
         except ValueError as exc:
@@ -6379,6 +7027,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_discard_edit(self) -> None:
         with STATE_LOCK:
             STATE.pending_edit = None
+            save_current_thread_locked()
         setattr(self.server, "_pending_edit_internal", None)
         json_response(self, {"ok": True, "data": {"discarded": True}})
 
@@ -6394,6 +7043,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 allowed = {file.path for file in STATE.files}
                 pinned = [path for path in files if isinstance(path, str) and path in allowed][:8]
                 STATE.pinned_files = pinned
+                save_current_thread_locked()
             json_response(self, {"ok": True, "data": {"pinnedFiles": pinned}})
         except ValueError as exc:
             error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
@@ -6404,6 +7054,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             STATE.memory_summary = ""
             STATE.memory_compacted_count = 0
             STATE.pending_edit = None
+            save_current_thread_locked()
         setattr(self.server, "_pending_edit_internal", None)
         json_response(self, {"ok": True, "data": {"history": [], "pendingEdit": None}})
 

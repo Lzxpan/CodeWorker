@@ -34,6 +34,9 @@ if errorlevel 1 exit /b 1
 
 if "%PORT%"=="" set "PORT=%MODEL_PORT%"
 if "%CONTEXT_SIZE%"=="" set "CONTEXT_SIZE=%MODEL_CONTEXT%"
+set "CACHE_ARGS="
+if defined MODEL_CACHE_TYPE_K set "CACHE_ARGS=%CACHE_ARGS% --cache-type-k %MODEL_CACHE_TYPE_K%"
+if defined MODEL_CACHE_TYPE_V set "CACHE_ARGS=%CACHE_ARGS% --cache-type-v %MODEL_CACHE_TYPE_V%"
 
 call :check_memory
 if errorlevel 1 exit /b 1
@@ -101,9 +104,9 @@ if not exist "%WINPY_PYTHON%" (
     exit /b 1
 )
 if defined MODEL_MMPROJ (
-    start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --mmproj "%MODEL_MMPROJ%" --context "%CONTEXT_SIZE%" --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
+    start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --mmproj "%MODEL_MMPROJ%" --context "%CONTEXT_SIZE%" %CACHE_ARGS% --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
 ) else (
-    start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --context "%CONTEXT_SIZE%" --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
+    start "" /b "%WINPY_PYTHON%" "%~dp0launch_llama_server.py" --server "%LLAMA_SERVER%" --host 127.0.0.1 --port "%PORT%" --alias "%MODEL_ALIAS%" --model "%MODEL_FILE%" --context "%CONTEXT_SIZE%" %CACHE_ARGS% --threads "%NUMBER_OF_PROCESSORS%" --log "%LOG_FILE%" --err "%ERR_FILE%" >nul 2>nul
 )
 
 set /a RETRIES=30

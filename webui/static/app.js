@@ -3,6 +3,18 @@ const state = {
   projectPath: "",
   modelKey: "gemma4",
   modelCapabilities: {},
+  modelContextByKey: { gemma4: 262144, qwen35: 262144 },
+  contextOptions: [
+    { label: "4k", value: 4096 },
+    { label: "8k", value: 8192 },
+    { label: "16k", value: 16384 },
+    { label: "32k", value: 32768 },
+    { label: "64k", value: 65536 },
+    { label: "128k", value: 131072 },
+    { label: "256k", value: 262144 },
+  ],
+  threads: [],
+  activeThreadId: "",
   language: localStorage.getItem("codeworker.language") || "zh-Hant",
   pinnedFiles: new Set(),
   pinSyncTimer: null,
@@ -26,8 +38,8 @@ const state = {
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V1.00.000 Web UI",
-    brandTitle: "CodeWorker V1.00.000",
+    pageTitle: "CodeWorker V1.01.000 Web UI",
+    brandTitle: "CodeWorker V1.01.000",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -35,6 +47,7 @@ const I18N = {
       model: "模型",
       chatInput: "對話輸入",
       chatImage: "檔案附件",
+      contextWindow: "Context",
       modelStatus: "模型狀態",
     },
     headings: {
@@ -42,6 +55,7 @@ const I18N = {
       projectSummary: "專案摘要",
       fileTree: "檔案樹",
       chatPanel: "對話",
+      threadPanel: "對話串",
       helpModal: "功能說明",
     },
     buttons: {
@@ -54,6 +68,10 @@ const I18N = {
       clearChat: "清空對話",
       attachImage: "上傳檔案",
       removeImage: "移除附件",
+      generateFile: "生成檔案",
+      newThread: "新增",
+      renameThread: "重新命名",
+      deleteThread: "刪除",
     },
     hints: {
       firstRun: "第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。",
@@ -107,6 +125,13 @@ const I18N = {
       updateContext: "更新上下文",
       updateFailed: "更新失敗",
       historyCleared: "對話已清空",
+      contextUpdated: "Context 已更新",
+      threadCreated: "對話串已建立",
+      threadSelected: "已切換對話串",
+      threadUpdated: "對話串已更新",
+      threadDeleted: "對話串已刪除",
+      generatingFile: "正在建立檔案預覽",
+      fileGenerated: "檔案已建立預覽",
       modelRedownloaded: "模型已重新下載",
       modelRedownloadFailed: "模型重新下載失敗",
       appliedPins: (count) => `已同步 ${count} 個釘選檔案`,
@@ -140,6 +165,9 @@ const I18N = {
       modelReadyDetails: "請再次按「開啟專案」重新啟動模型與索引流程。",
       taskFailed: "Task failed.",
       imageUploadFailed: "檔案上傳失敗。",
+      contextUpdateFailed: "Context 更新失敗。",
+      threadFailed: "對話串操作失敗。",
+      fileGenerationFailed: "檔案生成失敗。",
       emptyChat: "請輸入問題或附加檔案。",
       modelEmptyReply: "模型沒有產生可顯示的最終答案。",
       imageModelUnsupported: "目前模型若無法處理圖片，CodeWorker 會改用文字附件說明讓模型回覆限制。",
@@ -147,8 +175,8 @@ const I18N = {
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V1.00.000 Web UI",
-    brandTitle: "CodeWorker V1.00.000",
+    pageTitle: "CodeWorker V1.01.000 Web UI",
+    brandTitle: "CodeWorker V1.01.000",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -156,6 +184,7 @@ const I18N = {
       model: "Model",
       chatInput: "Chat input",
       chatImage: "File attachment",
+      contextWindow: "Context",
       modelStatus: "Model status",
     },
     headings: {
@@ -163,6 +192,7 @@ const I18N = {
       projectSummary: "Project summary",
       fileTree: "File tree",
       chatPanel: "Chat",
+      threadPanel: "Threads",
       helpModal: "Help",
     },
     buttons: {
@@ -175,6 +205,10 @@ const I18N = {
       clearChat: "Clear chat",
       attachImage: "Attach file",
       removeImage: "Remove attachments",
+      generateFile: "Generate file",
+      newThread: "New",
+      renameThread: "Rename",
+      deleteThread: "Delete",
     },
     hints: {
       firstRun: "On the first run, CodeWorker will automatically download missing runtime files or models.",
@@ -228,6 +262,13 @@ const I18N = {
       updateContext: "Updating context",
       updateFailed: "Context update failed",
       historyCleared: "Chat cleared",
+      contextUpdated: "Context updated",
+      threadCreated: "Thread created",
+      threadSelected: "Thread selected",
+      threadUpdated: "Thread updated",
+      threadDeleted: "Thread deleted",
+      generatingFile: "Creating file preview",
+      fileGenerated: "File preview ready",
       modelRedownloaded: "Model redownloaded",
       modelRedownloadFailed: "Model redownload failed",
       appliedPins: (count) => `Synced ${count} pinned files`,
@@ -261,6 +302,9 @@ const I18N = {
       modelReadyDetails: "Click Open project again to restart the model and project indexing flow.",
       taskFailed: "Task failed.",
       imageUploadFailed: "File upload failed.",
+      contextUpdateFailed: "Context update failed.",
+      threadFailed: "Thread operation failed.",
+      fileGenerationFailed: "File generation failed.",
       emptyChat: "Enter a question or attach a file.",
       modelEmptyReply: "The model did not return a displayable final answer.",
       imageModelUnsupported: "If the selected model cannot process images, CodeWorker sends a text attachment note so the model can explain the limitation.",
@@ -585,8 +629,14 @@ const elements = {
   chatImagePasteHint: document.getElementById("chatImagePasteHint"),
   chatImagePreview: document.getElementById("chatImagePreview"),
   removeChatImageBtn: document.getElementById("removeChatImageBtn"),
+  generateFileBtn: document.getElementById("generateFileBtn"),
+  contextWindowLabel: document.getElementById("contextWindowLabel"),
+  contextWindowSelect: document.getElementById("contextWindowSelect"),
   sendChatBtn: document.getElementById("sendChatBtn"),
   clearChatBtn: document.getElementById("clearChatBtn"),
+  threadPanelTitle: document.getElementById("threadPanelTitle"),
+  threadList: document.getElementById("threadList"),
+  newThreadBtn: document.getElementById("newThreadBtn"),
   statusBadge: document.getElementById("statusBadge"),
   treeItemTemplate: document.getElementById("treeItemTemplate"),
   progressPanel: document.getElementById("progressPanel"),
@@ -719,6 +769,20 @@ function localizeError(error) {
     FILE_UPLOAD_FAILED: {
       message: t("errors.imageUploadFailed"),
     },
+    MODEL_CONTEXT_FAILED: {
+      message: t("errors.contextUpdateFailed"),
+    },
+    MODEL_CONTEXT_INVALID: {
+      message: t("errors.contextUpdateFailed"),
+    },
+    THREAD_CREATE_FAILED: { message: t("errors.threadFailed") },
+    THREAD_SELECT_FAILED: { message: t("errors.threadFailed") },
+    THREAD_UPDATE_FAILED: { message: t("errors.threadFailed") },
+    THREAD_DELETE_FAILED: { message: t("errors.threadFailed") },
+    FILE_GENERATION_FAILED: { message: t("errors.fileGenerationFailed") },
+    FILE_GENERATION_INVALID: { message: t("errors.fileGenerationFailed") },
+    FILE_GENERATION_CONFIRM_FAILED: { message: t("errors.fileGenerationFailed") },
+    FILE_GENERATION_CANCEL_FAILED: { message: t("errors.fileGenerationFailed") },
     MODEL_EMPTY_REPLY: {
       message: t("errors.modelEmptyReply"),
     },
@@ -948,6 +1012,9 @@ function setUiState(nextState) {
   elements.clearChatBtn.disabled = busy;
   elements.attachImageBtn.disabled = !canChat;
   elements.removeChatImageBtn.disabled = !canChat;
+  if (elements.generateFileBtn) elements.generateFileBtn.disabled = !canChat || !ready;
+  if (elements.contextWindowSelect) elements.contextWindowSelect.disabled = opening;
+  if (elements.newThreadBtn) elements.newThreadBtn.disabled = busy;
 }
 
 function renderProgress(progress = 0, step = "", title = t("progress.defaultTitle")) {
@@ -1190,10 +1257,25 @@ function renderModelOptions(models = {}) {
   const selected = elements.modelKey.value || state.modelKey || "gemma4";
   const entries = Object.entries(models);
   if (!entries.length) return;
+  entries.forEach(([key, model]) => {
+    state.modelContextByKey[key] = Number(model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow || state.modelContextByKey[key] || 262144);
+  });
   elements.modelKey.innerHTML = entries.map(([key, model]) => (
     `<option value="${escapeHtml(key)}">${escapeHtml(model.displayName || key)}</option>`
   )).join("");
   elements.modelKey.value = models[selected] ? selected : (state.modelKey || entries[0][0]);
+  renderContextSelector();
+}
+
+function renderContextSelector(options = state.contextOptions) {
+  if (!elements.contextWindowSelect) return;
+  const selectedModel = elements.modelKey.value || state.modelKey || "gemma4";
+  const selectedContext = Number(state.modelContextByKey[selectedModel] || 262144);
+  const normalizedOptions = Array.isArray(options) && options.length ? options : state.contextOptions;
+  elements.contextWindowSelect.innerHTML = normalizedOptions.map((item) => (
+    `<option value="${Number(item.value)}">${escapeHtml(item.label || `${Number(item.value) / 1024}k`)}</option>`
+  )).join("");
+  elements.contextWindowSelect.value = String(selectedContext);
 }
 
 function getRoleLabel(role, meta = {}) {
@@ -1360,6 +1442,37 @@ function renderHistory(history) {
   history.forEach((item) => appendMessage(item.role, item.content, item.attachments || [], item));
 }
 
+function renderThreads(threads = []) {
+  state.threads = Array.isArray(threads) ? threads : [];
+  if (!elements.threadList) return;
+  elements.threadList.innerHTML = "";
+  if (!state.threads.length) {
+    elements.threadList.classList.add("empty");
+    elements.threadList.textContent = state.language === "en" ? "No threads yet." : "尚無對話串。";
+    return;
+  }
+  elements.threadList.classList.remove("empty");
+  state.threads.forEach((thread) => {
+    const item = document.createElement("div");
+    item.className = `thread-item${thread.active ? " is-active" : ""}`;
+    const title = escapeHtml(thread.title || (state.language === "en" ? "New chat" : "新對話"));
+    const meta = `${thread.modelName || thread.modelKey || ""} · ${thread.updatedAtText || ""}`;
+    item.innerHTML = `
+      <button type="button" class="thread-title">${title}</button>
+      <div class="thread-meta">${escapeHtml(meta)}</div>
+      <div class="thread-summary">${escapeHtml(thread.summary || "")}</div>
+      <div class="thread-actions">
+        <button type="button" data-action="rename">${escapeHtml(t("buttons.renameThread"))}</button>
+        <button type="button" data-action="delete">${escapeHtml(t("buttons.deleteThread"))}</button>
+      </div>
+    `;
+    item.querySelector(".thread-title")?.addEventListener("click", () => selectThread(thread.id));
+    item.querySelector('[data-action="rename"]')?.addEventListener("click", () => renameThread(thread));
+    item.querySelector('[data-action="delete"]')?.addEventListener("click", () => deleteThread(thread.id));
+    elements.threadList.appendChild(item);
+  });
+}
+
 function applyTranslations() {
   document.documentElement.lang = t("htmlLang");
   document.title = t("pageTitle");
@@ -1382,12 +1495,16 @@ function applyTranslations() {
   elements.refreshStatusBtn.textContent = t("buttons.refresh");
   elements.fileTreeTitle.textContent = t("headings.fileTree");
   elements.chatPanelTitle.textContent = t("headings.chatPanel");
+  if (elements.threadPanelTitle) elements.threadPanelTitle.textContent = t("headings.threadPanel");
   renderContextCoverage(state.lastContextCoverage);
   elements.chatInputLabel.textContent = t("labels.chatInput");
   elements.chatImageLabel.textContent = t("labels.chatImage");
   elements.attachImageBtn.textContent = t("buttons.attachImage");
   elements.chatImagePasteHint.textContent = t("hints.imagePasteHint");
   elements.removeChatImageBtn.textContent = t("buttons.removeImage");
+  if (elements.generateFileBtn) elements.generateFileBtn.textContent = t("buttons.generateFile");
+  if (elements.contextWindowLabel) elements.contextWindowLabel.textContent = t("labels.contextWindow");
+  if (elements.newThreadBtn) elements.newThreadBtn.textContent = t("buttons.newThread");
   elements.sendChatBtn.textContent = t("buttons.send");
   elements.clearChatBtn.textContent = t("buttons.clearChat");
   elements.helpTitle.textContent = state.openHelpKey ? (localizeHelpEntry(state.openHelpKey)?.title || t("headings.helpModal")) : t("headings.helpModal");
@@ -1396,6 +1513,8 @@ function applyTranslations() {
   elements.projectSummary.textContent = formatProjectSummary(state.summaryRaw, [...state.pinnedFiles]);
   renderTree(state.tree);
   renderHistory(state.history);
+  renderThreads(state.threads);
+  renderContextSelector();
   renderChatImagePreview();
   setStatus(state.lastStatusText, state.lastStatusBusy);
   renderProgress(state.lastProgress.progress, state.lastProgress.step, state.lastProgress.title);
@@ -1462,6 +1581,12 @@ async function refreshStatus() {
   state.projectPath = data.projectPath || "";
   state.modelKey = data.modelKey || "gemma4";
   state.modelCapabilities = data.models || {};
+  state.contextOptions = data.contextOptions || state.contextOptions;
+  Object.entries(state.modelCapabilities || {}).forEach(([key, model]) => {
+    state.modelContextByKey[key] = Number(model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow || state.modelContextByKey[key] || 262144);
+  });
+  state.activeThreadId = data.activeThreadId || "";
+  state.threads = data.threads || [];
   state.uiState = data.uiState || (data.projectPath ? "ready" : "idle");
   state.summaryRaw = data.summary || "";
   clearTimeout(state.pinSyncTimer);
@@ -1472,9 +1597,11 @@ async function refreshStatus() {
   elements.projectPath.value = state.projectPath;
   renderModelOptions(state.modelCapabilities);
   elements.modelKey.value = state.modelKey;
+  renderContextSelector();
   renderTree(data.tree || []);
   setPinnedFiles(data.pinnedFiles || []);
   renderHistory(state.history);
+  renderThreads(state.threads);
   renderPendingEdit(state.pendingEdit);
   renderContextCoverage(null);
   if (state.uiState !== "opening" && state.currentTaskKind !== "redownload-model") {
@@ -1502,7 +1629,187 @@ async function refreshModelStatus() {
   }
   const installed = model.installed ? (state.language === "en" ? "installed" : "已下載") : (state.language === "en" ? "not downloaded" : "未下載");
   const ready = model.ready ? (state.language === "en" ? "ready" : "服務中") : (state.language === "en" ? "stopped" : "未啟動");
-  elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${model.displayName || modelKey} · ${installed} · ${ready} · port ${model.port || "-"} · ctx ${model.contextWindow || "-"}`;
+  state.modelContextByKey[modelKey] = Number(model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow || state.modelContextByKey[modelKey] || 262144);
+  renderContextSelector(data.contextOptions || model.contextOptions || state.contextOptions);
+  elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${model.displayName || modelKey} · ${installed} · ${ready} · port ${model.port || "-"} · ctx ${model.selectedContextWindow || model.contextWindow || "-"}`;
+}
+
+async function updateSelectedContext() {
+  const modelKey = elements.modelKey.value || state.modelKey || "gemma4";
+  const contextWindow = Number(elements.contextWindowSelect?.value || state.modelContextByKey[modelKey] || 262144);
+  state.modelContextByKey[modelKey] = contextWindow;
+  try {
+    const data = await requestJson("/api/models/context", {
+      method: "POST",
+      body: JSON.stringify({ modelKey, contextWindow }),
+    });
+    state.contextOptions = data.contextOptions || state.contextOptions;
+    Object.entries(data.models || {}).forEach(([key, model]) => {
+      state.modelContextByKey[key] = Number(model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow || state.modelContextByKey[key] || 262144);
+    });
+    renderContextSelector();
+    setStatus(t("statuses.contextUpdated"));
+    await refreshModelStatus();
+  } catch (error) {
+    showError(normalizeError(error, "MODEL_CONTEXT_FAILED", t("errors.contextUpdateFailed")));
+    renderContextSelector();
+  }
+}
+
+async function loadThreads() {
+  try {
+    const data = await requestJson("/api/threads");
+    state.activeThreadId = data.activeThreadId || "";
+    renderThreads(data.threads || []);
+  } catch (error) {
+    showError(normalizeError(error, "THREAD_FAILED", t("errors.threadFailed")));
+  }
+}
+
+async function newThread() {
+  try {
+    const data = await requestJson("/api/threads", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.activeThreadId = data.activeThreadId || "";
+    renderThreads(data.threads || []);
+    elements.chatLog.innerHTML = "";
+    renderPendingEdit(null);
+    renderContextCoverage(null);
+    setStatus(t("statuses.threadCreated"));
+  } catch (error) {
+    showError(normalizeError(error, "THREAD_CREATE_FAILED", t("errors.threadFailed")));
+  }
+}
+
+async function selectThread(threadId) {
+  if (!threadId || threadId === state.activeThreadId) return;
+  try {
+    const data = await requestJson(`/api/threads/${encodeURIComponent(threadId)}/select`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.activeThreadId = data.activeThreadId || threadId;
+    renderThreads(data.threads || []);
+    if (data.status) {
+      state.history = data.status.history || [];
+      state.modelKey = data.status.modelKey || state.modelKey;
+      elements.modelKey.value = state.modelKey;
+      renderHistory(state.history);
+      renderPendingEdit(data.status.pendingEdit || null);
+    }
+    setStatus(t("statuses.threadSelected"));
+  } catch (error) {
+    showError(normalizeError(error, "THREAD_SELECT_FAILED", t("errors.threadFailed")));
+  }
+}
+
+async function renameThread(thread) {
+  const nextTitle = window.prompt(state.language === "en" ? "Thread name" : "對話串名稱", thread.title || "");
+  if (nextTitle === null) return;
+  try {
+    const data = await requestJson(`/api/threads/${encodeURIComponent(thread.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: nextTitle }),
+    });
+    renderThreads(data.threads || []);
+    setStatus(t("statuses.threadUpdated"));
+  } catch (error) {
+    showError(normalizeError(error, "THREAD_UPDATE_FAILED", t("errors.threadFailed")));
+  }
+}
+
+async function deleteThread(threadId) {
+  if (!window.confirm(state.language === "en" ? "Delete this thread?" : "確定刪除此對話串？")) return;
+  try {
+    const data = await requestJson(`/api/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
+    state.activeThreadId = data.activeThreadId || "";
+    renderThreads(data.threads || []);
+    if (data.status) {
+      state.history = data.status.history || [];
+      renderHistory(state.history);
+      renderPendingEdit(data.status.pendingEdit || null);
+    }
+    setStatus(t("statuses.threadDeleted"));
+  } catch (error) {
+    showError(normalizeError(error, "THREAD_DELETE_FAILED", t("errors.threadFailed")));
+  }
+}
+
+async function generateFileFromPrompt() {
+  const prompt = elements.chatInput.value.trim();
+  if (!prompt) {
+    showError({ code: "FILE_GENERATION_FAILED", message: t("errors.fileGenerationFailed"), details: state.language === "en" ? "Enter the file content or request first." : "請先在對話輸入填入要生成的檔案內容或需求。" });
+    return;
+  }
+  if (state.uiState !== "ready") {
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
+    return;
+  }
+  clearError();
+  setStatus(t("statuses.generatingFile"), true);
+  try {
+    const data = await requestJson("/api/files/generate/plan", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    });
+    renderGeneratedFileAction(data.pendingAction);
+    setStatus(t("statuses.fileGenerated"));
+  } catch (error) {
+    setStatus(t("statuses.chatFailed"));
+    showError(normalizeError(error, "FILE_GENERATION_FAILED", t("errors.fileGenerationFailed")));
+  }
+}
+
+function renderGeneratedFileAction(action) {
+  if (!action || !elements.pendingActionPanel) return;
+  elements.pendingActionPanel.classList.remove("hidden");
+  const overwriteText = action.overwrites
+    ? (state.language === "en" ? "This will overwrite an existing file." : "這會覆蓋既有檔案。")
+    : (state.language === "en" ? "This will create a new file." : "這會建立新檔案。");
+  elements.pendingActionPanel.innerHTML = `
+    <strong>${escapeHtml(state.language === "en" ? "Generated file preview" : "生成檔案預覽")}</strong>
+    <div>${escapeHtml(action.targetPath || "")}</div>
+    <div>${escapeHtml(overwriteText)}</div>
+    <pre class="code-preview">${escapeHtml(action.preview || "")}</pre>
+    <div class="actions">
+      <button type="button" class="primary" data-action="confirm-generated">${escapeHtml(state.language === "en" ? "Confirm write" : "確認寫入")}</button>
+      <button type="button" data-action="cancel-generated">${escapeHtml(state.language === "en" ? "Cancel" : "取消")}</button>
+    </div>
+  `;
+  elements.pendingActionPanel.querySelector('[data-action="confirm-generated"]')?.addEventListener("click", () => confirmGeneratedFile(action.id));
+  elements.pendingActionPanel.querySelector('[data-action="cancel-generated"]')?.addEventListener("click", () => cancelGeneratedFile(action.id));
+}
+
+async function confirmGeneratedFile(actionId) {
+  try {
+    const data = await requestJson(`/api/files/generate/${encodeURIComponent(actionId)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    elements.pendingActionPanel.classList.add("hidden");
+    elements.pendingActionPanel.innerHTML = "";
+    setStatus(state.language === "en" ? "File written" : "檔案已寫入");
+    await loadFileTree({ query: elements.fileTreeSearch?.value || "" });
+    appendMessage("assistant", `${state.language === "en" ? "File written:" : "已寫入檔案："} ${data.targetPath || data.path}`);
+  } catch (error) {
+    showError(normalizeError(error, "FILE_GENERATION_CONFIRM_FAILED", t("errors.fileGenerationFailed")));
+  }
+}
+
+async function cancelGeneratedFile(actionId) {
+  try {
+    await requestJson(`/api/files/generate/${encodeURIComponent(actionId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    elements.pendingActionPanel.classList.add("hidden");
+    elements.pendingActionPanel.innerHTML = "";
+    setStatus(state.language === "en" ? "File generation cancelled" : "已取消檔案生成");
+  } catch (error) {
+    showError(normalizeError(error, "FILE_GENERATION_CANCEL_FAILED", t("errors.fileGenerationFailed")));
+  }
 }
 
 function resetProjectViews(message = t("hints.initialSummary")) {
@@ -1840,7 +2147,12 @@ elements.projectPath.addEventListener("keydown", (event) => {
   }
 });
 elements.openProjectBtn.addEventListener("click", openProject);
-elements.modelKey.addEventListener("change", () => refreshModelStatus().catch(() => {}));
+elements.modelKey.addEventListener("change", () => {
+  state.modelKey = elements.modelKey.value || state.modelKey;
+  renderContextSelector();
+  refreshModelStatus().catch(() => {});
+});
+elements.contextWindowSelect?.addEventListener("change", updateSelectedContext);
 elements.analyzeBtn.addEventListener("click", analyzeProject);
 elements.refreshStatusBtn.addEventListener("click", refreshStatus);
 let fileTreeSearchTimer = null;
@@ -1860,6 +2172,8 @@ elements.chatImageInput.addEventListener("change", async (event) => {
   }
 });
 elements.removeChatImageBtn.addEventListener("click", () => clearChatImage());
+elements.generateFileBtn?.addEventListener("click", generateFileFromPrompt);
+elements.newThreadBtn?.addEventListener("click", newThread);
 elements.chatInput.addEventListener("paste", async (event) => {
   const items = [...(event.clipboardData?.items || [])];
   const imageItem = items.find((item) => item.type && item.type.startsWith("image/"));

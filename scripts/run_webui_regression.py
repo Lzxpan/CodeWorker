@@ -39,10 +39,12 @@ def test_default_model_is_gemma4():
 
 
 def test_gemma_context_window_matches_local_bench():
-    assert_true(server.get_model_context_limit("gemma4") == 16384, "gemma4 should use the locally validated 16384 context window")
+    assert_true(server.get_model_context_limit("gemma4") == 262144, "gemma4 should default to the selectable 256k context window")
+    assert_true(server.get_model_context_limit("qwen35") == 262144, "qwen35 should default to the selectable 256k context window")
+    assert_true(any(item["value"] == 262144 for item in server.get_context_options_payload()), "context options should expose 256k")
     assert_true(server.get_chat_max_tokens("gemma4") <= 4096, "gemma4 response budget should leave room for input context")
     limits = server.get_context_limits("gemma4", single_file_focus=False)
-    assert_true(limits["total_chars"] >= 20000, "gemma4 RAG char budget should use the larger validated context window")
+    assert_true(limits["total_chars"] >= 20000, "gemma4 RAG char budget should use the selected context window")
 
 
 def test_gemma_manifest_uses_unsloth_with_mmproj():
@@ -611,6 +613,36 @@ def test_project_rag_context_without_pins():
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_generated_text_file_requires_confirmation():
+    root = ROOT / ".tmp" / "regression-generate"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    old_project = server.STATE.project_path
+    old_ui = server.STATE.ui_state
+    try:
+        with server.STATE_LOCK:
+            server.STATE.project_path = str(root)
+            server.STATE.ui_state = "ready"
+        action = server.create_generated_file_preview(
+            root,
+            {
+                "targetPath": "generated/sample.md",
+                "title": "sample",
+                "content": "# Sample\n\nhello",
+            },
+        )
+        target = root / "generated" / "sample.md"
+        assert_true(not target.exists(), "generated file must not be written before confirmation")
+        server.confirm_generated_file(str(action["id"]))
+        assert_true(target.exists(), "generated file should be written after confirmation")
+        assert_true("hello" in target.read_text(encoding="utf-8"), "generated file content should match preview content")
+    finally:
+        with server.STATE_LOCK:
+            server.STATE.project_path = old_project
+            server.STATE.ui_state = old_ui
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     tests = [
         test_no_context_chat_payload,
@@ -624,6 +656,7 @@ def main():
         test_rag_model_loading_locator_prefers_source_chunks,
         test_rag_chinese_game_speed_query_finds_code,
         test_project_rag_context_without_pins,
+        test_generated_text_file_requires_confirmation,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
         test_video_metadata_fallback_blocks_guessing,
