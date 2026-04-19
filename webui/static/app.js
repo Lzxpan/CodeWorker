@@ -1800,13 +1800,17 @@ function renderGeneratedFileActionCard(action) {
     : (state.language === "en" ? "This will create a new file." : "這會建立新檔案。");
   return `
     <div class="generated-action-card" data-action-id="${escapeHtml(String(action.id || ""))}">
-    <div>${escapeHtml(action.targetPath || "")}</div>
-    <div>${escapeHtml(overwriteText)}</div>
-    <pre class="code-preview">${escapeHtml(action.preview || "")}</pre>
-    <div class="actions">
-      <button type="button" class="primary" data-action="confirm-generated">${escapeHtml(state.language === "en" ? "Confirm write" : "確認寫入")}</button>
-      <button type="button" data-action="cancel-generated">${escapeHtml(state.language === "en" ? "Cancel" : "取消")}</button>
-    </div>
+      <div class="generated-action-header">
+        <div>
+          <div class="generated-action-path">${escapeHtml(action.targetPath || "")}</div>
+          <div class="generated-action-meta">${escapeHtml(overwriteText)}</div>
+        </div>
+        <div class="actions generated-action-buttons">
+          <button type="button" class="primary" data-action="confirm-generated">${escapeHtml(state.language === "en" ? "Confirm write" : "確認寫入")}</button>
+          <button type="button" data-action="cancel-generated">${escapeHtml(state.language === "en" ? "Cancel" : "取消")}</button>
+        </div>
+      </div>
+      <pre class="code-preview generated-file-preview">${escapeHtml(action.preview || "")}</pre>
     </div>
   `;
 }
