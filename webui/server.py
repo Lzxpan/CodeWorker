@@ -2995,6 +2995,7 @@ def create_generated_file_preview(project_root: Path, request: Dict[str, object]
         "id": action_id,
         "kind": "generate_file",
         "status": "pending",
+        "rootPath": str(project_root.resolve()),
         "targetPath": target.relative_to(project_root.resolve()).as_posix(),
         "absoluteTargetPath": str(target),
         "extension": extension,
@@ -3028,6 +3029,7 @@ def public_generated_action(action: Dict[str, object]) -> Dict[str, object]:
         "status": action.get("status"),
         "targetPath": action.get("targetPath"),
         "absoluteTargetPath": action.get("absoluteTargetPath"),
+        "rootPath": action.get("rootPath"),
         "extension": action.get("extension"),
         "title": action.get("title"),
         "preview": action.get("preview"),
@@ -3044,14 +3046,16 @@ def confirm_generated_file(action_id: str) -> Dict[str, object]:
     if action.get("status") != "pending":
         raise ValueError("Generated file action is not pending.")
     target = Path(str(action.get("absoluteTargetPath", ""))).resolve()
-    with STATE_LOCK:
-        if not STATE.project_path:
-            raise ValueError("Project is not ready.")
-        project_root = Path(STATE.project_path).resolve()
+    root_path = str(action.get("rootPath") or "").strip()
+    if root_path:
+        project_root = Path(root_path).resolve()
+    else:
+        with STATE_LOCK:
+            project_root = get_generation_root_locked()
     try:
         target.relative_to(project_root)
     except ValueError as exc:
-        raise ValueError("Generated file target is outside the current project.") from exc
+        raise ValueError("Generated file target is outside the generated file root.") from exc
     target.parent.mkdir(parents=True, exist_ok=True)
     extension = str(action.get("extension", "")).lower()
     if extension in GENERATABLE_TEXT_EXTENSIONS:

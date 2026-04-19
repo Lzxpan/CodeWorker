@@ -851,12 +851,17 @@ def test_generic_previous_answer_file_generation_defaults_to_markdown():
 
 
 def test_generation_without_project_uses_app_root_and_previous_answer():
+    old_root_dir = server.ROOT_DIR
     old_state = (
         server.STATE.project_path,
         server.STATE.ui_state,
         list(server.STATE.history),
     )
+    root = ROOT / ".tmp" / "regression-generate-no-project"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
     try:
+        server.ROOT_DIR = root
         with server.STATE_LOCK:
             server.STATE.project_path = None
             server.STATE.ui_state = "idle"
@@ -870,9 +875,15 @@ def test_generation_without_project_uses_app_root_and_previous_answer():
         assert_true(generation_root == server.ROOT_DIR.resolve(), "file generation without an open project should use the CodeWorker app root")
         assert_true(suffixes == {".docx", ".pptx", ".pdf"}, "previous-answer multi-format generation should create docx, pptx, and pdf requests")
         assert_true(all("版本與 Hold 功能" in str(item["content"]) for item in requests), "multi-format generation should use previous assistant content")
+        actions = [server.create_generated_file_preview(generation_root, request) for request in requests]
+        results = [server.confirm_generated_file(str(action["id"])) for action in actions]
+        assert_true(all(Path(str(result["path"])).exists() for result in results), "confirm should write generated files even when no project is open")
+        assert_true(all(str(result["path"]).startswith(str(root)) for result in results), "no-project generated files should stay under the app root")
     finally:
+        server.ROOT_DIR = old_root_dir
         with server.STATE_LOCK:
             server.STATE.project_path, server.STATE.ui_state, server.STATE.history = old_state
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_generated_pdf_keeps_chinese_text_extractable():
