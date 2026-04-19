@@ -1,5 +1,6 @@
 import base64
 import io
+import inspect
 import json
 import shutil
 import sys
@@ -747,6 +748,15 @@ def test_generation_system_prompt_is_only_added_for_generation_requests():
     assert_true("CodeWorker 會在你回答後建立檔案預覽" in generation_prompt, "generation chat prompt should instruct model to prepare content")
 
 
+def test_stream_chat_initializes_model_generation_flag():
+    source = inspect.getsource(server.WebUIHandler.handle_chat_stream)
+    assert_true("file_generation_requested = (" in source, "stream chat must initialize file_generation_requested before preview creation")
+    assert_true(
+        "build_chat_system_prompt(snapshot.model_key, file_generation_requested=file_generation_requested)" in source,
+        "stream chat must pass the generation flag into the model system prompt",
+    )
+
+
 def main():
     tests = [
         test_no_context_chat_payload,
@@ -769,6 +779,7 @@ def main():
         test_document_generation_splits_long_pptx_sections,
         test_model_initiated_generation_uses_model_title_for_filename,
         test_generation_system_prompt_is_only_added_for_generation_requests,
+        test_stream_chat_initializes_model_generation_flag,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
         test_video_metadata_fallback_blocks_guessing,

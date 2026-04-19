@@ -7237,6 +7237,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     ui_state=STATE.ui_state,
                 )
                 effective_message = message
+                file_generation_requested = (
+                    bool(message)
+                    and not is_continue_request(message)
+                    and is_model_file_generation_request(message)
+                    and project_root is not None
+                    and STATE.ui_state == "ready"
+                )
                 continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
@@ -7296,7 +7303,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 context,
                 effective_message,
                 attachments,
-                build_chat_system_prompt(snapshot.model_key),
+                build_chat_system_prompt(snapshot.model_key, file_generation_requested=file_generation_requested),
                 max_tokens=max_tokens,
                 timeout_seconds=get_chat_timeout_seconds(snapshot.model_key),
                 continue_on_length=get_continue_on_length(snapshot.model_key),
