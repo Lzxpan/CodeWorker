@@ -126,8 +126,10 @@ Suggested prompts:
 3. The model first writes the document content. Its first heading is used as the automatic filename source, and CodeWorker creates a pending preview from that reply.
 4. To export the previous assistant answer, write: `Turn the previous explanation and use cases into PPTX and PDF files.` or `Generate a Word document from the explanation.`
 5. If one request mentions multiple formats, CodeWorker creates multiple pending previews, such as one `.pptx` and one `.pdf`.
-6. For Excel, mention `Excel`, `xlsx`, `spreadsheet`, or the target extension, for example: `Turn the test checklist into an Excel spreadsheet.`
-7. Review the pending preview and click `Confirm write`. After writing, the chat shows the final path and filename.
+6. For Word, mention `Word`, `word file`, `docx`, or `docx file`, for example: `Generate a Word file from the previous answer.`
+7. For text and code, mention the extension or format alias, such as `txt file`, `md file`, `py file`, `js file`, `json file`, `html file`, `css file`, `yaml file`, `sql file`, or `cs file`.
+8. For Excel, mention `Excel`, `xlsx`, `spreadsheet`, or the target extension, for example: `Turn the test checklist into an Excel spreadsheet.`
+9. Review the pending preview and click `Confirm write`. After writing, the chat shows the final path and filename.
 
 ---
 
@@ -210,6 +212,8 @@ Workflow rules:
 - added the file generation pending workflow for text/code, `.docx`, `.pdf`, `.pptx`, and `.xlsx`.
 - removed the frontend `Generate file` button. File generation is now detected and initiated from normal model chat.
 - changed generated filenames to use the model reply's first Markdown H1 heading, and shows the final path after writing.
+- fixed prompts such as `Generate a Word file from the previous answer` being misclassified as continuation; Word generation now creates a `.docx` pending preview.
+- expanded text and code aliases, including `txt file`, `md file`, `py file`, `js file`, `ts file`, `json file`, `html file`, `css file`, `yaml file`, `sql file`, and `cs file`.
 - added parsing for multi-format generation requests such as `PPTX and PDF`, and previous-answer export when the prompt references `previous` or `last answer`.
 - fixed garbled Chinese text in generated PDFs, raw Markdown markers in PPTX / DOCX, and Word generation prompts that should use the previous answer.
 - added `pdfplumber`, `reportlab`, `python-pptx`, and `openpyxl` to `scripts\bootstrap.ps1`.
