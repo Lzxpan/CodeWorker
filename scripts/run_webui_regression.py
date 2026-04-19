@@ -678,6 +678,75 @@ def test_generation_word_prompt_uses_previous_answer():
     assert_true("hidden" not in requests[0]["content"], "word generation should strip reasoning")
 
 
+def test_generation_with_previous_keyword_is_not_continuation():
+    prompt = "請把剛剛的回答生成word檔"
+    assert_true(server.is_model_file_generation_request(prompt), "word export prompt should be detected as file generation")
+    assert_true(not server.is_history_continuation_request(prompt), "word export prompt must not be treated as continuation")
+
+
+def test_generation_common_text_aliases():
+    cases = {
+        "請把剛剛的回答生成txt檔": ".txt",
+        "請把剛剛的回答生成純文字檔": ".txt",
+        "請把剛剛的回答生成md檔": ".md",
+        "請把剛剛的回答生成py檔": ".py",
+        "請把剛剛的回答生成js檔": ".js",
+        "請把剛剛的回答生成ts檔": ".ts",
+        "請把剛剛的回答生成json檔": ".json",
+        "請把剛剛的回答生成html檔": ".html",
+        "請把剛剛的回答生成css檔": ".css",
+        "請把剛剛的回答生成yaml檔": ".yaml",
+        "請把剛剛的回答生成sql檔": ".sql",
+        "請把剛剛的回答生成cs檔": ".cs",
+    }
+    history = [{"role": "assistant", "content": "# 測試內容\n\nhello"}]
+    for prompt, extension in cases.items():
+        assert_true(server.is_model_file_generation_request(prompt), f"{prompt} should be detected as file generation")
+        requests = server.parse_generation_requests({"prompt": prompt}, history)
+        assert_true(requests[0]["targetPath"].endswith(extension), f"{prompt} should create {extension}")
+
+
+def test_generated_docx_and_text_previews_can_be_created():
+    root = ROOT / ".tmp" / "regression-generate-docx-text"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    old_project = server.STATE.project_path
+    old_ui = server.STATE.ui_state
+    try:
+        with server.STATE_LOCK:
+            server.STATE.project_path = str(root)
+            server.STATE.ui_state = "ready"
+        docx_action = server.create_generated_file_preview(
+            root,
+            {
+                "targetPath": "generated/sample.docx",
+                "title": "sample",
+                "content": "# Sample\n\nhello",
+            },
+        )
+        text_action = server.create_generated_file_preview(
+            root,
+            {
+                "targetPath": "generated/sample.py",
+                "title": "sample",
+                "content": "print('hello')\n",
+            },
+        )
+        assert_true(Path(str(docx_action["tempPath"])).exists(), "docx preview should create a temporary docx")
+        assert_true(not (root / "generated" / "sample.docx").exists(), "docx preview must not write before confirmation")
+        assert_true(str(text_action["content"]).strip() == "print('hello')", "text preview should keep source content")
+        assert_true(not (root / "generated" / "sample.py").exists(), "text preview must not write before confirmation")
+        server.confirm_generated_file(str(docx_action["id"]))
+        server.confirm_generated_file(str(text_action["id"]))
+        assert_true((root / "generated" / "sample.docx").exists(), "docx should be written after confirmation")
+        assert_true((root / "generated" / "sample.py").read_text(encoding="utf-8").strip() == "print('hello')", "text file should be written after confirmation")
+    finally:
+        with server.STATE_LOCK:
+            server.STATE.project_path = old_project
+            server.STATE.ui_state = old_ui
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_generated_pdf_keeps_chinese_text_extractable():
     root = ROOT / ".tmp" / "regression-generate-pdf"
     shutil.rmtree(root, ignore_errors=True)
@@ -774,6 +843,9 @@ def main():
         test_generation_prompt_infers_multiple_documents_from_previous_answer,
         test_generation_prompt_infers_excel,
         test_generation_word_prompt_uses_previous_answer,
+        test_generation_with_previous_keyword_is_not_continuation,
+        test_generation_common_text_aliases,
+        test_generated_docx_and_text_previews_can_be_created,
         test_generated_pdf_keeps_chinese_text_extractable,
         test_document_generation_cleans_markdown_for_pptx,
         test_document_generation_splits_long_pptx_sections,

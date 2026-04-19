@@ -2460,21 +2460,21 @@ GENERATABLE_TEXT_EXTENSIONS = {
 GENERATABLE_BINARY_EXTENSIONS = {".docx", ".pdf", ".pptx", ".xlsx"}
 GENERATABLE_EXTENSIONS = GENERATABLE_TEXT_EXTENSIONS | GENERATABLE_BINARY_EXTENSIONS
 GENERATABLE_EXTENSION_ALIASES: Dict[str, Tuple[str, ...]] = {
-    ".pptx": ("pptx", "ppt", "powerpoint", "簡報", "投影片"),
-    ".pdf": ("pdf",),
-    ".docx": ("docx", "word", "word檔", "文件檔"),
-    ".xlsx": ("xlsx", "excel", "試算表", "工作表"),
-    ".md": ("markdown", "md"),
-    ".txt": ("txt", "文字檔"),
-    ".py": ("python", ".py"),
-    ".js": ("javascript", ".js"),
-    ".ts": ("typescript", ".ts"),
-    ".json": ("json",),
-    ".html": ("html",),
-    ".css": ("css",),
-    ".yaml": ("yaml", "yml"),
-    ".sql": ("sql",),
-    ".cs": ("c#", "csharp", ".cs"),
+    ".pptx": ("pptx", "ppt", "powerpoint", "ppt檔", "pptx檔", "簡報", "投影片"),
+    ".pdf": ("pdf", "pdf檔", "pdf文件"),
+    ".docx": ("docx", "docx檔", "doc", "doc檔", "word", "word檔", "word文件", "word 文件", "word文檔", "文件檔"),
+    ".xlsx": ("xlsx", "xlsx檔", "excel", "excel檔", "試算表", "工作表"),
+    ".md": ("markdown", "markdown檔", "md", "md檔"),
+    ".txt": ("txt", "txt檔", "text", "文字檔", "純文字", "純文字檔"),
+    ".py": ("python", "python檔", "py", "py檔", ".py"),
+    ".js": ("javascript", "javascript檔", "js", "js檔", ".js"),
+    ".ts": ("typescript", "typescript檔", "ts", "ts檔", ".ts"),
+    ".json": ("json", "json檔"),
+    ".html": ("html", "html檔"),
+    ".css": ("css", "css檔"),
+    ".yaml": ("yaml", "yaml檔", "yml", "yml檔"),
+    ".sql": ("sql", "sql檔"),
+    ".cs": ("c#", "c#檔", "csharp", "cs", "cs檔", ".cs"),
 }
 PREVIOUS_ANSWER_KEYWORDS = (
     "剛剛", "剛才", "上一則", "上一段", "上面", "上述", "前面", "前一個", "前一則", "剛", "剛才的",
@@ -2536,11 +2536,21 @@ def should_use_previous_answer(prompt: str) -> bool:
     return any(keyword.lower() in lowered for keyword in PREVIOUS_ANSWER_KEYWORDS)
 
 
+def generation_alias_matches_prompt(alias: str, lowered_prompt: str) -> bool:
+    alias_lower = alias.lower()
+    if alias_lower.startswith("."):
+        return alias_lower in lowered_prompt
+    if re.fullmatch(r"[a-z0-9+#]+", alias_lower):
+        pattern = rf"(?<![a-z0-9+#]){re.escape(alias_lower)}(?![a-z0-9+#])"
+        return bool(re.search(pattern, lowered_prompt))
+    return alias_lower in lowered_prompt
+
+
 def looks_like_generation_command(prompt: str) -> bool:
     lowered = prompt.lower()
     has_command = any(keyword.lower() in lowered for keyword in GENERATION_COMMAND_KEYWORDS)
     has_format = any(
-        (alias.lower() in lowered)
+        generation_alias_matches_prompt(alias, lowered)
         for aliases in GENERATABLE_EXTENSION_ALIASES.values()
         for alias in aliases
     )
@@ -2556,12 +2566,7 @@ def infer_generation_extensions(prompt: str, file_type: str) -> List[str]:
     matches: List[str] = []
     for extension, aliases in GENERATABLE_EXTENSION_ALIASES.items():
         for alias in aliases:
-            alias_lower = alias.lower()
-            if alias_lower.startswith("."):
-                if alias_lower in lowered:
-                    matches.append(extension)
-                    break
-            elif alias_lower in lowered:
+            if generation_alias_matches_prompt(alias, lowered):
                 matches.append(extension)
                 break
     unique: List[str] = []
@@ -2591,7 +2596,15 @@ def extract_explicit_generation_targets(text: str) -> List[str]:
 def infer_generation_basename(prompt: str, title: str, fallback: str = "generated") -> str:
     source = title.strip() or prompt.strip() or fallback
     source = re.sub(r"(請|幫我|可以|把|將|做成|生成|產生|輸出|存成|建立|檔案|檔|一個|一份)", "", source)
-    source = re.sub(r"(pptx|ppt|pdf|docx|word|xlsx|excel|markdown|md|簡報|投影片|試算表|工作表)", "", source, flags=re.IGNORECASE)
+    format_tokens = {
+        token
+        for extension, aliases in GENERATABLE_EXTENSION_ALIASES.items()
+        for token in (extension.lstrip("."), *aliases)
+        if len(token.strip(".")) >= 2 and token.lower() not in {"text"}
+    }
+    if format_tokens:
+        pattern = "|".join(re.escape(token) for token in sorted(format_tokens, key=len, reverse=True))
+        source = re.sub(pattern, "", source, flags=re.IGNORECASE)
     source = source.replace("跟", " ").replace("和", " ").replace("與", " ")
     return slugify_filename(source, fallback)
 
@@ -2657,6 +2670,10 @@ def is_model_file_generation_request(prompt: str) -> bool:
         extension in GENERATABLE_BINARY_EXTENSIONS or extension in GENERATABLE_TEXT_EXTENSIONS
         for extension in infer_generation_extensions(prompt, "")
     )
+
+
+def is_history_continuation_request(message: str) -> bool:
+    return is_continue_request(message) and not is_model_file_generation_request(message)
 
 
 def extract_model_document_title(reply: str, prompt: str) -> str:
@@ -7110,14 +7127,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     ui_state=STATE.ui_state,
                 )
                 effective_message = message
+                file_generation_intent = bool(message) and is_model_file_generation_request(message)
                 file_generation_requested = (
-                    bool(message)
-                    and not is_continue_request(message)
-                    and is_model_file_generation_request(message)
+                    file_generation_intent
                     and project_root is not None
                     and STATE.ui_state == "ready"
                 )
-                continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
+                continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
                     effective_message = continuation_message
@@ -7237,14 +7253,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     ui_state=STATE.ui_state,
                 )
                 effective_message = message
+                file_generation_intent = bool(message) and is_model_file_generation_request(message)
                 file_generation_requested = (
-                    bool(message)
-                    and not is_continue_request(message)
-                    and is_model_file_generation_request(message)
+                    file_generation_intent
                     and project_root is not None
                     and STATE.ui_state == "ready"
                 )
-                continuation_message = build_history_continuation_message(message, snapshot.history) if is_continue_request(message) else None
+                continuation_message = build_history_continuation_message(message, snapshot.history) if is_history_continuation_request(message) else None
                 max_tokens = get_request_max_tokens(payload, get_chat_max_tokens(snapshot.model_key))
                 if continuation_message:
                     effective_message = continuation_message
