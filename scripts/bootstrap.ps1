@@ -524,6 +524,8 @@ function Install-PythonPackages {
         $importName = $package
         if ($package -eq "python-docx") {
             $importName = "docx"
+        } elseif ($package -eq "python-pptx") {
+            $importName = "pptx"
         }
         $checkCode = "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$importName') else 1)"
         & $pythonExe -c $checkCode
@@ -577,7 +579,7 @@ if (-not $SkipRuntime) {
 }
 
 if (-not $SkipWinPython) {
-    Install-PythonPackages -Packages @("pypdf", "python-docx")
+    Install-PythonPackages -Packages @("pypdf", "python-docx", "reportlab", "python-pptx")
 } else {
     Write-Step "Skipping Python document parser packages because -SkipWinPython was provided."
 }

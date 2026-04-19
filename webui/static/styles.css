@@ -34,7 +34,7 @@ body {
 
 .shell {
   display: grid;
-  grid-template-columns: 450px 1fr;
+  grid-template-columns: 450px minmax(0, 1fr) 240px;
   gap: 14px;
   height: 100vh;
   min-height: 100vh;
@@ -43,13 +43,90 @@ body {
   overflow: hidden;
 }
 
-.sidebar, .main {
+.sidebar, .main, .threadbar {
   display: flex;
   flex-direction: column;
   gap: 12px;
   height: calc(100vh - 28px);
   min-height: calc(100vh - 28px);
   overflow: hidden;
+}
+
+.threadbar {
+  min-width: 0;
+}
+
+.thread-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.thread-panel h2 {
+  font-size: 1.05rem;
+}
+
+.thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.thread-list.empty {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.thread-item {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.thread-item.is-active {
+  border-color: var(--line-strong);
+  background: rgba(13, 92, 99, 0.08);
+}
+
+.thread-title {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+  font-weight: 700;
+  border-radius: 0;
+}
+
+.thread-title:hover:not(:disabled) {
+  transform: none;
+  background: transparent;
+  color: var(--accent-strong);
+}
+
+.thread-meta,
+.thread-summary {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.thread-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.thread-actions button {
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 0.76rem;
 }
 
 .workspace-grid {
@@ -508,6 +585,23 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
   flex-wrap: wrap;
 }
 
+.context-picker {
+  display: inline-grid;
+  grid-template-columns: auto 112px;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.context-picker label {
+  font-size: 0.82rem;
+}
+
+.context-picker select {
+  padding: 9px 10px;
+  border-radius: 8px;
+}
+
 .chat-footer-meta {
   display: flex;
   align-items: center;
@@ -518,7 +612,7 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
 
 .chat-actions {
   margin-top: 0;
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .chat-image-preview,
@@ -649,7 +743,7 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
     min-height: auto;
     overflow: visible;
   }
-  .sidebar, .main { height: auto; min-height: auto; overflow: visible; }
+  .sidebar, .main, .threadbar { height: auto; min-height: auto; overflow: visible; }
   .chat-panel {
     min-height: 420px;
     height: auto;
@@ -665,6 +759,9 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
     align-items: flex-start;
   }
   .chat-actions {
+    margin-left: 0;
+  }
+  .context-picker {
     margin-left: 0;
   }
   .brand {

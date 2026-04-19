@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CodeWorker V1.00.000 Web UI</title>
+  <title>CodeWorker V1.01.000 Web UI</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
         <div class="brand-main">
           <div class="brand-mark">CW</div>
           <div class="brand-copy">
-            <h1 id="brandTitle">CodeWorker V1.00.000</h1>
+            <h1 id="brandTitle">CodeWorker V1.01.000</h1>
             <p id="brandSubtitle">本地離線專案分析與對話</p>
           </div>
         </div>
@@ -150,7 +150,20 @@
                   <input id="chatImageInput" type="file" multiple hidden>
                   <button id="attachImageBtn" type="button">上傳檔案</button>
                   <button id="removeChatImageBtn" type="button" class="ghost hidden">移除附件</button>
+                  <button id="generateFileBtn" type="button" class="ghost">生成檔案</button>
                 </div>
+              </div>
+              <div class="context-picker">
+                <label id="contextWindowLabel" for="contextWindowSelect">Context</label>
+                <select id="contextWindowSelect">
+                  <option value="4096">4k</option>
+                  <option value="8192">8k</option>
+                  <option value="16384">16k</option>
+                  <option value="32768">32k</option>
+                  <option value="65536">64k</option>
+                  <option value="131072">128k</option>
+                  <option value="262144" selected>256k</option>
+                </select>
               </div>
               <div class="actions chat-actions">
                 <div class="action-item">
@@ -167,6 +180,19 @@
         </section>
       </div>
     </main>
+
+    <aside class="threadbar">
+      <section class="panel thread-panel">
+        <div class="panel-title-row">
+          <div class="title-with-help">
+            <h2 id="threadPanelTitle">對話串</h2>
+            <button type="button" class="help-trigger" data-help="thread-panel" aria-label="對話串說明">?</button>
+          </div>
+          <button id="newThreadBtn" type="button" class="ghost">新增</button>
+        </div>
+        <div id="threadList" class="thread-list empty">尚無對話串。</div>
+      </section>
+    </aside>
   </div>
 
   <div id="helpModal" class="help-modal hidden" aria-hidden="true">

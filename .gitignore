@@ -4,7 +4,11 @@ downloads/
 models/
 runtime/
 data/indexes/
+data/chat-threads/
+data/model-contexts.json
 data/agent-actions.jsonl
+logs/*.json
+logs/*.md
 .codex-artifacts/
 __pycache__/
 *.pyc
