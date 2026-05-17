@@ -1,7 +1,10 @@
 import argparse
+import json
 import os
+import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -20,6 +23,9 @@ def main() -> int:
     parser.add_argument("--cache-type-k")
     parser.add_argument("--cache-type-v")
     parser.add_argument("--threads", default=str(os.cpu_count() or 4))
+    parser.add_argument("--n-gpu-layers", default="0")
+    parser.add_argument("--flash-attn", action="store_true")
+    parser.add_argument("--jinja", action="store_true")
     parser.add_argument("--log", required=True)
     parser.add_argument("--err", required=True)
     args = parser.parse_args()
@@ -61,6 +67,10 @@ def main() -> int:
             command.extend(["--cache-type-k", str(args.cache_type_k)])
         if args.cache_type_v:
             command.extend(["--cache-type-v", str(args.cache_type_v)])
+        if args.flash_attn:
+            command.append("--flash-attn")
+        if args.jinja:
+            command.append("--jinja")
         command.extend([
             "-c",
             str(args.context),
@@ -72,8 +82,30 @@ def main() -> int:
             "0",
             "--no-warmup",
             "--n-gpu-layers",
-            "0",
+            str(args.n_gpu_layers),
         ])
+        launch_metadata = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": "llama_server_subprocess_launch",
+            "python": sys.executable,
+            "platform": platform.platform(),
+            "server": str(server_path),
+            "host": args.host,
+            "port": str(args.port),
+            "alias": args.alias,
+            "model": str(model_path),
+            "mmproj": str(mmproj_path) if mmproj_path else "",
+            "context": str(args.context),
+            "threads": str(args.threads),
+            "nGpuLayers": str(args.n_gpu_layers),
+            "flashAttn": bool(args.flash_attn),
+            "jinja": bool(args.jinja),
+            "cacheTypeK": str(args.cache_type_k or ""),
+            "cacheTypeV": str(args.cache_type_v or ""),
+            "command": command,
+        }
+        stdout_handle.write(("[CODEWORKER_LAUNCH_METADATA] " + json.dumps(launch_metadata, ensure_ascii=False) + "\n").encode("utf-8"))
+        stdout_handle.flush()
         process = subprocess.Popen(
             command,
             stdout=stdout_handle,
@@ -81,6 +113,8 @@ def main() -> int:
             creationflags=DETACHED_FLAGS,
             close_fds=True,
         )
+        stdout_handle.write(f"[CODEWORKER_LAUNCH_PID] {process.pid}\n".encode("utf-8"))
+        stdout_handle.flush()
 
     print(process.pid)
     return 0

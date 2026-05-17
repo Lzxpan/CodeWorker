@@ -1,4 +1,4 @@
-# CodeWorker V1.01.000
+# CodeWorker V1.01.001
 
 > A privacy-first offline Windows code assistant built around local LLM workflows.
 
@@ -13,8 +13,9 @@
 Core capabilities:
 
 - Local model service: `Gemma 4 26B` is the default model and is served by CodeWorker's bundled `llama.cpp` service. Ollama is not required.
-- Optional model: `Qwen 3.5 9B Vision` remains available, and both models use the same chat, RAG, attachment, and safety flows.
-- Context selector: each model remembers its own `4k / 8k / 16k / 32k / 64k / 128k / 256k` context choice. The default is `256k`.
+- Model catalog: `Gemma 4 26B` and `Qwen 3.5 9B Vision` remain available, with new options for `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite`.
+- Hardware auto-optimization: the Web UI detects RAM, CPU, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability, then recommends a model and applies backend, context, threads, and GPU layer settings.
+- Context selector: each model remembers its own context options from `4k` to `256k`; `GLM-4.6` also exposes a `200k` option.
 - Full-project retrieval: once a project is opened, chat can use the local RAG index to search paths, symbols, summaries, and chunks even when no files are pinned.
 - Focused context: checked files in the `File tree` become pinned context and take priority over broad RAG.
 - Attachments: code, config, documents, images, audio, and video can be attached. CodeWorker sends extracted text, keyframes, or transcripts when available, otherwise metadata fallback.
@@ -27,8 +28,10 @@ Core capabilities:
 ## 2. Important Notes
 
 - The first run needs internet access to download runtimes and models; later use can be offline.
+- `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite` are not downloaded during the first bootstrap. They are downloaded only when explicitly selected.
 - `256k` context is an available upper option, not a guarantee that every machine can run it stably. If startup fails, the UI shows the error and log path instead of silently downgrading.
 - `32GB RAM` class memory is recommended. Large context, images, video keyframes, and long answers increase memory pressure.
+- High-end models and GPU backends still need validation on high-end PCs. When testing, keep `logs\hardware-optimization.jsonl` and the matching `logs\llama-server-<model>-*.log` / `.err.log` files.
 - Without an opened project, chat behaves as normal Q&A. With an opened project and no pinned files, chat uses full-project RAG. With pinned files, pinned context takes priority.
 - Videos are analyzed through `FFmpeg` keyframes, not by sending raw MP4 binaries to the model. Audio and video audio tracks try `whisper.cpp` speech-to-text.
 - File generation and Agent writes require confirmation before touching the project root. After a file is written, the UI shows the final path and filename.
@@ -77,7 +80,7 @@ scripts\install-aider.cmd
 
 ### Screenshot
 
-![CodeWorker V1.01.000 English Web UI overview](docs/screenshots/webui-overview-en-v101000.png)
+![CodeWorker V1.01.001 English Web UI overview](docs/screenshots/webui-overview-en-v101000.png)
 
 ### General Q&A
 
@@ -160,6 +163,7 @@ Key files:
 - `scripts\launch_llama_server.py`: launches the bundled `llama.cpp` model server.
 - `scripts\run_webui_regression.py`: regression tests for Web UI, attachments, RAG, and streaming.
 - `webui\server.py`: API routes, streaming chat, context assembly, threads, file generation, attachment handling, memory, and model calls.
+- `webui\core\hardware.py`: detects the hardware profile, chooses the backend, recommends a model, and generates auto-optimization settings.
 - `webui\core\models.py`: model registry, status, and OpenAI-compatible endpoint data.
 - `webui\rag\index.py`: hierarchical project index, SQLite FTS5 fallback, chunk search, and impact hints.
 - `webui\agent\runtime.py`: ReAct-style Agent, tool calls, pending actions, and audit log.
@@ -204,6 +208,17 @@ Workflow rules:
 ---
 
 ## 7. Version History
+
+### V1.01.001
+
+- added high-end model options `Qwen3-Coder 30B A3B` and `GLM-4.6`, plus standard / low-tier fallbacks `Qwen2.5-Coder 14B Instruct` and `DeepSeek-Coder V2 Lite`.
+- added hardware detection and auto-optimization based on RAM, CPU threads, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability; CodeWorker now recommends model, backend, context, threads, and `--n-gpu-layers`.
+- `/api/models` now returns `hardwareProfile`, `recommendedModelKey`, model tier, estimated model size, runtime backend, GPU layers, and threads.
+- the Web UI model dropdown now shows tier, model size, context, and recommendation state, with a new hardware status block in the left sidebar.
+- `scripts\launch_llama_server.py` now supports `--n-gpu-layers`, `--flash-attn`, and `--jinja` instead of forcing CPU-only startup.
+- added `logs\hardware-optimization.jsonl` with hardware profile, model recommendation, launch plan, backend, context, threads, GPU layers, model file paths, and log paths.
+- every `llama-server-*.log` starts with `[CODEWORKER_LAUNCH_METADATA]` so the actual command and llama.cpp startup arguments can be inspected.
+- pending high-end validation: CUDA / Vulkan runtime selection, `Qwen3-Coder 30B A3B`, `GLM-4.6`, large contexts, and GPU offload stability need logs from a high-end PC.
 
 ### V1.01.000
 

@@ -4,6 +4,11 @@
       "provider": "github-release",
       "repo": "ggml-org/llama.cpp",
       "assetPattern": "^llama-.*-bin-win-cpu-x64\\.zip$",
+      "assetPatternsByBackend": {
+        "cpu": "^llama-.*-bin-win-cpu-x64\\.zip$",
+        "vulkan": "^llama-.*-bin-win-vulkan-x64\\.zip$",
+        "cuda": "^llama-.*-bin-win-cuda-12\\.4-x64\\.zip$"
+      },
       "targetDir": "runtime/llama.cpp",
       "extract": "zip"
     },
@@ -66,6 +71,18 @@
         "*mmproj-F16*.gguf"
       ],
       "targetDir": "models/gemma4-26b-unsloth-ud-q4-k-m",
+      "tier": "standard",
+      "estimatedModelSizeGb": 17.7,
+      "minRamGb": 32,
+      "recommendedRamGb": 64,
+      "contextOptions": [
+        32768,
+        65536,
+        131072,
+        262144
+      ],
+      "llamaArgs": [],
+      "autoDownload": true,
       "supportsImages": true,
       "compactImageContext": true,
       "temperature": 1.0,
@@ -95,9 +112,169 @@
         "mmproj-BF16.gguf"
       ],
       "targetDir": "models/qwen3.5-9b-q4-mmproj",
+      "tier": "low",
+      "estimatedModelSizeGb": 6.0,
+      "minRamGb": 16,
+      "recommendedRamGb": 32,
+      "contextOptions": [
+        16384,
+        32768,
+        65536,
+        131072,
+        262144
+      ],
+      "llamaArgs": [],
+      "autoDownload": true,
       "supportsImages": true,
       "compactImageContext": true,
       "note": "Qwen 3.5 multimodal GGUF with BF16 mmproj for llama.cpp OpenAI-compatible /v1."
+    },
+    "qwen3coder30b": {
+      "enabled": true,
+      "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
+      "repo": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+      "modelId": "Qwen3-Coder-30B-A3B-Instruct",
+      "alias": "qwen3coder30b-local",
+      "displayName": "Qwen3-Coder 30B A3B",
+      "port": 8083,
+      "contextWindow": 65536,
+      "cacheTypeK": "q4_0",
+      "cacheTypeV": "q4_0",
+      "defaultQuant": "UD-Q4_K_XL",
+      "filePattern": "*Qwen3-Coder-30B-A3B-Instruct*UD-Q4_K_XL*.gguf",
+      "filePatterns": [
+        "*Qwen3-Coder-30B-A3B-Instruct*UD-Q4_K_XL*.gguf"
+      ],
+      "targetDir": "models/qwen3-coder-30b-a3b-ud-q4-k-xl",
+      "tier": "high",
+      "estimatedModelSizeGb": 17.7,
+      "minRamGb": 48,
+      "recommendedRamGb": 64,
+      "contextOptions": [
+        32768,
+        65536,
+        131072,
+        262144
+      ],
+      "llamaArgs": [],
+      "autoDownload": false,
+      "supportsImages": false,
+      "compactImageContext": false,
+      "temperature": 0.2,
+      "topP": 0.95,
+      "topK": 40,
+      "note": "Coding-first Qwen3-Coder GGUF served by bundled llama.cpp. Download only when selected."
+    },
+    "glm46": {
+      "enabled": true,
+      "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
+      "repo": "unsloth/GLM-4.6-GGUF",
+      "modelId": "GLM-4.6",
+      "alias": "glm46-local",
+      "displayName": "GLM-4.6",
+      "port": 8084,
+      "contextWindow": 65536,
+      "cacheTypeK": "q4_0",
+      "cacheTypeV": "q4_0",
+      "defaultQuant": "UD-IQ1_M",
+      "filePattern": "*GLM-4.6*UD-IQ1_M*.gguf",
+      "filePatterns": [
+        "*GLM-4.6*UD-IQ1_M*.gguf"
+      ],
+      "targetDir": "models/glm-4.6-ud-iq1-m",
+      "tier": "extreme",
+      "estimatedModelSizeGb": 107,
+      "minRamGb": 128,
+      "recommendedRamGb": 192,
+      "contextOptions": [
+        32768,
+        65536,
+        131072,
+        204800
+      ],
+      "llamaArgs": [
+        "--jinja"
+      ],
+      "autoDownload": false,
+      "supportsImages": false,
+      "compactImageContext": false,
+      "temperature": 1.0,
+      "topP": 0.95,
+      "topK": 40,
+      "note": "Extreme-tier GLM-4.6 GGUF. Requires latest llama.cpp Jinja chat-template support."
+    },
+    "qwen25coder14b": {
+      "enabled": true,
+      "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
+      "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+      "modelId": "Qwen2.5-Coder-14B-Instruct",
+      "alias": "qwen25coder14b-local",
+      "displayName": "Qwen2.5-Coder 14B Instruct",
+      "port": 8085,
+      "contextWindow": 32768,
+      "cacheTypeK": "q4_0",
+      "cacheTypeV": "q4_0",
+      "defaultQuant": "Q4_K_M",
+      "filePattern": "*qwen2.5-coder-14b-instruct*q4_k_m*.gguf",
+      "filePatterns": [
+        "*qwen2.5-coder-14b-instruct*q4_k_m*.gguf"
+      ],
+      "targetDir": "models/qwen2.5-coder-14b-q4-k-m",
+      "tier": "standard",
+      "estimatedModelSizeGb": 8.99,
+      "minRamGb": 24,
+      "recommendedRamGb": 32,
+      "contextOptions": [
+        16384,
+        32768
+      ],
+      "llamaArgs": [],
+      "autoDownload": false,
+      "supportsImages": false,
+      "compactImageContext": false,
+      "temperature": 0.2,
+      "topP": 0.95,
+      "topK": 40,
+      "note": "Stable low-resource coding model for 32GB-class local machines."
+    },
+    "deepseekcoderlite": {
+      "enabled": true,
+      "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
+      "repo": "QuantFactory/DeepSeek-Coder-V2-Lite-Instruct-GGUF",
+      "modelId": "DeepSeek-Coder-V2-Lite-Instruct",
+      "alias": "deepseekcoderlite-local",
+      "displayName": "DeepSeek-Coder V2 Lite",
+      "port": 8086,
+      "contextWindow": 32768,
+      "cacheTypeK": "q4_0",
+      "cacheTypeV": "q4_0",
+      "defaultQuant": "Q4_K_M",
+      "filePattern": "*DeepSeek-Coder-V2-Lite-Instruct*Q4_K_M*.gguf",
+      "filePatterns": [
+        "*DeepSeek-Coder-V2-Lite-Instruct*Q4_K_M*.gguf"
+      ],
+      "targetDir": "models/deepseek-coder-v2-lite-q4-k-m",
+      "tier": "low",
+      "estimatedModelSizeGb": 10.4,
+      "minRamGb": 16,
+      "recommendedRamGb": 32,
+      "contextOptions": [
+        16384,
+        32768,
+        65536
+      ],
+      "llamaArgs": [],
+      "autoDownload": false,
+      "supportsImages": false,
+      "compactImageContext": false,
+      "temperature": 0.3,
+      "topP": 0.95,
+      "topK": 50,
+      "note": "Low-tier CPU-friendly coding fallback with broad language support."
     }
   }
 }

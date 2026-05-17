@@ -3,6 +3,8 @@ const state = {
   projectPath: "",
   modelKey: "gemma4",
   modelCapabilities: {},
+  hardwareProfile: null,
+  recommendedModelKey: "",
   modelContextByKey: { gemma4: 262144, qwen35: 262144 },
   contextOptions: [
     { label: "4k", value: 4096 },
@@ -38,8 +40,8 @@ const state = {
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V1.01.000 Web UI",
-    brandTitle: "CodeWorker V1.01.000",
+    pageTitle: "CodeWorker V1.01.001 Web UI",
+    brandTitle: "CodeWorker V1.01.001",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -49,6 +51,7 @@ const I18N = {
       chatImage: "檔案附件",
       contextWindow: "Context",
       modelStatus: "模型狀態",
+      hardwareStatus: "硬體偵測",
     },
     headings: {
       errorPanel: "錯誤訊息",
@@ -174,8 +177,8 @@ const I18N = {
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V1.01.000 Web UI",
-    brandTitle: "CodeWorker V1.01.000",
+    pageTitle: "CodeWorker V1.01.001 Web UI",
+    brandTitle: "CodeWorker V1.01.001",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -185,6 +188,7 @@ const I18N = {
       chatImage: "File attachment",
       contextWindow: "Context",
       modelStatus: "Model status",
+      hardwareStatus: "Hardware",
     },
     headings: {
       errorPanel: "Errors",
@@ -606,6 +610,7 @@ const elements = {
   analyzeBtn: document.getElementById("analyzeBtn"),
   firstRunHint: document.getElementById("firstRunHint"),
   modelStatus: document.getElementById("modelStatus"),
+  hardwareStatus: document.getElementById("hardwareStatus"),
   errorPanelTitle: document.getElementById("errorPanelTitle"),
   refreshStatusBtn: document.getElementById("refreshStatusBtn"),
   projectSummaryTitle: document.getElementById("projectSummaryTitle"),
@@ -1249,6 +1254,95 @@ function setPinnedFiles(files = []) {
   renderTree(state.tree);
 }
 
+function formatContextWindow(value) {
+  const numeric = Number(value || 0);
+  if (!numeric) return "-";
+  return numeric % 1024 === 0 ? `${numeric / 1024}k` : String(numeric);
+}
+
+function formatModelTier(tier, compact = false) {
+  const normalized = String(tier || "standard");
+  const compactZh = {
+    low: "低",
+    standard: "標",
+    high: "高",
+    extreme: "極",
+  };
+  const compactEn = {
+    low: "L",
+    standard: "S",
+    high: "H",
+    extreme: "X",
+  };
+  const zh = {
+    low: "低階",
+    standard: "標準",
+    high: "高階",
+    extreme: "極高階",
+  };
+  const en = {
+    low: "Low",
+    standard: "Standard",
+    high: "High",
+    extreme: "Extreme",
+  };
+  if (compact) {
+    return (state.language === "en" ? compactEn : compactZh)[normalized] || normalized;
+  }
+  return (state.language === "en" ? en : zh)[normalized] || normalized;
+}
+
+function compactModelName(name, key) {
+  const value = String(name || key || "");
+  return value
+    .replace("Qwen2.5-Coder 14B Instruct", "Qwen2.5 14B")
+    .replace("Qwen3-Coder 30B A3B", "Qwen3 30B")
+    .replace("DeepSeek-Coder V2 Lite", "DeepSeek V2 Lite")
+    .replace("Qwen 3.5 9B Vision", "Qwen3.5 9B")
+    .replace("Gemma 4 26B", "Gemma4 26B");
+}
+
+function formatModelOptionLabel(key, model) {
+  const parts = [];
+  if (model.recommended) {
+    parts.push(state.language === "en" ? "R" : "薦");
+  }
+  parts.push(formatModelTier(model.tier, true));
+  const size = Number(model.estimatedModelSizeGb || 0);
+  const context = model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow;
+  const suffix = [
+    size ? `${size.toFixed(size >= 10 ? 0 : 1)}G` : "",
+    context ? formatContextWindow(context) : "",
+  ].filter(Boolean).join("/");
+  return `${parts.map((item) => `[${item}]`).join("")} ${compactModelName(model.displayName, key)}${suffix ? ` ${suffix}` : ""}`;
+}
+
+function renderHardwareStatus(profile = state.hardwareProfile, selectedModel = null) {
+  if (!elements.hardwareStatus) return;
+  if (!profile) {
+    elements.hardwareStatus.textContent = `${t("labels.hardwareStatus")}: ${state.language === "en" ? "not checked" : "尚未檢查"}`;
+    return;
+  }
+  const profileName = formatModelTier(profile.profile);
+  const ram = Number(profile.totalRamGb || 0);
+  const gpuNames = Array.isArray(profile.gpus)
+    ? profile.gpus.map((gpu) => gpu.name).filter(Boolean).slice(0, 2).join(", ")
+    : "";
+  const model = selectedModel || getModelCapability(elements.modelKey.value || state.modelKey);
+  const backend = model.runtimeBackend || "cpu";
+  const context = model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow;
+  const recommendation = state.recommendedModelKey ? getModelLabel(state.recommendedModelKey) : "";
+  const gpuText = gpuNames || (state.language === "en" ? "CPU only" : "僅 CPU");
+  const recommendedText = recommendation
+    ? `${state.language === "en" ? "Recommended" : "推薦"}: ${recommendation}`
+    : "";
+  elements.hardwareStatus.innerHTML = `
+    <div><strong>${escapeHtml(t("labels.hardwareStatus"))}</strong>: ${escapeHtml(profileName)} · RAM ${escapeHtml(ram ? `${ram.toFixed(1)}GB` : "-")} · ${escapeHtml(gpuText)}</div>
+    <div>${escapeHtml(recommendedText || (state.language === "en" ? "Recommendation unavailable" : "尚無推薦模型"))}</div>
+    <div>Backend ${escapeHtml(backend)} · ctx ${escapeHtml(formatContextWindow(context))}</div>
+  `;
+}
+
 function renderModelOptions(models = {}) {
   const selected = elements.modelKey.value || state.modelKey || "gemma4";
   const entries = Object.entries(models);
@@ -1257,17 +1351,21 @@ function renderModelOptions(models = {}) {
     state.modelContextByKey[key] = Number(model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow || state.modelContextByKey[key] || 262144);
   });
   elements.modelKey.innerHTML = entries.map(([key, model]) => (
-    `<option value="${escapeHtml(key)}">${escapeHtml(model.displayName || key)}</option>`
+    `<option value="${escapeHtml(key)}">${escapeHtml(formatModelOptionLabel(key, model))}</option>`
   )).join("");
-  elements.modelKey.value = models[selected] ? selected : (state.modelKey || entries[0][0]);
+  elements.modelKey.value = models[selected] ? selected : (state.recommendedModelKey && models[state.recommendedModelKey] ? state.recommendedModelKey : (state.modelKey || entries[0][0]));
   renderContextSelector();
+  renderHardwareStatus();
 }
 
 function renderContextSelector(options = state.contextOptions) {
   if (!elements.contextWindowSelect) return;
   const selectedModel = elements.modelKey.value || state.modelKey || "gemma4";
   const selectedContext = Number(state.modelContextByKey[selectedModel] || 262144);
-  const normalizedOptions = Array.isArray(options) && options.length ? options : state.contextOptions;
+  const modelOptions = getModelCapability(selectedModel).contextOptions;
+  const normalizedOptions = Array.isArray(modelOptions) && modelOptions.length
+    ? modelOptions
+    : (Array.isArray(options) && options.length ? options : state.contextOptions);
   elements.contextWindowSelect.innerHTML = normalizedOptions.map((item) => (
     `<option value="${Number(item.value)}">${escapeHtml(item.label || `${Number(item.value) / 1024}k`)}</option>`
   )).join("");
@@ -1510,6 +1608,7 @@ function applyTranslations() {
   renderHistory(state.history);
   renderThreads(state.threads);
   renderContextSelector();
+  renderHardwareStatus();
   renderChatImagePreview();
   setStatus(state.lastStatusText, state.lastStatusBusy);
   renderProgress(state.lastProgress.progress, state.lastProgress.step, state.lastProgress.title);
@@ -1576,6 +1675,8 @@ async function refreshStatus() {
   state.projectPath = data.projectPath || "";
   state.modelKey = data.modelKey || "gemma4";
   state.modelCapabilities = data.models || {};
+  state.hardwareProfile = data.hardwareProfile || state.hardwareProfile;
+  state.recommendedModelKey = data.recommendedModelKey || state.recommendedModelKey;
   state.contextOptions = data.contextOptions || state.contextOptions;
   Object.entries(state.modelCapabilities || {}).forEach(([key, model]) => {
     state.modelContextByKey[key] = Number(model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow || state.modelContextByKey[key] || 262144);
@@ -1593,6 +1694,7 @@ async function refreshStatus() {
   renderModelOptions(state.modelCapabilities);
   elements.modelKey.value = state.modelKey;
   renderContextSelector();
+  renderHardwareStatus();
   renderTree(data.tree || []);
   setPinnedFiles(data.pinnedFiles || []);
   renderHistory(state.history);
@@ -1616,17 +1718,25 @@ async function refreshStatus() {
 async function refreshModelStatus() {
   if (!elements.modelStatus) return;
   const data = await requestJson("/api/models");
+  state.modelCapabilities = data.models || state.modelCapabilities;
+  state.hardwareProfile = data.hardwareProfile || state.hardwareProfile;
+  state.recommendedModelKey = data.recommendedModelKey || state.recommendedModelKey;
+  renderModelOptions(state.modelCapabilities);
   const modelKey = elements.modelKey.value || state.modelKey || data.defaultModelKey || "gemma4";
   const model = data.models?.[modelKey];
   if (!model) {
     elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${modelKey}`;
+    renderHardwareStatus();
     return;
   }
   const installed = model.installed ? (state.language === "en" ? "installed" : "已下載") : (state.language === "en" ? "not downloaded" : "未下載");
   const ready = model.ready ? (state.language === "en" ? "ready" : "服務中") : (state.language === "en" ? "stopped" : "未啟動");
   state.modelContextByKey[modelKey] = Number(model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow || state.modelContextByKey[modelKey] || 262144);
   renderContextSelector(data.contextOptions || model.contextOptions || state.contextOptions);
-  elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${model.displayName || modelKey} · ${installed} · ${ready} · port ${model.port || "-"} · ctx ${model.selectedContextWindow || model.contextWindow || "-"}`;
+  const tier = formatModelTier(model.tier);
+  const recommended = model.recommended ? ` · ${state.language === "en" ? "recommended" : "推薦"}` : "";
+  elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${model.displayName || modelKey} · ${tier}${recommended} · ${installed} · ${ready} · port ${model.port || "-"} · ctx ${formatContextWindow(model.selectedContextWindow || model.contextWindow)}`;
+  renderHardwareStatus(state.hardwareProfile, model);
 }
 
 async function updateSelectedContext() {
@@ -2179,6 +2289,7 @@ elements.openProjectBtn.addEventListener("click", openProject);
 elements.modelKey.addEventListener("change", () => {
   state.modelKey = elements.modelKey.value || state.modelKey;
   renderContextSelector();
+  renderHardwareStatus();
   refreshModelStatus().catch(() => {});
 });
 elements.contextWindowSelect?.addEventListener("change", updateSelectedContext);

@@ -8,6 +8,7 @@ data/chat-threads/
 data/model-contexts.json
 data/agent-actions.jsonl
 logs/*.json
+logs/*.jsonl
 logs/*.md
 .codex-artifacts/
 __pycache__/

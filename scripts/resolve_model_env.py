@@ -59,6 +59,12 @@ def main() -> int:
     emit("MODEL_CONTEXT", config.get("contextWindow") or 4096)
     emit("MODEL_CACHE_TYPE_K", config.get("cacheTypeK") or "")
     emit("MODEL_CACHE_TYPE_V", config.get("cacheTypeV") or "")
+    emit("MODEL_N_GPU_LAYERS", config.get("nGpuLayers") or 0)
+    llama_args = config.get("llamaArgs")
+    if isinstance(llama_args, list):
+        emit("MODEL_LLAMA_ARGS", " ".join(str(item).strip() for item in llama_args if str(item).strip()))
+    else:
+        emit("MODEL_LLAMA_ARGS", "")
     emit("MODEL_FILE", first_match(target_dir, file_patterns))
     emit("MODEL_MMPROJ", first_match(target_dir, mmproj_patterns) if mmproj_patterns else "")
     emit("MODEL_FILE_PATTERNS", ";".join(file_patterns))
