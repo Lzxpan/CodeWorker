@@ -33,6 +33,13 @@ from core.models import (
     match_first_model_file,
     public_model_capabilities,
 )
+from core.hardware import (
+    choose_recommended_model_key,
+    classify_hardware,
+    detect_hardware,
+    parse_llama_server_args,
+    recommend_model_settings,
+)
 from agent.runtime import confirm_action as confirm_agent_action
 from agent.runtime import run_agent
 from rag.index import impact_analysis, index_dir as rag_index_dir, index_is_stale, rebuild_index, search_index
@@ -78,6 +85,7 @@ CONTEXT_OPTIONS = [
     {"label": "32k", "value": 32768},
     {"label": "64k", "value": 65536},
     {"label": "128k", "value": 131072},
+    {"label": "200k", "value": 204800},
     {"label": "256k", "value": 262144},
 ]
 CONTEXT_OPTION_VALUES = {int(item["value"]) for item in CONTEXT_OPTIONS}
@@ -414,7 +422,7 @@ def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
     if manifest_payload:
         for key, item in manifest_payload.items():
             selected = get_selected_model_context(key)
-            item["contextOptions"] = get_context_options_payload()
+            item["contextOptions"] = make_context_options_payload(get_model_context_option_values(key))
             item["selectedContextWindow"] = selected
             item["effectiveContextWindow"] = selected
             item["contextWindow"] = selected
@@ -429,7 +437,7 @@ def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
             "modelId": get_model_alias(key),
             "port": get_model_port(key),
             "contextWindow": get_model_context_limit(key),
-            "contextOptions": get_context_options_payload(),
+            "contextOptions": make_context_options_payload(get_model_context_option_values(key)),
             "selectedContextWindow": get_selected_model_context(key),
             "effectiveContextWindow": get_model_context_limit(key),
             "targetDir": str(get_model_directory(key).relative_to(ROOT_DIR)),
@@ -504,11 +512,32 @@ def get_selected_model_context(model_key: str) -> int:
     return DEFAULT_SELECTED_CONTEXT
 
 
+def get_model_context_option_values(model_key: str) -> List[int]:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    if config and config.context_options:
+        return sorted({int(item) for item in config.context_options if int(item) > 0})
+    return sorted(CONTEXT_OPTION_VALUES)
+
+
+def make_context_options_payload(values: List[int]) -> List[Dict[str, object]]:
+    known = {int(item["value"]): str(item["label"]) for item in CONTEXT_OPTIONS}
+    return [
+        {
+            "label": known.get(value, f"{int(value / 1024)}k" if value % 1024 == 0 else str(value)),
+            "value": value,
+        }
+        for value in sorted({int(item) for item in values if int(item) > 0})
+    ]
+
+
 def set_selected_model_context(model_key: str, context_window: object) -> int:
     model_key = get_model_key_from_alias(model_key)
     if model_key not in SUPPORTED_MODEL_KEYS:
         raise ValueError("Unsupported model.")
     normalized = normalize_context_window(context_window)
+    allowed = set(get_model_context_option_values(model_key))
+    if normalized not in allowed:
+        raise ValueError("Unsupported context window.")
     with MODEL_CONTEXT_SELECTIONS_LOCK:
         selections = load_model_context_selections()
         selections[model_key] = normalized
@@ -624,6 +653,95 @@ def make_error(
     if extra:
         payload.update(extra)
     return payload
+
+
+HARDWARE_OPTIMIZATION_LOG_PATH = ROOT_DIR / "logs" / "hardware-optimization.jsonl"
+HARDWARE_OPTIMIZATION_LOG_LOCK = threading.Lock()
+HARDWARE_OPTIMIZATION_LOG_SIGNATURES: set[str] = set()
+
+
+def build_hardware_optimization_log_entry(
+    event: str,
+    hardware_profile: Dict[str, object],
+    recommended_model_key: str,
+    models: Optional[Dict[str, object]] = None,
+    selected_model_key: str = "",
+    auto_settings: Optional[Dict[str, object]] = None,
+    launch_args: Optional[List[str]] = None,
+    llama_server_path: Optional[Path] = None,
+    model_path: Optional[Path] = None,
+    mmproj_path: Optional[Path] = None,
+    log_path: Optional[Path] = None,
+    err_path: Optional[Path] = None,
+    port: Optional[int] = None,
+    already_running: Optional[bool] = None,
+    details: str = "",
+) -> Dict[str, object]:
+    return {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": event,
+        "hardwareProfile": hardware_profile,
+        "recommendedModelKey": recommended_model_key,
+        "selectedModelKey": selected_model_key,
+        "autoSettings": auto_settings or {},
+        "models": models or {},
+        "launch": {
+            "port": port,
+            "alreadyRunning": already_running,
+            "llamaServerPath": str(llama_server_path) if llama_server_path else "",
+            "modelPath": str(model_path) if model_path else "",
+            "mmprojPath": str(mmproj_path) if mmproj_path else "",
+            "logPath": str(log_path) if log_path else "",
+            "errPath": str(err_path) if err_path else "",
+            "argv": [str(item) for item in (launch_args or [])],
+        },
+        "details": details,
+    }
+
+
+def write_hardware_optimization_log(entry: Dict[str, object]) -> Path:
+    HARDWARE_OPTIMIZATION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    with HARDWARE_OPTIMIZATION_LOG_LOCK:
+        with HARDWARE_OPTIMIZATION_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    return HARDWARE_OPTIMIZATION_LOG_PATH
+
+
+def log_hardware_catalog_once(
+    hardware_profile: Dict[str, object],
+    recommended_model_key: str,
+    models: Dict[str, object],
+) -> None:
+    signature_payload = {
+        "event": "hardware_catalog",
+        "hardwareProfile": hardware_profile,
+        "recommendedModelKey": recommended_model_key,
+        "models": {
+            key: {
+                "tier": value.get("tier") if isinstance(value, dict) else "",
+                "runtimeBackend": value.get("runtimeBackend") if isinstance(value, dict) else "",
+                "nGpuLayers": value.get("nGpuLayers") if isinstance(value, dict) else "",
+                "contextWindow": value.get("contextWindow") if isinstance(value, dict) else "",
+                "recommended": value.get("recommended") if isinstance(value, dict) else "",
+            }
+            for key, value in sorted(models.items())
+        },
+    }
+    signature = hashlib.sha256(json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    with HARDWARE_OPTIMIZATION_LOG_LOCK:
+        if signature in HARDWARE_OPTIMIZATION_LOG_SIGNATURES:
+            return
+        HARDWARE_OPTIMIZATION_LOG_SIGNATURES.add(signature)
+    write_hardware_optimization_log(
+        build_hardware_optimization_log_entry(
+            "hardware_catalog",
+            hardware_profile,
+            recommended_model_key,
+            models,
+            details="Detected hardware profile, model catalog, recommendation, and per-model auto settings.",
+        )
+    )
 
 
 def json_response(handler: BaseHTTPRequestHandler, payload: Dict, status: int = 200) -> None:
@@ -854,6 +972,49 @@ def check_minimum_memory() -> Optional[str]:
             "Integrated graphics may reduce available system memory."
         )
     return None
+
+
+HARDWARE_PROFILE_CACHE: Dict[str, object] = {"profile": None, "expiresAt": 0.0}
+HARDWARE_PROFILE_LOCK = threading.Lock()
+
+
+def get_hardware_profile_payload(force_refresh: bool = False) -> Dict[str, object]:
+    now = time.time()
+    with HARDWARE_PROFILE_LOCK:
+        cached = HARDWARE_PROFILE_CACHE.get("profile")
+        expires_at = float(HARDWARE_PROFILE_CACHE.get("expiresAt") or 0)
+        if not force_refresh and isinstance(cached, dict) and now < expires_at:
+            return dict(cached)
+    profile = classify_hardware(detect_hardware())
+    with HARDWARE_PROFILE_LOCK:
+        HARDWARE_PROFILE_CACHE["profile"] = dict(profile)
+        HARDWARE_PROFILE_CACHE["expiresAt"] = now + 60
+    return profile
+
+
+def get_model_auto_settings(model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    hardware_profile = hardware_profile or get_hardware_profile_payload()
+    manifest = get_model_manifest(model_key)
+    return recommend_model_settings(hardware_profile, manifest)
+
+
+def get_model_llama_args(model_key: str) -> List[str]:
+    config = get_registry_model_config(ROOT_DIR, model_key)
+    return parse_llama_server_args(config.llama_args if config else [])
+
+
+def resolve_llama_server_for_backend(runtime_backend: str) -> Path:
+    runtime = load_bootstrap_manifest().get("runtime", {})
+    llama_config = runtime.get("llamaCpp", {}) if isinstance(runtime, dict) else {}
+    if isinstance(llama_config, dict):
+        backend_dirs = llama_config.get("targetDirByBackend")
+        if isinstance(backend_dirs, dict):
+            backend_target = str(backend_dirs.get(runtime_backend, "")).strip()
+            if backend_target:
+                candidate = ROOT_DIR / backend_target / "llama-server.exe"
+                if candidate.exists():
+                    return candidate
+    return ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
 
 
 def resolve_model_details(model_key: str) -> Tuple[Path, str]:
@@ -1990,10 +2151,11 @@ def try_reclaim_codeworker_port(port: int, model_alias: str = "") -> Optional[st
     return f"Port {port} is occupied by PID {pid}: {commandline or 'unknown process'}"
 
 
-def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str, Optional[Path]]:
-    llama_server = ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
+def ensure_runtime_and_model(model_key: str, runtime_backend: str = "cpu") -> Tuple[Path, str, Optional[Path], Path]:
+    llama_server = resolve_llama_server_for_backend(runtime_backend)
     if not llama_server.exists():
         runtime = run_script("bootstrap.cmd", "-SkipModels", timeout_seconds=300)
+        llama_server = ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
         if runtime.returncode != 0 or not llama_server.exists():
             raise RuntimeError(
                 json.dumps(
@@ -2052,7 +2214,7 @@ def ensure_runtime_and_model(model_key: str) -> Tuple[Path, str, Optional[Path]]
                 )
             )
         validate_model_file(mmproj_file)
-    return model_file, model_alias, mmproj_file
+    return model_file, model_alias, mmproj_file, llama_server
 
 
 def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dict[str, object]:
@@ -2063,10 +2225,34 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
     memory_warning = check_minimum_memory()
     if memory_warning:
         print(f"[WARN] {memory_warning}")
-    model_file, model_alias, mmproj_file = ensure_runtime_and_model(model_key)
-    llama_server = ROOT_DIR / "runtime" / "llama.cpp" / "llama-server.exe"
+    hardware_profile = get_hardware_profile_payload()
+    raw_model_configs = {
+        key: get_model_manifest(key)
+        for key in sorted(SUPPORTED_MODEL_KEYS)
+    }
+    recommended_model_key = choose_recommended_model_key(hardware_profile, raw_model_configs)
+    auto_settings = get_model_auto_settings(model_key, hardware_profile)
+    model_file, model_alias, mmproj_file, llama_server = ensure_runtime_and_model(
+        model_key,
+        str(auto_settings.get("runtimeBackend") or "cpu"),
+    )
 
     if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
+        write_hardware_optimization_log(
+            build_hardware_optimization_log_entry(
+                "model_server_already_running",
+                hardware_profile,
+                recommended_model_key,
+                selected_model_key=model_key,
+                auto_settings=auto_settings,
+                llama_server_path=llama_server,
+                model_path=model_file,
+                mmproj_path=mmproj_file,
+                port=port,
+                already_running=True,
+                details="Existing compatible CodeWorker llama-server process was reused.",
+            )
+        )
         return {"modelAlias": model_alias, "logPath": None, "alreadyRunning": True}
 
     if is_model_ready(model_alias, port) or is_port_listening(port):
@@ -2106,16 +2292,40 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
         "--alias", model_alias,
         "--model", str(model_file),
         "--context", str(get_model_context_limit(model_key)),
-        "--threads", str(os.cpu_count() or 4),
+        "--threads", str(auto_settings.get("threads") or os.cpu_count() or 4),
+        "--n-gpu-layers", str(auto_settings.get("nGpuLayers") or 0),
         "--log", str(log_path),
         "--err", str(err_path),
     ]
+    for raw_arg in get_model_llama_args(model_key):
+        if raw_arg == "--flash-attn":
+            launch_args.append("--flash-attn")
+        elif raw_arg == "--jinja":
+            launch_args.append("--jinja")
     if cache_type_k:
         launch_args.extend(["--cache-type-k", cache_type_k])
     if cache_type_v:
         launch_args.extend(["--cache-type-v", cache_type_v])
     if mmproj_file is not None:
         launch_args.extend(["--mmproj", str(mmproj_file)])
+    write_hardware_optimization_log(
+        build_hardware_optimization_log_entry(
+            "model_launch_plan",
+            hardware_profile,
+            recommended_model_key,
+            selected_model_key=model_key,
+            auto_settings=auto_settings,
+            launch_args=launch_args,
+            llama_server_path=llama_server,
+            model_path=model_file,
+            mmproj_path=mmproj_file,
+            log_path=log_path,
+            err_path=err_path,
+            port=port,
+            already_running=False,
+            details="About to launch llama-server with the resolved hardware optimization settings.",
+        )
+    )
     subprocess.Popen(
         launch_args,
         cwd=str(ROOT_DIR),
@@ -2128,15 +2338,48 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
 
     for _ in range(60):
         if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
-            threading.Event().wait(2)
-            if not is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
-                continue
+            write_hardware_optimization_log(
+                build_hardware_optimization_log_entry(
+                    "model_launch_ready",
+                    hardware_profile,
+                    recommended_model_key,
+                    selected_model_key=model_key,
+                    auto_settings=auto_settings,
+                    launch_args=launch_args,
+                    llama_server_path=llama_server,
+                    model_path=model_file,
+                    mmproj_path=mmproj_file,
+                    log_path=log_path,
+                    err_path=err_path,
+                    port=port,
+                    already_running=False,
+                    details="llama-server became ready and reported the expected model alias and paths.",
+                )
+            )
             return {"modelAlias": model_alias, "logPath": str(log_path), "alreadyRunning": False}
         threading.Event().wait(2)
 
     details = ""
     if log_path.exists():
         details = log_path.read_text(encoding="utf-8", errors="replace")[-6000:]
+    write_hardware_optimization_log(
+        build_hardware_optimization_log_entry(
+            "model_launch_failed",
+            hardware_profile,
+            recommended_model_key,
+            selected_model_key=model_key,
+            auto_settings=auto_settings,
+            launch_args=launch_args,
+            llama_server_path=llama_server,
+            model_path=model_file,
+            mmproj_path=mmproj_file,
+            log_path=log_path,
+            err_path=err_path,
+            port=port,
+            already_running=False,
+            details=details or "llama-server did not become ready before timeout.",
+        )
+    )
     raise RuntimeError(
         json.dumps(
             make_error(
@@ -6583,12 +6826,19 @@ def start_background_task(kind: str, worker, *args: str) -> TaskState:
 
 def get_status_payload_unlocked() -> Dict[str, object]:
     threads = thread_list_payload_locked()
+    hardware_profile = get_hardware_profile_payload()
+    raw_model_configs = {
+        key: get_model_manifest(key)
+        for key in sorted(SUPPORTED_MODEL_KEYS)
+    }
     return {
             "projectPath": STATE.project_path,
             "modelKey": STATE.model_key,
             "modelAlias": STATE.model_alias,
             "models": get_public_model_capabilities(),
             "contextOptions": get_context_options_payload(),
+            "hardwareProfile": hardware_profile,
+            "recommendedModelKey": choose_recommended_model_key(hardware_profile, raw_model_configs),
             "selectedContextWindow": get_selected_model_context(STATE.model_key),
             "effectiveContextWindow": get_model_context_limit(STATE.model_key),
             "summary": STATE.summary,
@@ -6615,6 +6865,12 @@ def get_status_payload() -> Dict[str, object]:
 
 def get_models_payload() -> Dict[str, object]:
     models: Dict[str, object] = {}
+    hardware_profile = get_hardware_profile_payload()
+    raw_model_configs = {
+        key: get_model_manifest(key)
+        for key in sorted(SUPPORTED_MODEL_KEYS)
+    }
+    recommended_model_key = choose_recommended_model_key(hardware_profile, raw_model_configs)
     for key, capability in get_public_model_capabilities().items():
         model_dir = get_model_directory(key)
         config = get_registry_model_config(ROOT_DIR, key)
@@ -6626,6 +6882,7 @@ def get_models_payload() -> Dict[str, object]:
         ready = False
         if primary:
             ready = is_running_model_server_compatible(key, get_model_alias(key), get_model_port(key), primary, mmproj)
+        auto_settings = get_model_auto_settings(key, hardware_profile)
         models[key] = {
             **capability,
             "installed": bool(primary and primary.exists()),
@@ -6633,11 +6890,19 @@ def get_models_payload() -> Dict[str, object]:
             "mmprojPath": str(mmproj) if mmproj else "",
             "ready": ready,
             "nativeImageReady": bool(mmproj and ready and model_supports_images(key)),
+            "recommended": key == recommended_model_key,
+            "runtimeBackend": auto_settings.get("runtimeBackend", "cpu"),
+            "nGpuLayers": auto_settings.get("nGpuLayers", 0),
+            "threads": auto_settings.get("threads", os.cpu_count() or 4),
+            "llamaArgs": get_model_llama_args(key),
         }
+    log_hardware_catalog_once(hardware_profile, recommended_model_key, models)
     return {
         "models": models,
         "defaultModelKey": DEFAULT_MODEL_KEY,
         "contextOptions": get_context_options_payload(),
+        "hardwareProfile": hardware_profile,
+        "recommendedModelKey": recommended_model_key,
         "mediaAssessment": get_media_analysis_assessment(),
     }
 
@@ -6918,7 +7183,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if model_key not in SUPPORTED_MODEL_KEYS:
                 raise ValueError("Unsupported model.")
             requested = payload.get("contextWindow")
-            if int(requested) not in CONTEXT_OPTION_VALUES:
+            if int(requested) not in set(get_model_context_option_values(model_key)):
                 raise ValueError("Unsupported context window.")
             selected = set_selected_model_context(model_key, requested)
             with STATE_LOCK:

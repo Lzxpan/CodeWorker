@@ -59,6 +59,106 @@ def test_gemma_manifest_uses_unsloth_with_mmproj():
     assert_true(gemma["mmprojPatterns"], "gemma4 must require an mmproj file")
 
 
+def test_new_model_catalog_exposes_hardware_metadata():
+    payload = server.get_models_payload()
+    models = payload["models"]
+    for key in ("qwen3coder30b", "glm46", "qwen25coder14b", "deepseekcoderlite"):
+        assert_true(key in models, f"{key} should be available in the model catalog")
+        assert_true(models[key].get("tier") in {"low", "standard", "high", "extreme"}, f"{key} should expose a hardware tier")
+        assert_true(models[key].get("estimatedModelSizeGb", 0) > 0, f"{key} should expose estimated model size")
+        assert_true(models[key].get("runtimeBackend"), f"{key} should expose selected runtime backend")
+        assert_true(isinstance(models[key].get("recommended"), bool), f"{key} should expose recommendation state")
+    assert_true(payload.get("hardwareProfile", {}).get("profile"), "/api/models should expose a hardware profile")
+    assert_true(payload.get("recommendedModelKey") in models, "/api/models should expose a model recommendation")
+    assert_true("--jinja" in models["glm46"].get("llamaArgs", []), "glm46 should require llama.cpp jinja chat templates")
+
+
+def test_hardware_profile_classification_and_recommendations():
+    from core.hardware import HardwareInfo, classify_hardware, recommend_model_settings
+
+    standard = HardwareInfo(
+        total_ram_gb=32.0,
+        cpu_cores=6,
+        cpu_threads=12,
+        gpus=[{"name": "AMD Radeon 760M Graphics", "vendor": "amd", "vramGb": 0.5}],
+        has_nvidia_smi=False,
+        has_vulkan=True,
+    )
+    standard_profile = classify_hardware(standard)
+    assert_true(standard_profile["profile"] == "standard", "32GB RAM with AMD iGPU should be standard")
+    standard_settings = recommend_model_settings(standard_profile, server.get_model_manifest("qwen25coder14b"))
+    assert_true(standard_settings["runtimeBackend"] == "vulkan", "AMD iGPU with Vulkan should prefer Vulkan")
+    assert_true(standard_settings["contextWindow"] == 32768, "standard hardware should use qwen25coder14b default context")
+
+    high = HardwareInfo(
+        total_ram_gb=64.0,
+        cpu_cores=12,
+        cpu_threads=24,
+        gpus=[{"name": "NVIDIA GeForce RTX 4090", "vendor": "nvidia", "vramGb": 24.0}],
+        has_nvidia_smi=True,
+        has_vulkan=True,
+    )
+    high_profile = classify_hardware(high)
+    assert_true(high_profile["profile"] == "high", "64GB RAM with NVIDIA GPU should be high")
+    high_settings = recommend_model_settings(high_profile, server.get_model_manifest("qwen3coder30b"))
+    assert_true(high_settings["runtimeBackend"] == "cuda", "NVIDIA GPU should prefer CUDA")
+    assert_true(high_settings["contextWindow"] >= 65536, "high hardware should keep a large coding context")
+
+    extreme = HardwareInfo(
+        total_ram_gb=192.0,
+        cpu_cores=24,
+        cpu_threads=48,
+        gpus=[{"name": "NVIDIA RTX 6000 Ada", "vendor": "nvidia", "vramGb": 48.0}],
+        has_nvidia_smi=True,
+        has_vulkan=True,
+    )
+    assert_true(classify_hardware(extreme)["profile"] == "extreme", "192GB RAM or 48GB VRAM should be extreme")
+
+    low = HardwareInfo(
+        total_ram_gb=16.0,
+        cpu_cores=4,
+        cpu_threads=8,
+        gpus=[],
+        has_nvidia_smi=False,
+        has_vulkan=False,
+    )
+    assert_true(classify_hardware(low)["profile"] == "low", "low RAM without GPU should be low")
+
+
+def test_llama_launcher_accepts_auto_hardware_args():
+    source = (ROOT / "scripts" / "launch_llama_server.py").read_text(encoding="utf-8")
+    assert_true('parser.add_argument("--n-gpu-layers"' in source, "launcher should accept --n-gpu-layers")
+    assert_true('parser.add_argument("--flash-attn"' in source, "launcher should accept --flash-attn")
+    assert_true('parser.add_argument("--jinja"' in source, "launcher should accept --jinja")
+    assert_true('"--n-gpu-layers",\n            "0"' not in source, "launcher must not hard-code CPU-only GPU layers")
+    assert_true("[CODEWORKER_LAUNCH_METADATA]" in source, "launcher should write detailed launch metadata into llama-server logs")
+
+
+def test_hardware_optimization_log_entry_contains_diagnostics():
+    entry = server.build_hardware_optimization_log_entry(
+        "model_launch_plan",
+        {"profile": "high", "totalRamGb": 64, "gpuVendors": ["nvidia"], "maxVramGb": 24},
+        "qwen3coder30b",
+        models={"qwen3coder30b": {"tier": "high", "runtimeBackend": "cuda", "recommended": True}},
+        selected_model_key="qwen3coder30b",
+        auto_settings={"runtimeBackend": "cuda", "contextWindow": 131072, "nGpuLayers": 999, "threads": 16},
+        launch_args=["python", "scripts/launch_llama_server.py", "--n-gpu-layers", "999"],
+        llama_server_path=ROOT / "runtime" / "llama.cpp" / "llama-server.exe",
+        model_path=ROOT / "models" / "qwen3-coder.gguf",
+        log_path=ROOT / "logs" / "llama-server-qwen3coder30b.log",
+        err_path=ROOT / "logs" / "llama-server-qwen3coder30b.err.log",
+        port=8083,
+        already_running=False,
+        details="test",
+    )
+    assert_true(entry["event"] == "model_launch_plan", "hardware optimization log should include event")
+    assert_true(entry["hardwareProfile"]["profile"] == "high", "hardware optimization log should include hardware profile")
+    assert_true(entry["recommendedModelKey"] == "qwen3coder30b", "hardware optimization log should include recommended model")
+    assert_true(entry["autoSettings"]["runtimeBackend"] == "cuda", "hardware optimization log should include backend")
+    assert_true(entry["launch"]["port"] == 8083, "hardware optimization log should include launch port")
+    assert_true("--n-gpu-layers" in entry["launch"]["argv"], "hardware optimization log should include launch argv")
+
+
 def test_model_file_matching_does_not_fallback_on_pattern_miss():
     root = ROOT / ".tmp" / "regression-model-match"
     shutil.rmtree(root, ignore_errors=True)
@@ -979,6 +1079,10 @@ def main():
         test_default_model_is_gemma4,
         test_gemma_context_window_matches_local_bench,
         test_gemma_manifest_uses_unsloth_with_mmproj,
+        test_new_model_catalog_exposes_hardware_metadata,
+        test_hardware_profile_classification_and_recommendations,
+        test_llama_launcher_accepts_auto_hardware_args,
+        test_hardware_optimization_log_entry_contains_diagnostics,
         test_model_file_matching_does_not_fallback_on_pattern_miss,
         test_http_error_body_is_preserved,
         test_rag_manifest_search_and_stale,

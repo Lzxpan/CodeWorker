@@ -1,4 +1,4 @@
-# CodeWorker V1.01.000
+# CodeWorker V1.01.001
 
 > 離線、可攜、以隱私與資安為優先的 Windows 本地 LLM 程式碼助理。
 
@@ -13,8 +13,9 @@
 主要能力：
 
 - 本機模型服務：預設使用 `Gemma 4 26B`，由 bundled `llama.cpp` service 啟動，不需要 Ollama。
-- 可選模型：保留 `Qwen 3.5 9B Vision`，兩個模型都走同一套 chat、RAG、附件與安全流程。
-- Context 下拉選單：每個模型可獨立選擇 `4k / 8k / 16k / 32k / 64k / 128k / 256k`，預設 `256k`。
+- 多模型選擇：保留 `Gemma 4 26B` 與 `Qwen 3.5 9B Vision`，並新增 `Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite`。
+- 硬體自動最佳化：Web UI 會偵測 RAM、CPU、GPU vendor、VRAM、`nvidia-smi` 與 Vulkan 可用性，推薦模型並套用 backend、context、threads 與 GPU layers。
+- Context 下拉選單：每個模型可獨立選擇自己的 context options，支援 `4k` 到 `256k`，`GLM-4.6` 另支援 `200k` 選項。
 - 全專案檢索：開啟專案後，即使沒有 pinned files，也會使用本機 RAG index 搜尋相關檔案、symbols、summary 與 chunks。
 - 聚焦上下文：在 `檔案樹` 勾選檔案時，pinned files 會優先於全專案 RAG。
 - 附件分析：支援程式碼、設定、文件、圖片、音訊與影片；可抽文字、keyframes 或 transcript 時會送入模型，否則送 metadata fallback。
@@ -27,8 +28,10 @@
 ## 2. 重點注意事項
 
 - 第一次執行需要網路下載 runtime 與模型；完成後可離線使用。
+- `Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite` 不會在第一次 bootstrap 時自動下載，需由使用者選定模型後再下載。
 - `256k` context 是可選上限，不代表每台機器都能穩定跑滿；若模型啟動失敗，UI 會顯示錯誤與 log path，不會自動降級。
 - 建議至少 `32GB RAM` 等級；大型 context、圖片、影片 keyframes 與長回答都會增加記憶體壓力。
+- 高階模型與 GPU backend 尚需在高階硬體實機驗證；測試時請保留 `logs\hardware-optimization.jsonl` 與對應的 `logs\llama-server-<model>-*.log` / `.err.log`。
 - 未開啟專案時只做一般問答；已開啟專案且未釘選檔案時使用全專案 RAG；有 pinned files 時優先使用 pinned context。
 - 影片不是直接把 MP4 binary 丟給模型，而是先用 `FFmpeg` 抽 keyframes；音訊與影片音軌會嘗試 `whisper.cpp` speech-to-text。
 - 檔案生成與 Agent 寫入都必須確認後才會落到 project root；生成完成後 UI 會顯示實際檔案路徑與檔名。
@@ -77,7 +80,7 @@ scripts\install-aider.cmd
 
 ### 畫面範例
 
-![CodeWorker V1.01.000 繁中 Web UI 畫面](docs/screenshots/webui-overview-zh-v101000.png)
+![CodeWorker V1.01.001 繁中 Web UI 畫面](docs/screenshots/webui-overview-zh-v101000.png)
 
 ### 一般問答
 
@@ -160,6 +163,7 @@ CodeWorker/
 - `scripts\launch_llama_server.py`：啟動 bundled `llama.cpp` model server。
 - `scripts\run_webui_regression.py`：Web UI、附件、RAG 與 streaming 回歸測試。
 - `webui\server.py`：API routes、streaming chat、context assembly、threads、file generation、attachment handling、memory 與 model call。
+- `webui\core\hardware.py`：偵測硬體 profile、選擇 backend、推薦模型與產生自動最佳化設定。
 - `webui\core\models.py`：模型 registry、狀態與 OpenAI-compatible endpoint 資訊。
 - `webui\rag\index.py`：hierarchical project index、SQLite FTS5 fallback、chunk search 與 impact hints。
 - `webui\agent\runtime.py`：ReAct-style Agent、tool calls、pending actions 與 audit log。
@@ -204,6 +208,17 @@ flowchart LR
 ---
 
 ## 7. 版本歷程
+
+### V1.01.001
+
+- 新增高階模型選項 `Qwen3-Coder 30B A3B` 與 `GLM-4.6`，以及低階 / 標準備援 `Qwen2.5-Coder 14B Instruct` 與 `DeepSeek-Coder V2 Lite`。
+- 新增硬體偵測與自動最佳化設定，會依 RAM、CPU threads、GPU vendor、VRAM、`nvidia-smi` 與 Vulkan 可用性推薦模型、backend、context、threads 與 `--n-gpu-layers`。
+- `/api/models` 會回傳 `hardwareProfile`、`recommendedModelKey`、各模型 tier、估計模型大小、runtime backend、GPU layers 與 threads。
+- Web UI 模型下拉選單會顯示 tier、模型大小、context 與推薦資訊，左側新增硬體偵測狀態區。
+- `scripts\launch_llama_server.py` 支援 `--n-gpu-layers`、`--flash-attn` 與 `--jinja`，不再固定 CPU-only。
+- 新增 `logs\hardware-optimization.jsonl` 詳細記錄硬體 profile、模型推薦、啟動計畫、實際 backend、context、threads、GPU layers、模型檔路徑與 log path。
+- 每次 `llama-server-*.log` 開頭會寫入 `[CODEWORKER_LAUNCH_METADATA]`，方便回查實際 command 與 llama.cpp 啟動參數。
+- 高階硬體尚待實機驗證：CUDA / Vulkan runtime 選擇、`Qwen3-Coder 30B A3B`、`GLM-4.6`、大 context 與 GPU offload 穩定性需由高階 PC 測試後回傳 log 確認。
 
 ### V1.01.000
 

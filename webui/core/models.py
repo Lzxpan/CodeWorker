@@ -28,6 +28,13 @@ class ModelConfig:
     temperature: Optional[float]
     top_p: Optional[float]
     top_k: Optional[int]
+    tier: str
+    estimated_model_size_gb: float
+    min_ram_gb: float
+    recommended_ram_gb: float
+    context_options: List[int]
+    llama_args: List[str]
+    auto_download: bool
 
 
 def load_manifest(root_dir: Path) -> Dict[str, object]:
@@ -78,6 +85,16 @@ def get_model_configs(root_dir: Path) -> Dict[str, ModelConfig]:
             temperature=float(raw["temperature"]) if raw.get("temperature") is not None else None,
             top_p=float(raw["topP"]) if raw.get("topP") is not None else None,
             top_k=int(raw["topK"]) if raw.get("topK") is not None else None,
+            tier=str(raw.get("tier", "standard")).strip() or "standard",
+            estimated_model_size_gb=float(raw.get("estimatedModelSizeGb", 0) or 0),
+            min_ram_gb=float(raw.get("minRamGb", 0) or 0),
+            recommended_ram_gb=float(raw.get("recommendedRamGb", 0) or 0),
+            context_options=[
+                int(item) for item in _as_list(raw.get("contextOptions"))
+                if str(item).strip().isdigit()
+            ],
+            llama_args=_as_list(raw.get("llamaArgs")),
+            auto_download=bool(raw.get("autoDownload", True)),
         )
     return configs
 
@@ -103,6 +120,16 @@ def public_model_capabilities(root_dir: Path) -> Dict[str, Dict[str, object]]:
             "cacheTypeK": config.cache_type_k,
             "cacheTypeV": config.cache_type_v,
             "targetDir": config.target_dir,
+            "tier": config.tier,
+            "estimatedModelSizeGb": config.estimated_model_size_gb,
+            "minRamGb": config.min_ram_gb,
+            "recommendedRamGb": config.recommended_ram_gb,
+            "contextOptions": [
+                {"label": f"{int(value / 1024)}k" if value % 1024 == 0 else str(value), "value": value}
+                for value in config.context_options
+            ],
+            "llamaArgs": list(config.llama_args),
+            "autoDownload": config.auto_download,
             "generation": {
                 "temperature": config.temperature,
                 "topP": config.top_p,

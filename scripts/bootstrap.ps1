@@ -600,6 +600,15 @@ if (-not $SkipModels) {
             continue
         }
 
+        $autoDownload = $true
+        if ($config.PSObject.Properties.Name -contains "autoDownload") {
+            $autoDownload = [bool]$config.autoDownload
+        }
+        if ($selectedModels.Count -eq 0 -and -not $autoDownload) {
+            Write-Step "Skipping model '$name' because autoDownload is disabled; select it explicitly to download."
+            continue
+        }
+
         $hasSinglePattern = -not [string]::IsNullOrWhiteSpace($config.filePattern)
         $hasPatternArray = $config.PSObject.Properties.Name -contains "filePatterns" -and @($config.filePatterns).Count -gt 0
         if ([string]::IsNullOrWhiteSpace($config.repo) -or (-not $hasSinglePattern -and -not $hasPatternArray)) {
