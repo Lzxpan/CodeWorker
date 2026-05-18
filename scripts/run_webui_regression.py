@@ -134,6 +134,14 @@ def test_llama_launcher_accepts_auto_hardware_args():
     assert_true("[CODEWORKER_LAUNCH_METADATA]" in source, "launcher should write detailed launch metadata into llama-server logs")
 
 
+def test_launch_webui_restarts_stale_codeworker_server():
+    source = (ROOT / "scripts" / "launch-webui.cmd").read_text(encoding="utf-8")
+    assert_true(":reclaim_webui_port" in source, "launch-webui should reclaim an already-running CodeWorker Web UI server")
+    assert_true("webui\\server.py" in source, "launch-webui should only reclaim the CodeWorker webui/server.py process")
+    assert_true("Stop-Process -Id $pid -Force" in source, "launch-webui should stop the stale CodeWorker process before restarting")
+    assert_true("Port %WEBUI_PORT% is occupied by another process" in source, "launch-webui should refuse unknown processes on the Web UI port")
+
+
 def test_hardware_optimization_log_entry_contains_diagnostics():
     entry = server.build_hardware_optimization_log_entry(
         "model_launch_plan",
@@ -1082,6 +1090,7 @@ def main():
         test_new_model_catalog_exposes_hardware_metadata,
         test_hardware_profile_classification_and_recommendations,
         test_llama_launcher_accepts_auto_hardware_args,
+        test_launch_webui_restarts_stale_codeworker_server,
         test_hardware_optimization_log_entry_contains_diagnostics,
         test_model_file_matching_does_not_fallback_on_pattern_miss,
         test_http_error_body_is_preserved,
