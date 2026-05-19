@@ -319,6 +319,7 @@ class TaskState:
     progress: int = 0
     step: str = ""
     message: str = ""
+    download: Optional[Dict[str, object]] = None
     error: Optional[Dict[str, object]] = None
     result: Optional[Dict[str, object]] = None
 
@@ -953,6 +954,56 @@ def human_size(num_bytes: int) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{int(num_bytes)} B"
+
+
+def build_model_download_progress_payload(
+    file_name: str,
+    bytes_written: int,
+    total_bytes: int,
+    file_index: int,
+    file_count: int,
+    segment_start: int,
+    segment_end: int,
+) -> Dict[str, object]:
+    safe_written = max(0, int(bytes_written))
+    safe_total = max(0, int(total_bytes))
+    safe_file_count = max(1, int(file_count))
+    safe_file_index = max(0, int(file_index))
+    safe_segment_start = max(0, min(100, int(segment_start)))
+    safe_segment_end = max(safe_segment_start, min(100, int(segment_end)))
+    span = max(safe_segment_end - safe_segment_start, 1)
+
+    percent: Optional[int] = None
+    task_progress = safe_segment_start
+    if safe_total > 0:
+        ratio = min(max(safe_written / safe_total, 0.0), 1.0)
+        percent = int(ratio * 100)
+        task_progress = safe_segment_start + int(ratio * span)
+        task_progress = max(safe_segment_start, min(task_progress, safe_segment_end))
+        size_text = f"{human_size(safe_written)} / {human_size(safe_total)}"
+        message = f"{file_name}: {percent}% ({size_text})"
+    else:
+        size_text = human_size(safe_written)
+        message = f"{file_name}: 已下載 {size_text}"
+
+    if safe_file_count > 1:
+        message = f"[{safe_file_index + 1}/{safe_file_count}] {message}"
+
+    return {
+        "progress": task_progress,
+        "step": "下載模型檔案",
+        "message": message,
+        "download": {
+            "fileName": file_name,
+            "percent": percent,
+            "downloadedBytes": safe_written,
+            "totalBytes": safe_total,
+            "downloadedSize": human_size(safe_written),
+            "totalSize": human_size(safe_total) if safe_total > 0 else "",
+            "fileIndex": safe_file_index + 1,
+            "fileCount": safe_file_count,
+        },
+    }
 
 
 def validate_model_file(model_path: Path) -> None:
@@ -2172,7 +2223,7 @@ def try_reclaim_codeworker_port(port: int, model_alias: str = "") -> Optional[st
     return f"Port {port} is occupied by PID {pid}: {commandline or 'unknown process'}"
 
 
-def ensure_runtime_and_model(model_key: str, runtime_backend: str = "cpu") -> Tuple[Path, str, Optional[Path], Path]:
+def ensure_runtime_and_model(model_key: str, runtime_backend: str = "cpu", task_id: Optional[str] = None) -> Tuple[Path, str, Optional[Path], Path]:
     llama_server = resolve_llama_server_for_backend(runtime_backend)
     if not llama_server.exists():
         runtime = run_script("bootstrap.cmd", "-SkipModels", timeout_seconds=300)
@@ -2191,15 +2242,30 @@ def ensure_runtime_and_model(model_key: str, runtime_backend: str = "cpu") -> Tu
     model_dir, model_alias = resolve_model_details(model_key)
     model_file = find_model_file(model_dir, get_model_file_pattern(model_key))
     if model_file is None:
-        bootstrap = run_script("bootstrap.cmd", "-SkipRuntime", "-Models", model_key, timeout_seconds=1800)
+        if task_id:
+            model_file, _ = download_model_with_progress(task_id, model_key, force=False)
+        else:
+            bootstrap = run_script("bootstrap.cmd", "-SkipRuntime", "-Models", model_key, timeout_seconds=1800)
+            model_file = find_model_file(model_dir, get_model_file_pattern(model_key))
+            if bootstrap.returncode != 0 or model_file is None:
+                raise RuntimeError(
+                    json.dumps(
+                        make_error(
+                            "MODEL_MISSING",
+                            "Failed to prepare model.",
+                            bootstrap.stdout + bootstrap.stderr,
+                            extra={"modelKey": model_key},
+                        )
+                    )
+                )
         model_file = find_model_file(model_dir, get_model_file_pattern(model_key))
-        if bootstrap.returncode != 0 or model_file is None:
+        if model_file is None:
             raise RuntimeError(
                 json.dumps(
                     make_error(
                         "MODEL_MISSING",
                         "Failed to prepare model.",
-                        bootstrap.stdout + bootstrap.stderr,
+                        f"Missing model file in {model_dir}; pattern={get_model_file_pattern(model_key)}",
                         extra={"modelKey": model_key},
                     )
                 )
@@ -2210,19 +2276,22 @@ def ensure_runtime_and_model(model_key: str, runtime_backend: str = "cpu") -> Tu
     if mmproj_patterns:
         mmproj_file = match_first_model_file(model_dir, mmproj_patterns)
         if mmproj_file is None:
-            bootstrap = run_script("bootstrap.cmd", "-SkipRuntime", "-Models", model_key, timeout_seconds=1800)
-            mmproj_file = match_first_model_file(model_dir, mmproj_patterns)
-            if bootstrap.returncode != 0:
-                raise RuntimeError(
-                    json.dumps(
-                        make_error(
-                            "MODEL_MISSING",
-                            "Failed to prepare multimodal projection file.",
-                            bootstrap.stdout + bootstrap.stderr,
-                            extra={"modelKey": model_key},
+            if task_id:
+                download_model_with_progress(task_id, model_key, force=False)
+            else:
+                bootstrap = run_script("bootstrap.cmd", "-SkipRuntime", "-Models", model_key, timeout_seconds=1800)
+                if bootstrap.returncode != 0:
+                    raise RuntimeError(
+                        json.dumps(
+                            make_error(
+                                "MODEL_MISSING",
+                                "Failed to prepare multimodal projection file.",
+                                bootstrap.stdout + bootstrap.stderr,
+                                extra={"modelKey": model_key},
+                            )
                         )
                     )
-                )
+            mmproj_file = match_first_model_file(model_dir, mmproj_patterns)
         if mmproj_file is None:
             raise RuntimeError(
                 json.dumps(
@@ -2238,7 +2307,7 @@ def ensure_runtime_and_model(model_key: str, runtime_backend: str = "cpu") -> Tu
     return model_file, model_alias, mmproj_file, llama_server
 
 
-def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dict[str, object]:
+def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_id: Optional[str] = None) -> Dict[str, object]:
     if model_key not in SUPPORTED_MODEL_KEYS:
         raise RuntimeError(json.dumps(make_error("MODEL_START_FAILED", "Unknown model.", model_key)))
     port = port or get_model_port(model_key)
@@ -2256,6 +2325,7 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
     model_file, model_alias, mmproj_file, llama_server = ensure_runtime_and_model(
         model_key,
         str(auto_settings.get("runtimeBackend") or "cpu"),
+        task_id=task_id,
     )
 
     if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
@@ -2414,7 +2484,7 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None) -> Dic
     )
 
 
-def download_model_with_progress(task_id: str, model_key: str) -> Tuple[Path, int]:
+def download_model_with_progress(task_id: str, model_key: str, force: bool = True) -> Tuple[Path, int]:
     model_config = get_model_manifest(model_key)
     if not model_config.get("enabled", False):
         raise RuntimeError(
@@ -2472,6 +2542,32 @@ def download_model_with_progress(task_id: str, model_key: str) -> Tuple[Path, in
     update_task(task_id, progress=8, step="解析模型來源", message="正在取得模型檔資訊")
     target_dir.mkdir(parents=True, exist_ok=True)
     resolved_filenames = [resolve_huggingface_filename(repo, pattern) for pattern in required_patterns]
+    mmproj_patterns = get_model_mmproj_patterns(model_key)
+    if mmproj_patterns and match_first_model_file(target_dir, mmproj_patterns) is None:
+        existing_filenames = {name.lower() for name in resolved_filenames}
+        last_mmproj_error: Optional[Exception] = None
+        for pattern in mmproj_patterns:
+            try:
+                mmproj_filename = resolve_huggingface_filename(repo, pattern)
+            except Exception as exc:
+                last_mmproj_error = exc
+                continue
+            if mmproj_filename.lower() not in existing_filenames:
+                resolved_filenames.append(mmproj_filename)
+            break
+        else:
+            if last_mmproj_error:
+                raise last_mmproj_error
+    if not force:
+        resolved_filenames = [
+            filename
+            for filename in resolved_filenames
+            if not (target_dir / Path(filename).name).exists()
+        ]
+        if not resolved_filenames:
+            primary_path = target_dir / Path(resolve_huggingface_filename(repo, get_model_file_pattern(model_key))).name
+            if primary_path.exists():
+                return primary_path, 0
     total_model_bytes = 0
     downloaded_paths: List[Path] = []
 
@@ -2483,7 +2579,22 @@ def download_model_with_progress(task_id: str, model_key: str) -> Tuple[Path, in
 
         segment_start = 12 + int((index / max(len(resolved_filenames), 1)) * 80)
         segment_end = 12 + int(((index + 1) / max(len(resolved_filenames), 1)) * 80)
-        update_task(task_id, progress=segment_start, step="準備下載", message=f"即將下載 {final_path.name}")
+        update_task(
+            task_id,
+            progress=segment_start,
+            step="準備下載",
+            message=f"即將下載 {final_path.name}",
+            download={
+                "fileName": final_path.name,
+                "percent": 0,
+                "downloadedBytes": 0,
+                "totalBytes": 0,
+                "downloadedSize": "0 B",
+                "totalSize": "",
+                "fileIndex": index + 1,
+                "fileCount": len(resolved_filenames),
+            },
+        )
         download_url = f"https://huggingface.co/{repo}/resolve/main/{urllib.parse.quote(filename)}?download=true"
         request = urllib.request.Request(download_url, headers=HF_API_HEADERS, method="GET")
         try:
@@ -2499,19 +2610,35 @@ def download_model_with_progress(task_id: str, model_key: str) -> Tuple[Path, in
                             break
                         handle.write(chunk)
                         bytes_written += len(chunk)
-                        if total_bytes > 0:
-                            local_progress = segment_start + int((bytes_written / total_bytes) * max(segment_end - segment_start, 1))
-                            local_progress = max(segment_start, min(local_progress, segment_end))
-                            message = f"{final_path.name}: 已下載 {human_size(bytes_written)} / {human_size(total_bytes)}"
-                        else:
-                            local_progress = segment_start
-                            message = f"{final_path.name}: 已下載 {human_size(bytes_written)}"
-                        update_task(task_id, progress=local_progress, step="重新下載模型", message=message)
+                        update_task(
+                            task_id,
+                            **build_model_download_progress_payload(
+                                final_path.name,
+                                bytes_written=bytes_written,
+                                total_bytes=total_bytes,
+                                file_index=index,
+                                file_count=len(resolved_filenames),
+                                segment_start=segment_start,
+                                segment_end=segment_end,
+                            ),
+                        )
 
             if final_path.exists():
                 final_path.unlink()
             os.replace(part_path, final_path)
             validate_model_file(final_path)
+            update_task(
+                task_id,
+                **build_model_download_progress_payload(
+                    final_path.name,
+                    bytes_written=final_path.stat().st_size,
+                    total_bytes=final_path.stat().st_size,
+                    file_index=index,
+                    file_count=len(resolved_filenames),
+                    segment_start=segment_start,
+                    segment_end=segment_end,
+                ),
+            )
             downloaded_paths.append(final_path)
             total_model_bytes += final_path.stat().st_size
         except Exception:
@@ -7350,7 +7477,7 @@ def open_project_worker(task_id: str, project_path: str, model_key: str) -> None
 
         update_task(task_id, progress=45, step="Git 工作區完成", message="已完成 git 初始化與基線快照")
         update_task(task_id, progress=55, step="啟動本地模型", message="正在驗證模型並啟動 llama-server")
-        ensure_local_model_server(model_key, port=get_model_port(model_key))
+        ensure_local_model_server(model_key, port=get_model_port(model_key), task_id=task_id)
 
         update_task(task_id, progress=85, step="索引專案", message="正在掃描檔案、入口與測試位置")
         result = build_session_payload(project_root, model_key)

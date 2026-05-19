@@ -149,7 +149,7 @@ async function pollTask(taskId, kind) {
 
   while (true) {
     const task = await requestJson(`/api/tasks/${taskId}`);
-    renderProgress(task.progress || 0, buildProgressLabel(task), title);
+    renderProgress(task.progress || 0, buildProgressLabel(task), title, task);
 
     if (task.status === "completed") {
       state.currentTaskId = null;
