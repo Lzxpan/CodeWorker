@@ -45,6 +45,9 @@ const elements = {
   removeChatImageBtn: document.getElementById("removeChatImageBtn"),
   contextWindowLabel: document.getElementById("contextWindowLabel"),
   contextWindowSelect: document.getElementById("contextWindowSelect"),
+  editPlanBtn: document.getElementById("editPlanBtn"),
+  gitDiffBtn: document.getElementById("gitDiffBtn"),
+  gitCheckpointBtn: document.getElementById("gitCheckpointBtn"),
   sendChatBtn: document.getElementById("sendChatBtn"),
   clearChatBtn: document.getElementById("clearChatBtn"),
   threadPanelTitle: document.getElementById("threadPanelTitle"),
@@ -415,6 +418,8 @@ function normalizeError(error, fallbackCode = "REQUEST_FAILED", fallbackMessage 
       action: error.action,
       logPath: error.logPath,
       modelKey: error.modelKey,
+      result: error.result,
+      pendingEdit: error.pendingEdit,
     };
   }
   return { code: fallbackCode, message: fallbackMessage, details: String(error || "") };
@@ -458,6 +463,9 @@ function setUiState(nextState) {
   elements.modelKey.disabled = opening;
   elements.projectPath.disabled = opening;
   elements.analyzeBtn.disabled = !ready || busy;
+  if (elements.editPlanBtn) elements.editPlanBtn.disabled = !ready || busy;
+  if (elements.gitDiffBtn) elements.gitDiffBtn.disabled = !ready || busy;
+  if (elements.gitCheckpointBtn) elements.gitCheckpointBtn.disabled = !ready || busy;
   elements.sendChatBtn.disabled = !canChat;
   elements.chatInput.disabled = !canChat;
   elements.clearChatBtn.disabled = busy;

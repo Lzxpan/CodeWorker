@@ -29,6 +29,9 @@ elements.refreshStatusBtn.addEventListener("click", refreshStatus);
 elements.codeGraphUsePromptBtn?.addEventListener("click", () => queryCodeGraph());
 elements.codeGraphRebuildBtn?.addEventListener("click", rebuildCodeGraphIndex);
 elements.codeGraphPinBtn?.addEventListener("click", pinCodeGraphFiles);
+elements.editPlanBtn?.addEventListener("click", generateEditPlan);
+elements.gitDiffBtn?.addEventListener("click", () => showGitDiff());
+elements.gitCheckpointBtn?.addEventListener("click", createGitCheckpoint);
 let fileTreeSearchTimer = null;
   elements.fileTreeSearch?.addEventListener("input", () => {
   clearTimeout(fileTreeSearchTimer);
@@ -77,7 +80,7 @@ window.CodeWorker = Object.assign(window.CodeWorker || {}, {
   ui: { setStatus, setAiBusy, setUiState, renderProgress, renderContextCoverage, showError, clearError, startChatAutoScroll, maintainChatAutoScroll, appendLiveMessage, appendLiveText },
   tree: { renderTree, loadFileTree, renderVirtualTreeWindow },
   thread: { loadThreads, newThread, selectThread, renameThread, deleteThread },
-  chat: { sendChat, streamChat, analyzeProject, renderProjectStructure, pinStructureRecommendedFiles },
+  chat: { sendChat, streamChat, analyzeProject, renderProjectStructure, pinStructureRecommendedFiles, generateEditPlan, applyEditPlan, showGitDiff, createGitCheckpoint, restoreEditCheckpoint },
   codegraph: { queryCodeGraph, rebuildCodeGraphIndex, pinCodeGraphFiles, renderCodeGraphResults },
 });
 

@@ -284,6 +284,26 @@ function bindTranscriptInteractions(root = elements.chatLog) {
       pinStructureRecommendedFiles(paths);
     });
   });
+  root.querySelectorAll("[data-edit-apply]").forEach((button) => {
+    if (button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => applyEditPlan());
+  });
+  root.querySelectorAll("[data-edit-discard]").forEach((button) => {
+    if (button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => discardEditPlan());
+  });
+  root.querySelectorAll("[data-git-diff]").forEach((button) => {
+    if (button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => showGitDiff(button.dataset.gitDiff || ""));
+  });
+  root.querySelectorAll("[data-git-restore]").forEach((button) => {
+    if (button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => restoreEditCheckpoint(button.dataset.gitRestore || ""));
+  });
 }
 
 function appendToolCard({ id = "", kind = "tool", title = "", html = "", item = null, replaceId = "" } = {}) {
@@ -330,6 +350,10 @@ function renderTranscriptItem(item) {
   }
   if (kind === "action-generated-file" && typeof renderGeneratedActionsTranscriptItem === "function") {
     appendToolCard({ id: item.id, kind, title: item.title || (state.language === "en" ? "Generated file preview" : "生成檔案預覽"), html: renderGeneratedActionsTranscriptItem(item), item });
+    return;
+  }
+  if ((kind === "action-edit-apply" || kind === "action-edit-restore") && typeof renderEditResultTranscriptItem === "function") {
+    appendToolCard({ id: item.id, kind, title: item.title || (state.language === "en" ? "Edit action" : "檔案修改"), html: renderEditResultTranscriptItem(item), item });
     return;
   }
   appendToolCard({ id: item.id, kind, title: item.title || kind, html: `<div class="tool-card-body">${escapeHtml(item.content || "")}</div>`, item });
@@ -576,6 +600,9 @@ function applyTranslations() {
   if (elements.codeGraphUsePromptBtn) elements.codeGraphUsePromptBtn.textContent = t("buttons.codeGraphUsePrompt");
   if (elements.codeGraphRebuildBtn) elements.codeGraphRebuildBtn.textContent = t("buttons.codeGraphRebuild");
   if (elements.codeGraphPinBtn) elements.codeGraphPinBtn.textContent = t("buttons.codeGraphPin");
+  if (elements.editPlanBtn) elements.editPlanBtn.textContent = t("buttons.editPlan");
+  if (elements.gitDiffBtn) elements.gitDiffBtn.textContent = t("buttons.gitDiff");
+  if (elements.gitCheckpointBtn) elements.gitCheckpointBtn.textContent = t("buttons.gitCheckpoint");
   renderContextCoverage(state.lastContextCoverage);
   elements.chatInputLabel.textContent = t("labels.chatInput");
   elements.chatImageLabel.textContent = t("labels.chatImage");
