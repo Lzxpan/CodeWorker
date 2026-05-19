@@ -345,6 +345,88 @@ async function analyzeProject() {
   }
 }
 
+function actionRiskLabel(action) {
+  const high = String(action?.risk || "") === "high";
+  if (state.language === "en") return high ? "high risk" : "review";
+  return high ? "高風險" : "需確認";
+}
+
+function renderEditPlanHtml(plan) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const actionHtml = actions.length
+    ? actions.map((action) => `
+      <section class="edit-action-card">
+        <div class="tool-card-head">
+          <strong>${escapeHtml(action.kind || "action")}</strong>
+          <span class="badge">${escapeHtml(actionRiskLabel(action))}</span>
+        </div>
+        <div class="tool-card-body">
+          <div><strong>${escapeHtml(state.language === "en" ? "Path" : "檔案")}：</strong>${escapeHtml(action.path || action.command || "")}</div>
+          ${action.targetPath ? `<div><strong>${escapeHtml(state.language === "en" ? "Target" : "目標")}：</strong>${escapeHtml(action.targetPath)}</div>` : ""}
+          ${action.summary ? `<div>${escapeHtml(action.summary)}</div>` : ""}
+          <pre class="diff-block">${escapeHtml(action.diffWindow || action.diff || "")}</pre>
+        </div>
+      </section>
+    `).join("")
+    : `<div class="tool-card-body">${escapeHtml(state.language === "en" ? "No directly applicable file actions. Review the advisory text and refine the request." : "沒有可直接套用的檔案操作。請查看文字建議後補充需求。")}</div>`;
+  const canApply = actions.some((action) => action.status === "pending");
+  return `
+    <section class="transcript-tool-section edit-plan-status">
+      <div class="tool-card-head">
+        <strong>${escapeHtml(state.language === "en" ? "Edit plan" : "修改計畫")}</strong>
+        <span class="badge">${escapeHtml(plan?.mode || "precise")}</span>
+      </div>
+      <div class="tool-card-body">
+        <p>${escapeHtml(plan?.summary || "")}</p>
+        ${plan?.failureReason ? `<p>${escapeHtml(plan.failureReason)}</p>` : ""}
+      </div>
+      <div class="edit-action-list">${actionHtml}</div>
+      <div class="tool-action-row">
+        <button type="button" class="primary" data-edit-apply ${canApply ? "" : "disabled"}>${escapeHtml(t("buttons.applyEdit"))}</button>
+        <button type="button" data-git-diff>${escapeHtml(t("buttons.gitDiff"))}</button>
+        <button type="button" data-edit-discard>${escapeHtml(t("buttons.discardEdit"))}</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderEditResultTranscriptItem(item) {
+  const result = item?.data?.result || {};
+  const files = Array.isArray(result.changedFiles) ? result.changedFiles : [];
+  const pre = result.preEditCommit || result.commit || "";
+  return `
+    <section class="transcript-tool-section edit-plan-status">
+      <div class="tool-card-head">
+        <strong>${escapeHtml(item?.title || (state.language === "en" ? "Edit result" : "修改結果"))}</strong>
+        <span class="badge">${escapeHtml(result.failed ? (state.language === "en" ? "failed" : "失敗") : (result.restored ? (state.language === "en" ? "restored" : "已復原") : (state.language === "en" ? "applied" : "已套用")))}</span>
+      </div>
+      <div class="tool-card-body">
+        ${result.error ? `<div>${escapeHtml(result.error)}</div>` : ""}
+        ${result.preEditCommit ? `<div>pre-edit: <code>${escapeHtml(String(result.preEditCommit).slice(0, 12))}</code></div>` : ""}
+        ${result.postEditCommit ? `<div>post-edit: <code>${escapeHtml(String(result.postEditCommit).slice(0, 12))}</code></div>` : ""}
+        ${files.length ? `<div>${escapeHtml(state.language === "en" ? "Changed files" : "異動檔案")}：${escapeHtml(files.join(", "))}</div>` : ""}
+        ${result.diffStat ? `<pre class="diff-block">${escapeHtml(result.diffStat)}</pre>` : ""}
+      </div>
+      <div class="tool-action-row">
+        ${result.preEditCommit ? `<button type="button" data-git-diff="${escapeHtml(result.preEditCommit)}">${escapeHtml(t("buttons.gitDiff"))}</button>` : ""}
+        ${pre ? `<button type="button" class="danger" data-git-restore="${escapeHtml(pre)}">${escapeHtml(t("buttons.restoreEdit"))}</button>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderEditPlan(plan, { append = true } = {}) {
+  state.pendingEdit = plan || null;
+  updateChatPlaceholder();
+  if (append && plan) {
+    appendToolCard({
+      kind: "action-edit-plan",
+      title: state.language === "en" ? "Edit plan" : "修改計畫",
+      html: renderEditPlanHtml(plan),
+    });
+  }
+}
+
 async function generateEditPlan() {
   const message = elements.chatInput.value.trim();
   if (!message) {
@@ -353,9 +435,6 @@ async function generateEditPlan() {
   }
   if (state.uiState !== "ready") {
     showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
-    return;
-  }
-  if (!requirePinnedFiles()) {
     return;
   }
   clearError();
@@ -367,7 +446,7 @@ async function generateEditPlan() {
       method: "POST",
       body: JSON.stringify({ message }),
     });
-    renderPendingEdit(data.plan);
+    renderEditPlan(data.plan, { append: true });
     const modeLabel = data.plan.mode === "advisory" ? (state.language === "en" ? "advisory" : "文字模式") : (state.language === "en" ? "precise" : "精準模式");
     appendMessage("assistant", `${state.language === "en" ? "Edit suggestion generated" : "已產生修改建議"} (${modeLabel})\n\n${buildPendingEditText(data.plan)}`);
     setStatus(state.language === "en" ? "Edit suggestion ready" : "修改建議已產生");
@@ -375,6 +454,40 @@ async function generateEditPlan() {
   } catch (error) {
     setStatus(state.language === "en" ? "Edit suggestion failed" : "產生建議失敗");
     showError(normalizeError(error, "EDIT_PLAN_FAILED", state.language === "en" ? "Failed to generate edit suggestion." : "產生修改建議失敗。"));
+  }
+}
+
+async function applyEditPlan() {
+  if (!state.pendingEdit) return;
+  clearError();
+  setStatus(state.language === "en" ? "Applying edit" : "正在套用修改", true);
+  try {
+    const actionIds = (state.pendingEdit.actions || []).filter((action) => action.status === "pending").map((action) => action.id);
+    const data = await requestJson("/api/edit/apply", {
+      method: "POST",
+      body: JSON.stringify({ actionIds }),
+    });
+    renderEditPlan(data.pendingEdit || null, { append: false });
+    appendToolCard({
+      kind: "action-edit-apply",
+      title: state.language === "en" ? "Edit applied" : "修改已套用",
+      html: renderEditResultTranscriptItem({ title: state.language === "en" ? "Edit applied" : "修改已套用", data: { result: data.result } }),
+    });
+    setStatus(state.language === "en" ? "Edit applied" : "修改已套用");
+  } catch (error) {
+    setStatus(state.language === "en" ? "Apply failed" : "套用失敗");
+    const normalized = normalizeError(error, "EDIT_APPLY_FAILED", state.language === "en" ? "Failed to apply edit." : "套用修改失敗。");
+    if (normalized.pendingEdit) {
+      state.pendingEdit = normalized.pendingEdit;
+    }
+    if (normalized.result) {
+      appendToolCard({
+        kind: "action-edit-apply",
+        title: state.language === "en" ? "Apply failed" : "套用失敗",
+        html: renderEditResultTranscriptItem({ title: state.language === "en" ? "Apply failed" : "套用失敗", data: { result: normalized.result } }),
+      });
+    }
+    showError(normalized);
   }
 }
 
@@ -390,6 +503,84 @@ async function discardEditPlan() {
     setUiState("ready");
   } catch (error) {
     showError(normalizeError(error, "DISCARD_EDIT_FAILED", state.language === "en" ? "Failed to clear edit suggestion." : "清除修改建議失敗。"));
+  }
+}
+
+async function showGitDiff(base = "") {
+  if (state.uiState !== "ready") {
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
+    return;
+  }
+  clearError();
+  setStatus(state.language === "en" ? "Loading Git diff" : "正在讀取 Git diff", true);
+  try {
+    const suffix = base ? `?base=${encodeURIComponent(base)}` : "";
+    const data = await requestJson(`/api/git/diff${suffix}`);
+    appendToolCard({
+      kind: "tool-git-diff",
+      title: "Git diff",
+      html: `
+        <section class="transcript-tool-section edit-plan-status">
+          <div class="tool-card-head"><strong>Git diff</strong><span class="badge">${escapeHtml((data.changedFiles || []).length)} files</span></div>
+          <div class="tool-card-body">
+            ${(data.changedFiles || []).length ? `<div>${escapeHtml((data.changedFiles || []).join(", "))}</div>` : `<div>${escapeHtml(state.language === "en" ? "No changes." : "沒有異動。")}</div>`}
+            <pre class="diff-block">${escapeHtml(data.diff || data.stat || "")}</pre>
+          </div>
+        </section>
+      `,
+    });
+    setStatus(state.language === "en" ? "Git diff loaded" : "Git diff 已載入");
+  } catch (error) {
+    setStatus(state.language === "en" ? "Git diff failed" : "Git diff 失敗");
+    showError(normalizeError(error, "GIT_DIFF_FAILED", state.language === "en" ? "Failed to load Git diff." : "讀取 Git diff 失敗。"));
+  }
+}
+
+async function createGitCheckpoint() {
+  if (state.uiState !== "ready") {
+    showError({ code: "PROJECT_NOT_READY", message: t("errors.projectNotReady"), details: "" });
+    return;
+  }
+  clearError();
+  setStatus(state.language === "en" ? "Creating checkpoint" : "正在建立 checkpoint", true);
+  try {
+    const data = await requestJson("/api/git/checkpoint", {
+      method: "POST",
+      body: JSON.stringify({ label: "manual" }),
+    });
+    appendToolCard({
+      kind: "tool-git-checkpoint",
+      title: "Git checkpoint",
+      html: `<section class="transcript-tool-section edit-plan-status"><div class="tool-card-body">checkpoint: <code>${escapeHtml(data.checkpoint?.shortCommit || "")}</code><br>${escapeHtml(data.checkpoint?.message || "")}</div></section>`,
+    });
+    setStatus(state.language === "en" ? "Checkpoint created" : "checkpoint 已建立");
+  } catch (error) {
+    setStatus(state.language === "en" ? "Checkpoint failed" : "checkpoint 失敗");
+    showError(normalizeError(error, "GIT_CHECKPOINT_FAILED", state.language === "en" ? "Failed to create checkpoint." : "建立 checkpoint 失敗。"));
+  }
+}
+
+async function restoreEditCheckpoint(checkpoint) {
+  if (!checkpoint) return;
+  const ok = window.confirm(state.language === "en" ? "Restore this edit? Current changes after the checkpoint will be reset." : "確定復原這次修改？checkpoint 之後的變更會被重設。");
+  if (!ok) return;
+  clearError();
+  setStatus(state.language === "en" ? "Restoring edit" : "正在復原修改", true);
+  try {
+    const data = await requestJson("/api/git/restore", {
+      method: "POST",
+      body: JSON.stringify({ checkpoint }),
+    });
+    renderEditPlan(null, { append: false });
+    appendToolCard({
+      kind: "action-edit-restore",
+      title: state.language === "en" ? "Edit restored" : "已復原修改",
+      html: renderEditResultTranscriptItem({ title: state.language === "en" ? "Edit restored" : "已復原修改", data: { result: data.result } }),
+    });
+    setStatus(state.language === "en" ? "Edit restored" : "已復原修改");
+  } catch (error) {
+    setStatus(state.language === "en" ? "Restore failed" : "復原失敗");
+    showError(normalizeError(error, "GIT_RESTORE_FAILED", state.language === "en" ? "Failed to restore edit." : "復原修改失敗。"));
   }
 }
 

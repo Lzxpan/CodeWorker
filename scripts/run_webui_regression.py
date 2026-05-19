@@ -8,6 +8,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 
@@ -1008,6 +1009,109 @@ def test_generated_text_file_requires_confirmation():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_edit_actions_apply_with_git_checkpoint_and_restore():
+    root = ROOT / ".tmp" / f"regression-edit-actions-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "main.py"
+    target.write_text("def hello():\n    return 'old'\n", encoding="utf-8")
+    try:
+        init = server.ensure_project_git_repo(root)
+        assert_true(init["ready"] is True, "edit apply should prepare a git repository")
+        before = target.read_text(encoding="utf-8")
+        diff = server.generate_diff("main.py", before, before.replace("'old'", "'new'"))
+        action = server.create_edit_action(
+            root,
+            "patch_file",
+            "main.py",
+            summary="Change return value",
+            diff=diff,
+            operations=[{"search": "return 'old'", "replace": "return 'new'"}],
+        )
+        assert_true(action["status"] == "pending", "edit action should start pending")
+        assert_true(target.read_text(encoding="utf-8") == before, "creating an edit action must not write the file")
+        plan = {"mode": "precise", "request": "change hello", "summary": "Change return value", "actions": [action]}
+        result = server.apply_edit_actions(root, plan, [str(action["id"])])
+        assert_true("return 'new'" in target.read_text(encoding="utf-8"), "apply should modify the target file")
+        assert_true(result["preEditCommit"] and result["postEditCommit"], "apply should create pre/post git checkpoints")
+        assert_true("main.py" in result["changedFiles"], "apply should report changed files")
+        restore = server.restore_git_checkpoint(root, str(result["preEditCommit"]))
+        assert_true(restore["restored"] is True, "restore should return success")
+        assert_true(target.read_text(encoding="utf-8") == before, "restore should revert to the pre-edit checkpoint")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_edit_action_security_rejects_unsafe_paths_and_stale_patches():
+    root = ROOT / ".tmp" / f"regression-edit-security-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "main.py").write_text("alpha\n", encoding="utf-8")
+    try:
+        server.ensure_project_git_repo(root)
+        for bad_path in ("../escape.py", ".git/config", "runtime/tool.py", "models/model.gguf", "data/indexes/cache.db"):
+            try:
+                server.create_edit_action(root, "create_file", bad_path, content="x")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"{bad_path} should be rejected")
+        action = server.create_edit_action(
+            root,
+            "patch_file",
+            "main.py",
+            operations=[{"search": "missing", "replace": "beta"}],
+            diff="",
+        )
+        try:
+            server.apply_edit_actions(root, {"actions": [action]}, [str(action["id"])])
+        except server.EditApplyError as exc:
+            assert_true("search 片段必須剛好匹配 1 次" in str(exc), "stale patch should fail with a clear match error")
+            assert_true(exc.result.get("preEditCommit"), "failed apply should expose the pre-edit checkpoint for restore")
+            server.restore_git_checkpoint(root, str(exc.result["preEditCommit"]))
+        else:
+            raise AssertionError("stale patch should be rejected")
+        assert_true((root / "main.py").read_text(encoding="utf-8") == "alpha\n", "failed patch must not modify the file")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_edit_action_supports_create_replace_delete_rename_and_command():
+    root = ROOT / ".tmp" / f"regression-edit-kinds-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "replace.txt").write_text("old\n", encoding="utf-8")
+    (root / "delete.txt").write_text("delete me\n", encoding="utf-8")
+    (root / "rename.txt").write_text("rename me\n", encoding="utf-8")
+    try:
+        server.ensure_project_git_repo(root)
+        actions = [
+            server.create_edit_action(root, "create_file", "created.txt", content="created\n"),
+            server.create_edit_action(root, "replace_file", "replace.txt", content="new\n"),
+            server.create_edit_action(root, "delete_file", "delete.txt"),
+            server.create_edit_action(root, "rename_file", "rename.txt", target_path="renamed.txt"),
+            server.create_edit_action(root, "run_command", "", command="cmd /c echo command-ok"),
+        ]
+        result = server.apply_edit_actions(root, {"actions": actions}, [str(action["id"]) for action in actions])
+        assert_true((root / "created.txt").read_text(encoding="utf-8") == "created\n", "create_file should write a new file")
+        assert_true((root / "replace.txt").read_text(encoding="utf-8") == "new\n", "replace_file should overwrite after confirmation")
+        assert_true(not (root / "delete.txt").exists(), "delete_file should remove the file")
+        assert_true(not (root / "rename.txt").exists() and (root / "renamed.txt").exists(), "rename_file should move the file")
+        command_result = next(item for item in result["appliedActions"] if item["kind"] == "run_command")
+        assert_true(command_result["returncode"] == 0 and "command-ok" in command_result["stdout"], "run_command should capture stdout")
+        server.restore_git_checkpoint(root, str(result["preEditCommit"]))
+        assert_true(not (root / "created.txt").exists(), "restore should remove created files")
+        assert_true((root / "replace.txt").read_text(encoding="utf-8") == "old\n", "restore should revert replacements")
+        assert_true((root / "delete.txt").exists(), "restore should bring deleted files back")
+        assert_true((root / "rename.txt").exists() and not (root / "renamed.txt").exists(), "restore should revert renames")
+        command_only = server.create_edit_action(root, "run_command", "", command="cmd /c echo read-only-command")
+        command_only_result = server.apply_edit_actions(root, {"actions": [command_only]}, [str(command_only["id"])])
+        assert_true(command_only_result["preEditCommit"], "command-only apply should still create a pre-edit checkpoint")
+        assert_true(not command_only_result["postEditCommit"], "command-only apply without file changes should not create an empty post checkpoint")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_generation_prompt_infers_multiple_documents_from_previous_answer():
     history = [
         {"role": "user", "content": "請說明功能流程與使用場景"},
@@ -1536,10 +1640,14 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true('id="sidebarStatusDetails"' in html, "secondary model and hardware details should be grouped in a disclosure")
     assert_true('id="fileTreeCount"' in html, "file tree should expose a result count")
     assert_true('id="aiActivity"' in html and 'id="chatBusyBar"' in html, "chat UI should include a visible busy indicator")
+    assert_true('id="editPlanBtn"' in html and 'id="gitDiffBtn"' in html and 'id="gitCheckpointBtn"' in html, "chat UI should expose edit plan and Git safety actions")
     assert_true(".sidebar" in css and "grid-template-rows" in css, "sidebar layout should reserve flexible space for the file tree")
     assert_true(".ai-spinner" in css and "@keyframes aiBusyBar" in css, "busy indicator should have spinner/bar animation styles")
+    assert_true(".diff-block" in css and ".edit-action-card" in css, "edit plan UI should style diff and action cards")
     assert_true("function setAiBusy" in js, "app should control the AI busy indicator from JS")
     assert_true("setAiBusy(true" in js and "setAiBusy(false" in js, "chat/analyze flows should toggle the AI busy indicator")
+    assert_true("function applyEditPlan" in js and "/api/edit/apply" in js, "UI should apply confirmed edit plans")
+    assert_true("/api/git/diff" in js and "/api/git/restore" in js, "UI should expose Git diff and restore workflows")
     assert_true("rawDownload && downloadPercent !== null" in js, "download progress should display the current file percentage from task payloads")
     assert_true("downloadedSize" in js and "totalSize" in js, "download progress should show downloaded and total file size")
 
@@ -1603,6 +1711,9 @@ def main():
         test_project_rag_context_without_pins,
         test_project_rag_rebuilds_graphless_existing_index,
         test_generated_text_file_requires_confirmation,
+        test_edit_actions_apply_with_git_checkpoint_and_restore,
+        test_edit_action_security_rejects_unsafe_paths_and_stale_patches,
+        test_edit_action_supports_create_replace_delete_rename_and_command,
         test_generation_prompt_infers_multiple_documents_from_previous_answer,
         test_generation_prompt_infers_excel,
         test_generation_word_prompt_uses_previous_answer,

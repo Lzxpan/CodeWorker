@@ -265,6 +265,15 @@ MAX_EDIT_TOTAL_CHARS = 14000
 MAX_EDIT_SINGLE_FILE_CHARS = 22000
 MAX_ADVISORY_FILE_CHARS = 18000
 EDIT_PLAN_TIMEOUT_SECONDS = 1200
+EDIT_ACTION_KINDS = {"create_file", "patch_file", "replace_file", "delete_file", "rename_file", "run_command"}
+HIGH_RISK_EDIT_ACTIONS = {"replace_file", "delete_file", "rename_file", "run_command"}
+PROTECTED_EDIT_PATH_PARTS = {".git", "runtime", "models"}
+
+
+class EditApplyError(RuntimeError):
+    def __init__(self, message: str, result: Dict[str, object]):
+        super().__init__(message)
+        self.result = result
 GEMMA4_LOCATOR_MAX_TOKENS = 320
 GEMMA4_PATCH_MAX_TOKENS = 700
 GEMMA4_PRECISE_MAX_TOKENS = 720
@@ -5979,8 +5988,34 @@ def build_project_cache_context(
     return build_project_rag_context(project_root, state, prompt, model_key, max_response_tokens=max_response_tokens)
 
 
+def infer_edit_candidate_paths(project_root: Path, state: SessionState, message: str) -> List[str]:
+    allowed = [file.path for file in state.files if not is_generated_file_path(file.path)]
+    allowed_set = set(allowed)
+    candidates: List[str] = []
+    try:
+        graph_matches = search_code_graph(project_root, DATA_DIR, message, limit=12)
+        for node in graph_matches.get("nodes", []):
+            path = str(node.get("path", "")).strip()
+            if path in allowed_set and path not in candidates:
+                candidates.append(path)
+    except Exception:
+        pass
+    try:
+        rag_matches = search_index(project_root, DATA_DIR, message, limit=12).get("matches", [])
+        for match in rag_matches:
+            path = str(match.get("path", "")).strip()
+            if path in allowed_set and path not in candidates:
+                candidates.append(path)
+    except Exception:
+        pass
+    if not candidates:
+        candidates = rank_paths_for_message(project_root, allowed, message)
+    return candidates[:MAX_EDIT_FILES]
+
+
 def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
-    selected_paths = rank_paths_for_message(project_root, require_pinned_context(state), message)[:MAX_EDIT_FILES]
+    candidate_paths = require_pinned_context(state) if state.pinned_files else infer_edit_candidate_paths(project_root, state, message)
+    selected_paths = rank_paths_for_message(project_root, candidate_paths, message)[:MAX_EDIT_FILES]
     single_file_focus = len(selected_paths) == 1
     total_limit = MAX_EDIT_SINGLE_FILE_CHARS if single_file_focus else MAX_EDIT_TOTAL_CHARS
     chunks = [
@@ -6361,6 +6396,13 @@ def format_plan_for_chat(plan: Dict[str, object]) -> str:
             if notes:
                 parts.extend(["補充說明：", "\n".join(f"- {note}" for note in notes)])
             sections.append("\n".join(str(part) for part in parts))
+        actions = plan.get("actions", [])
+        if actions:
+            sections.append("待確認檔案操作：\n" + "\n".join(
+                f"- {action.get('kind')}: {action.get('path') or action.get('command')}"
+                for action in actions
+                if isinstance(action, dict)
+            ))
     else:
         for item in plan.get("suggestions", []):
             parts = [
@@ -6404,6 +6446,7 @@ def build_public_plan(plan: Dict[str, object]) -> Dict[str, object]:
             }
             for item in plan.get("edits", [])
         ],
+        "actions": [action_public_copy(action) for action in plan.get("actions", []) if isinstance(action, dict)],
         "suggestions": plan.get("suggestions", []),
         "displayText": plan.get("displayText", ""),
     }
@@ -6522,6 +6565,381 @@ def run_git(project_root: Path, *args: str, timeout_seconds: int = 60) -> subpro
         timeout=timeout_seconds,
         env=env,
     )
+
+
+def require_git_success(completed: subprocess.CompletedProcess, action: str) -> subprocess.CompletedProcess:
+    if completed.returncode != 0:
+        details = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part)
+        raise RuntimeError(f"{action} failed: {details or f'exit {completed.returncode}'}")
+    return completed
+
+
+def ensure_git_identity(project_root: Path) -> None:
+    name = run_git(project_root, "config", "user.name")
+    if name.returncode != 0 or not name.stdout.strip():
+        require_git_success(run_git(project_root, "config", "user.name", "CodeWorker"), "git config user.name")
+    email = run_git(project_root, "config", "user.email")
+    if email.returncode != 0 or not email.stdout.strip():
+        require_git_success(run_git(project_root, "config", "user.email", "codeworker@local.invalid"), "git config user.email")
+
+
+def assert_git_toplevel(project_root: Path) -> None:
+    completed = require_git_success(run_git(project_root, "rev-parse", "--show-toplevel"), "git rev-parse --show-toplevel")
+    actual = Path(completed.stdout.strip()).resolve()
+    expected = project_root.resolve()
+    if actual != expected:
+        raise RuntimeError(f"Git top-level mismatch: expected {expected}, got {actual}")
+
+
+def ensure_project_git_repo(project_root: Path) -> Dict[str, object]:
+    project_root = project_root.resolve()
+    project_root.mkdir(parents=True, exist_ok=True)
+    initialized = False
+    if not (project_root / ".git").exists():
+        require_git_success(run_git(project_root, "init"), "git init")
+        initialized = True
+    assert_git_toplevel(project_root)
+    ensure_git_identity(project_root)
+    head = run_git(project_root, "rev-parse", "--verify", "HEAD")
+    if head.returncode != 0:
+        require_git_success(run_git(project_root, "add", "-A", timeout_seconds=120), "git add")
+        require_git_success(
+            run_git(
+                project_root,
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial snapshot before CodeWorker edit session",
+                "--no-verify",
+                "--no-gpg-sign",
+                timeout_seconds=120,
+            ),
+            "git initial checkpoint",
+        )
+    return {"ready": True, "initialized": initialized, "head": git_head(project_root)}
+
+
+def git_head(project_root: Path) -> str:
+    completed = require_git_success(run_git(project_root, "rev-parse", "HEAD"), "git rev-parse")
+    return completed.stdout.strip()
+
+
+def git_status(project_root: Path) -> Dict[str, object]:
+    ensure_project_git_repo(project_root)
+    completed = require_git_success(run_git(project_root, "status", "--short"), "git status")
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    return {"dirty": bool(lines), "entries": lines, "head": git_head(project_root)}
+
+
+def git_diff(project_root: Path, base: Optional[str] = None) -> Dict[str, object]:
+    ensure_project_git_repo(project_root)
+    if base:
+        completed = require_git_success(run_git(project_root, "diff", "--stat", base, "HEAD"), "git diff --stat")
+        full = require_git_success(run_git(project_root, "diff", base, "HEAD", timeout_seconds=120), "git diff")
+    else:
+        completed = require_git_success(run_git(project_root, "diff", "--stat"), "git diff --stat")
+        full = require_git_success(run_git(project_root, "diff", timeout_seconds=120), "git diff")
+    name_only_args = ["diff", "--name-only", base, "HEAD"] if base else ["diff", "--name-only"]
+    names = require_git_success(run_git(project_root, *[arg for arg in name_only_args if arg]), "git diff --name-only")
+    return {
+        "base": base or "",
+        "head": git_head(project_root),
+        "stat": completed.stdout.strip(),
+        "diff": truncate_middle(full.stdout, 40000),
+        "changedFiles": [line.strip() for line in names.stdout.splitlines() if line.strip()],
+    }
+
+
+def create_git_checkpoint(project_root: Path, label: str, include_untracked: bool = True) -> Dict[str, object]:
+    ensure_project_git_repo(project_root)
+    before_status = git_status(project_root)
+    if include_untracked:
+        require_git_success(run_git(project_root, "add", "-A", timeout_seconds=120), "git add")
+    checkpoint_id = uuid.uuid4().hex[:10]
+    safe_label = re.sub(r"\s+", " ", str(label or "manual").strip())[:80] or "manual"
+    prefix = "CodeWorker checkpoint"
+    message = f"{prefix} {safe_label}: {checkpoint_id}"
+    commit = run_git(
+        project_root,
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        message,
+        "--no-verify",
+        "--no-gpg-sign",
+        timeout_seconds=120,
+    )
+    require_git_success(commit, "git checkpoint")
+    oid = git_head(project_root)
+    return {
+        "id": checkpoint_id,
+        "commit": oid,
+        "shortCommit": oid[:12],
+        "message": message,
+        "dirtyBefore": before_status["dirty"],
+        "entriesBefore": before_status["entries"],
+        "createdAt": current_timestamp(),
+    }
+
+
+def list_recent_checkpoints(project_root: Path, limit: int = 20) -> List[Dict[str, object]]:
+    ensure_project_git_repo(project_root)
+    completed = require_git_success(
+        run_git(project_root, "log", f"--max-count={max(1, min(limit, 50))}", "--format=%H%x09%ct%x09%s"),
+        "git log",
+    )
+    checkpoints: List[Dict[str, object]] = []
+    for line in completed.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3 or not parts[2].startswith("CodeWorker checkpoint"):
+            continue
+        checkpoints.append({"commit": parts[0], "createdAt": int(parts[1]), "message": parts[2]})
+    return checkpoints
+
+
+def restore_git_checkpoint(project_root: Path, checkpoint: str) -> Dict[str, object]:
+    ensure_project_git_repo(project_root)
+    checkpoint = str(checkpoint or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", checkpoint):
+        raise ValueError("Invalid checkpoint.")
+    subject = require_git_success(run_git(project_root, "log", "-1", "--format=%s", checkpoint), "git log checkpoint").stdout.strip()
+    if not subject.startswith("CodeWorker checkpoint before edit"):
+        raise ValueError("Only CodeWorker pre-edit checkpoints can be restored.")
+    require_git_success(run_git(project_root, "reset", "--hard", checkpoint, timeout_seconds=120), "git reset --hard")
+    require_git_success(run_git(project_root, "clean", "-fd", timeout_seconds=120), "git clean")
+    return {"restored": True, "commit": git_head(project_root), "message": subject, "status": git_status(project_root)}
+
+
+def normalize_project_relative_path(path: str) -> str:
+    raw = str(path or "").replace("\\", "/").strip()
+    if not raw:
+        raise ValueError("Path is required.")
+    pure = PurePosixPath(raw)
+    if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts):
+        raise ValueError("Invalid file path.")
+    parts = tuple(part.lower() for part in pure.parts)
+    if any(part in PROTECTED_EDIT_PATH_PARTS for part in parts):
+        raise ValueError("Protected path cannot be edited.")
+    if len(parts) >= 2 and parts[0] == "data" and parts[1] == "indexes":
+        raise ValueError("Protected index path cannot be edited.")
+    return pure.as_posix()
+
+
+def resolve_edit_target(project_root: Path, relative_path: str, must_exist: Optional[bool] = None) -> Path:
+    normalized = normalize_project_relative_path(relative_path)
+    root = project_root.resolve()
+    target = (root / normalized).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Invalid file path.") from exc
+    if must_exist is True and not target.exists():
+        raise ValueError(f"File does not exist: {normalized}")
+    if must_exist is False and target.exists():
+        raise ValueError(f"File already exists: {normalized}")
+    return target
+
+
+def action_public_copy(action: Dict[str, object]) -> Dict[str, object]:
+    allowed = {
+        "id", "kind", "path", "targetPath", "status", "summary", "risk", "diff", "diffWindow",
+        "operations", "createdAt", "preEditCommit", "postEditCommit", "command", "returncode",
+        "stdout", "stderr", "error",
+    }
+    return {key: value for key, value in action.items() if key in allowed}
+
+
+def create_edit_action(
+    project_root: Path,
+    kind: str,
+    path: str,
+    *,
+    target_path: str = "",
+    summary: str = "",
+    diff: str = "",
+    operations: Optional[List[Dict[str, str]]] = None,
+    content: str = "",
+    command: str = "",
+) -> Dict[str, object]:
+    kind = str(kind or "").strip()
+    if kind not in EDIT_ACTION_KINDS:
+        raise ValueError(f"Unsupported edit action kind: {kind}")
+    action_id = uuid.uuid4().hex
+    risk = "high" if kind in HIGH_RISK_EDIT_ACTIONS else "medium"
+    normalized_path = ""
+    normalized_target_path = ""
+    if kind == "run_command":
+        if not str(command or "").strip():
+            raise ValueError("Command is required.")
+    else:
+        must_exist = kind in {"patch_file", "replace_file", "delete_file", "rename_file"}
+        target = resolve_edit_target(project_root, path, must_exist=must_exist)
+        normalized_path = normalize_project_relative_path(path)
+        before = target.read_text(encoding="utf-8", errors="replace") if target.exists() and target.is_file() else ""
+        if kind == "create_file":
+            resolve_edit_target(project_root, path, must_exist=False)
+            diff = diff or generate_diff(normalized_path, "", content)
+        elif kind == "replace_file":
+            diff = diff or generate_diff(normalized_path, before, content)
+        elif kind == "delete_file":
+            if not target.is_file():
+                raise ValueError("Only files can be deleted.")
+            diff = diff or generate_diff(normalized_path, before, "")
+        elif kind == "rename_file":
+            normalized_target_path = normalize_project_relative_path(target_path)
+            resolve_edit_target(project_root, target_path, must_exist=False)
+            diff = diff or f"rename {normalized_path} -> {normalized_target_path}"
+        elif kind == "patch_file":
+            if not operations:
+                raise ValueError("Patch operations are required.")
+            diff = diff or ""
+    return {
+        "id": action_id,
+        "kind": kind,
+        "path": normalized_path,
+        "targetPath": normalized_target_path,
+        "status": "pending",
+        "summary": summary or kind,
+        "risk": risk,
+        "diff": diff,
+        "diffWindow": truncate_middle(diff, 12000),
+        "operations": operations or [],
+        "content": content,
+        "command": command,
+        "createdAt": current_timestamp(),
+    }
+
+
+def iter_pending_edit_actions(plan: Dict[str, object]) -> List[Dict[str, object]]:
+    actions = plan.get("actions") if isinstance(plan, dict) else []
+    if isinstance(actions, list):
+        return [action for action in actions if isinstance(action, dict)]
+    return []
+
+
+def apply_single_edit_action(project_root: Path, action: Dict[str, object]) -> Dict[str, object]:
+    kind = str(action.get("kind") or "")
+    if str(action.get("status") or "pending") != "pending":
+        raise RuntimeError("Edit action is not pending.")
+    if kind not in EDIT_ACTION_KINDS:
+        raise RuntimeError(f"Unsupported edit action kind: {kind}")
+    result = action_public_copy(action)
+    if kind == "run_command":
+        completed = subprocess.run(
+            str(action.get("command") or ""),
+            cwd=str(project_root),
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        action["status"] = "applied" if completed.returncode == 0 else "failed"
+        action["returncode"] = completed.returncode
+        action["stdout"] = completed.stdout[-6000:]
+        action["stderr"] = completed.stderr[-6000:]
+        result.update({"status": action["status"], "returncode": completed.returncode, "stdout": action["stdout"], "stderr": action["stderr"]})
+        if completed.returncode != 0:
+            raise RuntimeError(f"Command failed: {completed.returncode}")
+        return result
+
+    target = resolve_edit_target(project_root, str(action.get("path") or ""), must_exist=kind not in {"create_file"})
+    if kind == "create_file":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(action.get("content") or ""), encoding="utf-8")
+    elif kind == "replace_file":
+        target.write_text(str(action.get("content") or ""), encoding="utf-8")
+    elif kind == "delete_file":
+        if not target.is_file():
+            raise RuntimeError("Only files can be deleted.")
+        target.unlink()
+    elif kind == "rename_file":
+        target_path = resolve_edit_target(project_root, str(action.get("targetPath") or ""), must_exist=False)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target.rename(target_path)
+    elif kind == "patch_file":
+        before = target.read_text(encoding="utf-8", errors="replace")
+        after = before
+        for operation in action.get("operations") or []:
+            if not isinstance(operation, dict):
+                continue
+            search = str(operation.get("search") or "")
+            replace = str(operation.get("replace") or "")
+            occurrences = after.count(search)
+            if not search or occurrences != 1:
+                raise RuntimeError(
+                    f"修改建議無法安全定位到 {action.get('path')}：search 片段必須剛好匹配 1 次，目前匹配到 {occurrences} 次。"
+                )
+            after = after.replace(search, replace, 1)
+        if after == before:
+            raise RuntimeError("Patch did not change the file.")
+        target.write_text(after, encoding="utf-8")
+    action["status"] = "applied"
+    result["status"] = "applied"
+    return result
+
+
+def apply_edit_actions(project_root: Path, plan: Dict[str, object], action_ids: Optional[List[str]] = None) -> Dict[str, object]:
+    actions = iter_pending_edit_actions(plan)
+    if not actions:
+        raise RuntimeError("No pending edit actions.")
+    wanted = {str(item) for item in action_ids} if action_ids else {str(action.get("id")) for action in actions}
+    selected = [action for action in actions if str(action.get("id")) in wanted]
+    if not selected:
+        raise RuntimeError("No matching edit actions.")
+    pre = create_git_checkpoint(project_root, "before edit")
+    applied: List[Dict[str, object]] = []
+    try:
+        for action in selected:
+            action["preEditCommit"] = pre["commit"]
+            applied_action = apply_single_edit_action(project_root, action)
+            applied.append(applied_action)
+    except Exception as exc:
+        for action in selected:
+            if str(action.get("status")) == "pending":
+                action["status"] = "failed"
+        try:
+            diff_payload = git_diff(project_root, str(pre["commit"]))
+        except Exception:
+            diff_payload = {"changedFiles": [], "diff": "", "stat": ""}
+        raise EditApplyError(
+            str(exc),
+            {
+                "failed": True,
+                "error": str(exc),
+                "preEditCommit": pre["commit"],
+                "preCheckpoint": pre,
+                "changedFiles": diff_payload.get("changedFiles", []),
+                "diff": diff_payload.get("diff", ""),
+                "diffStat": diff_payload.get("stat", ""),
+                "appliedActions": applied,
+                "actions": [action_public_copy(action) for action in actions],
+            },
+        ) from exc
+    status_after = git_status(project_root)
+    post: Dict[str, object] = {}
+    if bool(status_after.get("dirty")):
+        post = create_git_checkpoint(project_root, "after edit")
+        for action in selected:
+            if str(action.get("status")) == "applied":
+                action["postEditCommit"] = post["commit"]
+    diff_payload = git_diff(project_root, str(pre["commit"]))
+    return {
+        "preEditCommit": pre["commit"],
+        "postEditCommit": post.get("commit", ""),
+        "preCheckpoint": pre,
+        "postCheckpoint": post,
+        "changedFiles": diff_payload["changedFiles"],
+        "diff": diff_payload["diff"],
+        "diffStat": diff_payload["stat"],
+        "appliedActions": applied,
+        "actions": [action_public_copy(action) for action in actions],
+    }
 
 
 def build_edit_messages(
@@ -6894,6 +7312,18 @@ def create_precise_edit_plan(
 
     need_more_context = normalize_need_more_context(payload.get("needMoreContext"))
 
+    actions = [
+        create_edit_action(
+            project_root,
+            "patch_file",
+            str(item.get("path", "")),
+            summary=str(item.get("reason") or payload.get("summary") or "套用修改"),
+            diff=str(item.get("diff") or ""),
+            operations=item.get("operations") if isinstance(item.get("operations"), list) else [],
+        )
+        for item in normalized_edits
+    ]
+
     plan = {
         "mode": "precise",
         "request": message,
@@ -6901,6 +7331,7 @@ def create_precise_edit_plan(
         "summary": str(payload.get("summary", "")).strip() or "已產生修改建議",
         "needMoreContext": need_more_context,
         "edits": normalized_edits,
+        "actions": actions,
     }
     return plan
 
@@ -7713,6 +8144,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/project/structure":
             self.handle_project_structure()
             return
+        if parsed.path == "/api/edit/status":
+            self.handle_edit_status()
+            return
+        if parsed.path == "/api/git/diff":
+            self.handle_git_diff(parsed)
+            return
         if parsed.path == "/api/media-assessment":
             json_response(self, {"ok": True, "data": get_media_analysis_assessment()})
             return
@@ -7801,8 +8238,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/edit/plan":
             self.handle_edit_plan()
             return
+        if parsed.path == "/api/edit/apply":
+            self.handle_edit_apply()
+            return
         if parsed.path == "/api/edit/discard":
             self.handle_discard_edit()
+            return
+        if parsed.path == "/api/git/checkpoint":
+            self.handle_git_checkpoint()
+            return
+        if parsed.path == "/api/git/restore":
+            self.handle_git_restore()
             return
         if parsed.path == "/api/pin-files":
             self.handle_pin_files()
@@ -8708,7 +9154,6 @@ class WebUIHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
-                require_pinned_context(STATE)
                 project_root = Path(STATE.project_path)
                 snapshot = SessionState(
                     project_path=STATE.project_path,
@@ -8744,8 +9189,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             json_response(self, {"ok": True, "data": {"plan": public_plan}})
         except ValueError as exc:
             details = str(exc)
-            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "PINNED_CONTEXT_REQUIRED"
-            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "請先勾選釘選檔案。"
+            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "EDIT_PLAN_FAILED"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "Generate edit plan failed."
             error_response(self, make_error(code, message, details))
         except RuntimeError as exc:
             try:
@@ -8758,6 +9203,135 @@ class WebUIHandler(BaseHTTPRequestHandler):
             error_response(self, error_payload)
         except Exception as exc:
             error_response(self, make_error("EDIT_PLAN_FAILED", "Generate edit plan failed.", str(exc)))
+
+    def handle_edit_status(self) -> None:
+        try:
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                project_root = Path(STATE.project_path)
+                pending_edit = STATE.pending_edit
+            git_payload = git_status(project_root)
+            json_response(
+                self,
+                {
+                    "ok": True,
+                    "data": {
+                        "pendingEdit": pending_edit,
+                        "git": git_payload,
+                        "checkpoints": list_recent_checkpoints(project_root),
+                    },
+                },
+            )
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("EDIT_STATUS_FAILED", "Edit status failed.", str(exc)))
+
+    def handle_edit_apply(self) -> None:
+        try:
+            payload = self.read_json_body()
+            action_ids = payload.get("actionIds", [])
+            if action_ids is not None and not isinstance(action_ids, list):
+                raise ValueError("actionIds must be a list.")
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                if not STATE.pending_edit:
+                    raise ValueError("No pending edit.")
+                project_root = Path(STATE.project_path)
+                pending_edit = STATE.pending_edit
+            result = apply_edit_actions(project_root, pending_edit, [str(item) for item in action_ids] if action_ids else None)
+            with STATE_LOCK:
+                STATE.pending_edit = pending_edit
+                transcript_item = append_tool_transcript_item_locked(
+                    "action-edit-apply",
+                    "修改已套用",
+                    "已套用修改並建立 Git checkpoint。",
+                    {"result": result, "pendingEdit": pending_edit},
+                )
+                save_current_thread_locked()
+            json_response(self, {"ok": True, "data": {"result": result, "pendingEdit": pending_edit, "transcriptItem": transcript_item}})
+        except EditApplyError as exc:
+            with STATE_LOCK:
+                STATE.pending_edit = pending_edit if "pending_edit" in locals() else STATE.pending_edit
+                transcript_item = append_tool_transcript_item_locked(
+                    "action-edit-apply",
+                    "套用失敗",
+                    "套用修改失敗；可復原到修改前 Git checkpoint。",
+                    {"result": exc.result, "pendingEdit": STATE.pending_edit},
+                )
+                save_current_thread_locked()
+            error_response(
+                self,
+                make_error(
+                    "EDIT_APPLY_FAILED",
+                    "Apply edit failed.",
+                    str(exc),
+                    extra={"result": exc.result, "pendingEdit": STATE.pending_edit, "transcriptItem": transcript_item},
+                ),
+            )
+        except ValueError as exc:
+            code = "PROJECT_NOT_READY" if str(exc) == "請先完成開啟專案。" else "EDIT_APPLY_FAILED"
+            error_response(self, make_error(code, "Apply edit failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("EDIT_APPLY_FAILED", "Apply edit failed.", str(exc)))
+
+    def handle_git_diff(self, parsed: urllib.parse.ParseResult) -> None:
+        try:
+            query = urllib.parse.parse_qs(parsed.query)
+            base = query.get("base", [""])[0].strip() or None
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                project_root = Path(STATE.project_path)
+            json_response(self, {"ok": True, "data": git_diff(project_root, base)})
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("GIT_DIFF_FAILED", "Git diff failed.", str(exc)))
+
+    def handle_git_checkpoint(self) -> None:
+        try:
+            payload = self.read_json_body()
+            label = str(payload.get("label", "manual")).strip() or "manual"
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                project_root = Path(STATE.project_path)
+            checkpoint = create_git_checkpoint(project_root, label)
+            json_response(self, {"ok": True, "data": {"checkpoint": checkpoint, "status": git_status(project_root)}})
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("GIT_CHECKPOINT_FAILED", "Git checkpoint failed.", str(exc)))
+
+    def handle_git_restore(self) -> None:
+        try:
+            payload = self.read_json_body()
+            checkpoint = str(payload.get("checkpoint", "")).strip()
+            if not checkpoint:
+                raise ValueError("checkpoint is required.")
+            with STATE_LOCK:
+                if STATE.ui_state != "ready" or not STATE.project_path:
+                    raise ValueError("請先完成開啟專案。")
+                project_root = Path(STATE.project_path)
+            result = restore_git_checkpoint(project_root, checkpoint)
+            with STATE_LOCK:
+                STATE.pending_edit = None
+                transcript_item = append_tool_transcript_item_locked(
+                    "action-edit-restore",
+                    "已復原修改",
+                    "已復原到修改前 Git checkpoint。",
+                    {"result": result},
+                )
+                save_current_thread_locked()
+            json_response(self, {"ok": True, "data": {"result": result, "pendingEdit": None, "transcriptItem": transcript_item}})
+        except ValueError as exc:
+            code = "PROJECT_NOT_READY" if str(exc) == "請先完成開啟專案。" else "GIT_RESTORE_FAILED"
+            error_response(self, make_error(code, "Git restore failed.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("GIT_RESTORE_FAILED", "Git restore failed.", str(exc)))
 
     def handle_discard_edit(self) -> None:
         with STATE_LOCK:

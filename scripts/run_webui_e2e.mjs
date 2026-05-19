@@ -143,6 +143,85 @@ async function installCodeGraphMocks(page) {
     const body = route.request().postDataJSON?.() || {};
     await route.fulfill(ok({ pinnedFiles: body.files || [] }));
   });
+  await page.route("**/api/edit/plan", async (route) => {
+    await route.fulfill(ok({
+      plan: {
+        mode: "precise",
+        request: "Change Form1 title",
+        summary: "更新 Form1 標題",
+        needMoreContext: [],
+        edits: [
+          {
+            path: "Form1.cs",
+            target: "Form1",
+            location: "約第 12-18 行",
+            reason: "使用者要求更新標題",
+            beforeSnippet: "Text = \"Old\";",
+            afterSnippet: "Text = \"New\";",
+            diffWindow: "--- a/Form1.cs\n+++ b/Form1.cs\n@@\n-Text = \"Old\";\n+Text = \"New\";",
+          },
+        ],
+        actions: [
+          {
+            id: "edit-action-1",
+            kind: "patch_file",
+            path: "Form1.cs",
+            status: "pending",
+            summary: "更新 Form1 標題",
+            risk: "medium",
+            diffWindow: "--- a/Form1.cs\n+++ b/Form1.cs\n@@\n-Text = \"Old\";\n+Text = \"New\";",
+          },
+        ],
+      },
+    }));
+  });
+  await page.route("**/api/edit/apply", async (route) => {
+    await route.fulfill(ok({
+      pendingEdit: {
+        mode: "precise",
+        summary: "更新 Form1 標題",
+        actions: [{ id: "edit-action-1", kind: "patch_file", path: "Form1.cs", status: "applied", risk: "medium" }],
+      },
+      result: {
+        preEditCommit: "1111111111111111111111111111111111111111",
+        postEditCommit: "2222222222222222222222222222222222222222",
+        changedFiles: ["Form1.cs"],
+        diffStat: "Form1.cs | 2 +-\n1 file changed",
+        diff: "--- a/Form1.cs\n+++ b/Form1.cs\n@@\n-Text = \"Old\";\n+Text = \"New\";",
+        appliedActions: [{ id: "edit-action-1", kind: "patch_file", path: "Form1.cs", status: "applied" }],
+      },
+    }));
+  });
+  await page.route("**/api/git/diff**", async (route) => {
+    await route.fulfill(ok({
+      base: "1111111111111111111111111111111111111111",
+      head: "2222222222222222222222222222222222222222",
+      stat: "Form1.cs | 2 +-\n1 file changed",
+      diff: "--- a/Form1.cs\n+++ b/Form1.cs\n@@\n-Text = \"Old\";\n+Text = \"New\";",
+      changedFiles: ["Form1.cs"],
+    }));
+  });
+  await page.route("**/api/git/checkpoint", async (route) => {
+    await route.fulfill(ok({
+      checkpoint: {
+        commit: "3333333333333333333333333333333333333333",
+        shortCommit: "333333333333",
+        message: "CodeWorker checkpoint manual: e2e",
+      },
+      status: { dirty: false, entries: [] },
+    }));
+  });
+  await page.route("**/api/git/restore", async (route) => {
+    await route.fulfill(ok({
+      pendingEdit: null,
+      result: {
+        restored: true,
+        commit: "1111111111111111111111111111111111111111",
+        message: "CodeWorker checkpoint before edit: e2e",
+        changedFiles: ["Form1.cs"],
+      },
+    }));
+  });
   await page.route("**/api/file-tree?**", async (route) => {
     const url = new URL(route.request().url());
     const query = (url.searchParams.get("query") || "").toLowerCase();
@@ -206,6 +285,23 @@ test.describe("CodeWorker WebUI CodeGraph E2E", () => {
       await page.locator("#codeGraphRebuildBtn").click();
       await expect(page.locator("#chatLog")).toContainText(/重新掃描完成|Rescan complete/);
       await expect(page.locator("#chatLog")).toContainText(/nodes|Form1/);
+
+      await page.locator("#chatInput").fill("把 Form1 標題改成 New");
+      await page.locator("#editPlanBtn").click();
+      await expect(page.locator("#chatLog")).toContainText("修改計畫");
+      await expect(page.locator("#chatLog")).toContainText("patch_file");
+      await expect(page.locator("#chatLog")).toContainText("Form1.cs");
+      await page.locator("#chatLog [data-edit-apply]").last().click();
+      await expect(page.locator("#chatLog")).toContainText(/修改已套用|Edit applied/);
+      await expect(page.locator("#chatLog")).toContainText("111111111111");
+      await page.locator("#chatLog [data-git-diff]").last().click();
+      await expect(page.locator("#chatLog")).toContainText("Git diff");
+      await expect(page.locator("#chatLog")).toContainText("Text = \"New\"");
+      await page.locator("#gitCheckpointBtn").click();
+      await expect(page.locator("#chatLog")).toContainText("333333333333");
+      page.once("dialog", async (dialog) => dialog.accept());
+      await page.locator("#chatLog [data-git-restore]").last().click();
+      await expect(page.locator("#chatLog")).toContainText(/已復原修改|Edit restored/);
 
       const scrollCheck = await page.evaluate(async (label) => {
         const log = document.querySelector("#chatLog");

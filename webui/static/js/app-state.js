@@ -98,6 +98,12 @@ const I18N = {
       codeGraphUsePrompt: "用目前輸入查 CodeGraph",
       codeGraphRebuild: "重新掃描索引",
       codeGraphPin: "釘選命中文件",
+      editPlan: "產生修改計畫",
+      gitDiff: "查看 Git diff",
+      gitCheckpoint: "建立 checkpoint",
+      applyEdit: "確認套用",
+      restoreEdit: "復原這次修改",
+      discardEdit: "放棄",
     },
     hints: {
       firstRun: "第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。",
@@ -274,6 +280,12 @@ const I18N = {
       codeGraphUsePrompt: "Query CodeGraph from input",
       codeGraphRebuild: "Rescan index",
       codeGraphPin: "Pin matched files",
+      editPlan: "Create edit plan",
+      gitDiff: "View Git diff",
+      gitCheckpoint: "Create checkpoint",
+      applyEdit: "Apply changes",
+      restoreEdit: "Restore this edit",
+      discardEdit: "Discard",
     },
     hints: {
       firstRun: "On the first run, CodeWorker will automatically download missing runtime files or models.",
@@ -693,6 +705,28 @@ const HELP_CONTENT = {
         "Make sure the project is opened before sending.",
         "Replies now stay closer to the model's original output instead of being heavily cleaned up.",
       ],
+    },
+  },
+  "edit-plan": {
+    "zh-Hant": {
+      title: "產生修改計畫",
+      description: "讓本地模型先產生可審查的檔案修改計畫，不會直接寫入檔案。",
+      usage: [
+        "先開啟專案，輸入明確修改需求，再按「產生修改計畫」。",
+        "確認 diff 與 Git checkpoint 後，再按「確認套用」。",
+        "套用後可用「查看 Git diff」比對，必要時按「復原這次修改」。",
+      ],
+      notes: ["所有新增、修改、刪除、rename 與 command 都需要人工確認。"],
+    },
+    en: {
+      title: "Create edit plan",
+      description: "Ask the local model to create a reviewable file-edit plan. It does not write files directly.",
+      usage: [
+        "Open a project, type a specific change request, then click Create edit plan.",
+        "Review the diff and Git checkpoint, then apply the changes.",
+        "After applying, use View Git diff to compare and Restore this edit if needed.",
+      ],
+      notes: ["All create, modify, delete, rename, and command actions require confirmation."],
     },
   },
   "clear-chat": {

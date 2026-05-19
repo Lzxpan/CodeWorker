@@ -25,7 +25,7 @@ Core capabilities:
 - Attachments: code, config, documents, images, audio, and video can be attached. CodeWorker sends extracted text, keyframes, or transcripts when available, otherwise metadata fallback.
 - Threads: the right `240px` thread panel can create, switch, rename, and delete conversations. Each thread keeps its own history, memory, and transcript.
 - Model-driven file generation: ask for a document in normal chat. The model produces the content and title, CodeWorker uses the title to name the file, creates a pending preview, and only writes `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx` after confirmation.
-- Agent safety: writes, patches, deletes, and commands become pending actions and only run after user confirmation.
+- Agent safety: writes, patches, deletes, renames, and commands become pending actions and only run after user confirmation; applying changes creates a pre-edit Git checkpoint and creates a post checkpoint when files changed, so users can inspect diffs and restore the edit.
 
 ---
 
@@ -39,6 +39,7 @@ Core capabilities:
 - Without an opened project, chat behaves as normal Q&A. With an opened project and no pinned files, chat uses full-project RAG. With pinned files, pinned context takes priority.
 - Videos are analyzed through `FFmpeg` keyframes, not by sending raw MP4 binaries to the model. Audio and video audio tracks try `whisper.cpp` speech-to-text.
 - File generation and Agent writes require confirmation before touching the project root. After a file is written, the UI shows the final path and filename.
+- `Create edit plan` prepares reviewable file actions first; `Apply changes` creates a Git checkpoint before the edit and a post checkpoint when files changed, `View Git diff` compares changes, and `Restore this edit` can return to the pre-edit checkpoint.
 - The CodeGraph feature follows local semantic-indexing ideas from `colbymchenry/codegraph`; source, author, and license attribution are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
@@ -301,6 +302,9 @@ CodeGraph attribution:
 ### V1.01.002
 
 - updated the Web UI version to `CodeWorker V1.01.002`.
+- added the local file-edit workflow: `Create edit plan`, pending action cards, `Apply changes`, `View Git diff`, `Create checkpoint`, and `Restore this edit`.
+- added a Git safety layer that creates a pre-edit checkpoint before applying file changes and a post-edit checkpoint when files changed; restore is limited to CodeWorker-created pre-edit checkpoints.
+- added `/api/edit/apply`, `/api/edit/status`, `/api/git/diff`, `/api/git/checkpoint`, and `/api/git/restore`, supporting `create_file`, `patch_file`, `replace_file`, `delete_file`, `rename_file`, and `run_command` pending actions.
 - integrated chat, AI streaming, file-structure analysis, CodeGraph query / rebuild, context coverage, and generated-file confirmations into one transcript scroll container.
 - added persisted `transcriptVersion: 1` and `transcript` thread data; old threads fall back from existing `history`.
 - kept `history` as the model-context source while tool cards and status cards only enter `transcript`, preventing CodeGraph / analysis cards from being sent to the LLM.
