@@ -243,6 +243,33 @@ test.describe("CodeWorker WebUI CodeGraph E2E", () => {
       await page.evaluate(() => window.CodeWorker.ui.setAiBusy(false));
       await expect(page.locator("#aiActivity")).toBeHidden();
 
+      await page.evaluate(() => {
+        window.CodeWorker.state.currentTaskKind = "redownload-model";
+        window.CodeWorker.ui.renderProgress(
+          44,
+          "Gemma-4.gguf: 40% (8.0 GB / 20.0 GB)",
+          "正在重新下載模型",
+          {
+            download: {
+              fileName: "Gemma-4.gguf",
+              percent: 40,
+              downloadedBytes: 8589934592,
+              totalBytes: 21474836480,
+              fileIndex: 1,
+              fileCount: 1,
+            },
+          }
+        );
+      });
+      await expect(page.locator("#progressPanel")).toBeVisible();
+      await expect(page.locator("#progressPercent")).toHaveText("40%");
+      await expect(page.locator("#progressStep")).toContainText("Gemma-4.gguf");
+      await expect(page.locator("#progressStep")).toContainText("8.0 GB / 20.0 GB");
+      await page.evaluate(() => {
+        window.CodeWorker.state.currentTaskKind = null;
+        window.CodeWorker.ui.renderProgress(0, "", "背景作業執行中");
+      });
+
       await request.post(`${WEBUI_URL}/api/threads`, {
         data: { title: `UI 驗證 E2E ${round}`, metadata: { source: "webui-e2e" } },
       });

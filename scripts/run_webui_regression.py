@@ -153,6 +153,51 @@ def test_bootstrap_stops_codeworker_runtime_users_before_winpython_update():
     assert_true("Stop-Process -Id $process.ProcessId -Force" in source, "bootstrap cleanup should force-stop matching CodeWorker runtime processes")
 
 
+def test_model_download_progress_payload_reports_file_percent():
+    payload = server.build_model_download_progress_payload(
+        "gemma4.gguf",
+        bytes_written=5 * 1024 * 1024,
+        total_bytes=20 * 1024 * 1024,
+        file_index=0,
+        file_count=2,
+        segment_start=12,
+        segment_end=92,
+    )
+    assert_true(payload["progress"] == 32, "overall task progress should map the file percent into the download segment")
+    assert_true(payload["download"]["percent"] == 25, "download payload should expose exact current-file percent")
+    assert_true(payload["download"]["fileName"] == "gemma4.gguf", "download payload should expose current file name")
+    assert_true(payload["download"]["fileIndex"] == 1 and payload["download"]["fileCount"] == 2, "download payload should expose file position")
+    assert_true("25%" in payload["message"], "download message should include visible percent")
+    assert_true("5.0 MB" in payload["message"] and "20.0 MB" in payload["message"], "download message should include downloaded and total size")
+
+    unknown = server.build_model_download_progress_payload(
+        "model.gguf",
+        bytes_written=3 * 1024 * 1024,
+        total_bytes=0,
+        file_index=0,
+        file_count=1,
+        segment_start=12,
+        segment_end=92,
+    )
+    assert_true(unknown["progress"] == 12, "unknown content-length should keep segment start progress")
+    assert_true(unknown["download"]["percent"] is None, "unknown content-length should explicitly expose null percent")
+    assert_true("已下載 3.0 MB" in unknown["message"], "unknown content-length message should still show downloaded bytes")
+
+    source = (ROOT / "webui" / "server.py").read_text(encoding="utf-8")
+    assert_true(
+        "ensure_local_model_server(model_key, port=get_model_port(model_key), task_id=task_id)" in source,
+        "open project model preparation should pass task_id so first-time downloads can report file progress",
+    )
+    assert_true(
+        "get_model_mmproj_patterns(model_key)" in source and "resolved_filenames.append(mmproj_filename)" in source,
+        "model download progress should include a missing mmproj file when the selected model requires one",
+    )
+    assert_true(
+        "download_model_with_progress(task_id, model_key, force=False)" in source and "if not force:" in source,
+        "open-project model preparation should only download missing model files while manual redownload can still force refresh",
+    )
+
+
 def test_hardware_optimization_log_entry_contains_diagnostics():
     entry = server.build_hardware_optimization_log_entry(
         "model_launch_plan",
@@ -1495,6 +1540,8 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true(".ai-spinner" in css and "@keyframes aiBusyBar" in css, "busy indicator should have spinner/bar animation styles")
     assert_true("function setAiBusy" in js, "app should control the AI busy indicator from JS")
     assert_true("setAiBusy(true" in js and "setAiBusy(false" in js, "chat/analyze flows should toggle the AI busy indicator")
+    assert_true("rawDownload && downloadPercent !== null" in js, "download progress should display the current file percentage from task payloads")
+    assert_true("downloadedSize" in js and "totalSize" in js, "download progress should show downloaded and total file size")
 
 
 def test_static_ui_exposes_codegraph_tools_split_scripts_and_virtual_tree():
@@ -1542,6 +1589,7 @@ def main():
         test_llama_launcher_accepts_auto_hardware_args,
         test_launch_webui_restarts_stale_codeworker_server,
         test_bootstrap_stops_codeworker_runtime_users_before_winpython_update,
+        test_model_download_progress_payload_reports_file_percent,
         test_hardware_optimization_log_entry_contains_diagnostics,
         test_model_file_matching_does_not_fallback_on_pattern_miss,
         test_project_structure_classifies_multi_language_files,

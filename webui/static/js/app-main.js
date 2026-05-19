@@ -74,7 +74,7 @@ window.CodeWorker = Object.assign(window.CodeWorker || {}, {
   state,
   elements,
   api: { requestJson },
-  ui: { setStatus, setAiBusy, setUiState, renderContextCoverage, showError, clearError, startChatAutoScroll, maintainChatAutoScroll, appendLiveMessage, appendLiveText },
+  ui: { setStatus, setAiBusy, setUiState, renderProgress, renderContextCoverage, showError, clearError, startChatAutoScroll, maintainChatAutoScroll, appendLiveMessage, appendLiveText },
   tree: { renderTree, loadFileTree, renderVirtualTreeWindow },
   thread: { loadThreads, newThread, selectThread, renameThread, deleteThread },
   chat: { sendChat, streamChat, analyzeProject, renderProjectStructure, pinStructureRecommendedFiles },

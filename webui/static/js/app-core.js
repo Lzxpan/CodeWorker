@@ -246,7 +246,8 @@ function formatBytes(bytes) {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function renderAttachmentHtml(attachment) {
@@ -466,17 +467,34 @@ function setUiState(nextState) {
   if (elements.newThreadBtn) elements.newThreadBtn.disabled = busy;
 }
 
-function renderProgress(progress = 0, step = "", title = t("progress.defaultTitle")) {
-  state.lastProgress = { progress, step, title };
+function renderProgress(progress = 0, step = "", title = t("progress.defaultTitle"), task = null) {
+  const rawDownload = task?.download || null;
+  const downloadPercent = Number.isFinite(Number(rawDownload?.percent)) ? Number(rawDownload.percent) : null;
+  const visibleProgress = rawDownload && downloadPercent !== null
+    ? Math.max(0, Math.min(100, Math.round(downloadPercent)))
+    : Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+  const filePosition = rawDownload && Number(rawDownload.fileCount) > 1
+    ? ` [${Number(rawDownload.fileIndex) || 1}/${Number(rawDownload.fileCount) || 1}]`
+    : "";
+  const totalSize = rawDownload?.totalSize || (Number(rawDownload?.totalBytes) > 0 ? formatBytes(rawDownload.totalBytes) : "");
+  const downloadedSize = rawDownload?.downloadedSize || formatBytes(rawDownload?.downloadedBytes || 0);
+  const downloadSizes = totalSize
+    ? ` (${downloadedSize} / ${totalSize})`
+    : "";
+  const downloadStep = rawDownload?.fileName
+    ? `${rawDownload.fileName}${filePosition}${downloadPercent !== null ? `: ${visibleProgress}%` : ""}${downloadSizes}`
+    : "";
+  const visibleStep = downloadStep || step || t("progress.waiting");
+  state.lastProgress = { progress: visibleProgress, step: visibleStep, title };
   if (state.uiState === "opening" || state.currentTaskKind === "redownload-model") {
     elements.progressPanel.classList.remove("hidden");
   } else {
     elements.progressPanel.classList.add("hidden");
   }
   elements.progressTitle.textContent = translateRuntimeText(title);
-  elements.progressPercent.textContent = `${progress}%`;
-  elements.progressBar.style.width = `${progress}%`;
-  elements.progressStep.textContent = translateRuntimeText(step || t("progress.waiting"));
+  elements.progressPercent.textContent = `${visibleProgress}%`;
+  elements.progressBar.style.width = `${visibleProgress}%`;
+  elements.progressStep.textContent = translateRuntimeText(visibleStep);
 }
 
 function renderHelpContent(entry) {
