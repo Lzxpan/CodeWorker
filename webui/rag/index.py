@@ -7,6 +7,15 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from .code_graph import (
+    add_code_graph_file,
+    build_code_graph_context,
+    code_graph_status,
+    reset_code_graph,
+    resolve_code_graph,
+    search_code_graph,
+)
+
 
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
@@ -332,6 +341,7 @@ def rebuild_index(project_root: Path, data_dir: Path) -> Dict[str, object]:
     conn = connect_index(db_path)
     conn.execute("DELETE FROM files")
     conn.execute("DELETE FROM chunks")
+    reset_code_graph(conn)
     try:
         conn.execute("DELETE FROM chunks_fts")
     except sqlite3.OperationalError:
@@ -354,6 +364,7 @@ def rebuild_index(project_root: Path, data_dir: Path) -> Dict[str, object]:
         symbols = extract_python_symbols(content) if path.suffix.lower() == ".py" else extract_generic_symbols(content)
         imports = extract_imports(content)
         summary = summarize(content)
+        add_code_graph_file(conn, relative, path.suffix.lower(), language, content)
         conn.execute(
             "INSERT OR REPLACE INTO files(path, size, mtime, sha256, symbols, imports, summary, kind, language, extraction_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -397,6 +408,13 @@ def rebuild_index(project_root: Path, data_dir: Path) -> Dict[str, object]:
         skeleton.append(file_record)
         manifest_files.append({key: file_record[key] for key in ("path", "size", "mtime", "sha256", "kind", "language", "extractionStatus")})
         indexed_files += 1
+    graph_result = resolve_code_graph(conn)
+    code_graph = {
+        "nodes": int(conn.execute("SELECT COUNT(*) FROM code_nodes").fetchone()[0] or 0),
+        "edges": int(conn.execute("SELECT COUNT(*) FROM code_edges").fetchone()[0] or 0),
+        "resolvedReferences": int(graph_result.get("resolved", 0) or 0),
+        "unresolvedReferences": int(graph_result.get("unresolved", 0) or 0),
+    }
     conn.commit()
     (target_dir / "skeleton.json").write_text(json.dumps(skeleton, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest = {
@@ -405,6 +423,7 @@ def rebuild_index(project_root: Path, data_dir: Path) -> Dict[str, object]:
         "files": manifest_files,
         "fileCount": indexed_files,
         "chunkCount": indexed_chunks,
+        "codeGraph": code_graph,
     }
     (target_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     conn.close()
@@ -414,6 +433,7 @@ def rebuild_index(project_root: Path, data_dir: Path) -> Dict[str, object]:
         "database": str(db_path),
         "files": indexed_files,
         "chunks": indexed_chunks,
+        "codeGraph": code_graph,
     }
 
 

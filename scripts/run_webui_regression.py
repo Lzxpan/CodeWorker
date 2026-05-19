@@ -3,6 +3,8 @@ import io
 import inspect
 import json
 import shutil
+import sqlite3
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -13,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "webui"))
 
 import server  # noqa: E402
-from rag.index import index_is_stale, rebuild_index, search_index  # noqa: E402
+from rag.index import build_code_graph_context, code_graph_status, index_is_stale, rebuild_index, search_code_graph, search_index  # noqa: E402
 
 
 def assert_true(condition, message):
@@ -138,8 +140,17 @@ def test_launch_webui_restarts_stale_codeworker_server():
     source = (ROOT / "scripts" / "launch-webui.cmd").read_text(encoding="utf-8")
     assert_true(":reclaim_webui_port" in source, "launch-webui should reclaim an already-running CodeWorker Web UI server")
     assert_true("webui\\server.py" in source, "launch-webui should only reclaim the CodeWorker webui/server.py process")
-    assert_true("Stop-Process -Id $pid -Force" in source, "launch-webui should stop the stale CodeWorker process before restarting")
+    assert_true("foreach ($ownerPid in $listeners)" in source, "launch-webui should avoid the read-only PowerShell $PID variable")
+    assert_true("Stop-Process -Id $ownerPid -Force" in source, "launch-webui should stop the stale CodeWorker process before restarting")
     assert_true("Port %WEBUI_PORT% is occupied by another process" in source, "launch-webui should refuse unknown processes on the Web UI port")
+
+
+def test_bootstrap_stops_codeworker_runtime_users_before_winpython_update():
+    source = (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")
+    assert_true("function Stop-CodeWorkerProcessesUsingRuntime" in source, "bootstrap should define a runtime process cleanup helper")
+    assert_true('$Name -eq "winPython"' in source, "bootstrap should run cleanup before reinstalling WinPython")
+    assert_true("Stop-CodeWorkerProcessesUsingRuntime -RootDir $RootDir -RuntimeDir $targetDir" in source, "WinPython update should stop CodeWorker processes that lock runtime DLLs")
+    assert_true("Stop-Process -Id $process.ProcessId -Force" in source, "bootstrap cleanup should force-stop matching CodeWorker runtime processes")
 
 
 def test_hardware_optimization_log_entry_contains_diagnostics():
@@ -179,6 +190,55 @@ def test_model_file_matching_does_not_fallback_on_pattern_miss():
             match_first_model_file(root, ["*mmproj-BF16*.gguf", "*mmproj-F16*.gguf"]) is None,
             "mmproj lookup must not fall back to the main GGUF file",
         )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def write_fixture_file(root, relative_path, content="x"):
+    target = root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+def test_project_structure_classifies_multi_language_files():
+    root = ROOT / ".tmp" / "regression-project-structure"
+    shutil.rmtree(root, ignore_errors=True)
+    try:
+        fixtures = [
+            "Program.cs", "Game.csproj", "Form1.cs", "Form1.Designer.cs", "AudioManager.cs",
+            "Assets/Sounds/a.wav", "bin/Debug/app.config", "obj/Debug/App.g.cs",
+            "Project1.dpr", "Unit1.pas", "Unit1.dfm", "Project1.dproj",
+            "main.cpp", "CMakeLists.txt", "include/app.hpp", "src/app.cpp", "App.vcxproj", "App.vcxproj.filters",
+            "Program.vb", "Form1.vb", "Form1.Designer.vb", "App.vbproj",
+            "package.json", "src/main.ts", "src/App.tsx", "src/App.test.tsx",
+            "pyproject.toml", "app.py", "tests/test_app.py",
+            "build.gradle.kts", "src/main/java/com/example/App.java", "src/test/java/com/example/AppTest.java",
+            "go.mod", "cmd/tool/main.go", "Cargo.toml", "src/main.rs", "composer.json", "Gemfile",
+        ]
+        for path in fixtures:
+            write_fixture_file(root, path)
+        files = server.collect_project_files(root)
+        structure = server.build_project_structure(root, files)
+        categories = structure["categories"]
+        recommended = structure["recommendedPins"]
+        assert_true("Program.cs" in categories["entrypoints"], "C# Program.cs should be classified as an entrypoint")
+        assert_true("Project1.dpr" in categories["entrypoints"], "Delphi .dpr should be classified as an entrypoint")
+        assert_true("main.cpp" in categories["entrypoints"], "C++ main.cpp should be classified as an entrypoint")
+        assert_true("Program.vb" in categories["entrypoints"], "VB Program.vb should be classified as an entrypoint")
+        assert_true("Game.csproj" in categories["projectConfigs"], "C# project should be a project config")
+        assert_true("Project1.dproj" in categories["projectConfigs"], "Delphi project should be a project config")
+        assert_true("App.vcxproj" in categories["projectConfigs"], "C++ vcxproj should be a project config")
+        assert_true("App.vbproj" in categories["projectConfigs"], "VB project should be a project config")
+        assert_true("Form1.Designer.cs" in categories["uiFiles"], "WinForms designer should be classified as UI")
+        assert_true("Unit1.dfm" in categories["uiFiles"], "Delphi DFM should be classified as UI")
+        assert_true("Assets/Sounds/a.wav" in categories["assetFiles"], "asset audio should be classified as a resource")
+        assert_true("src/App.test.tsx" in categories["testFiles"], "JS/TS test should be detected")
+        assert_true("tests/test_app.py" in categories["testFiles"], "Python test should be detected")
+        assert_true("bin/Debug/app.config" in categories["ignoredBuildOutputs"], "bin output should be ignored")
+        assert_true("obj/Debug/App.g.cs" in categories["ignoredBuildOutputs"], "obj output should be ignored")
+        assert_true("bin/Debug/app.config" not in recommended, "recommended pins must not include build output")
+        assert_true(any(path in recommended for path in ["Program.cs", "Project1.dpr", "main.cpp", "Program.vb"]), "recommended pins should include entrypoints")
+        assert_true("未找到測試檔案" not in structure["summary"], "summary should list tests when they exist")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -585,6 +645,129 @@ def test_rag_manifest_search_and_stale():
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_code_graph_indexes_symbols_and_relationships():
+    root = ROOT / ".tmp" / "regression-code-graph"
+    data_dir = ROOT / ".tmp" / "regression-code-graph-index"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "auth.py").write_text(
+        "def validate_user(user):\n"
+        "    return bool(user)\n\n"
+        "def login(user):\n"
+        "    return validate_user(user)\n\n"
+        "class AuthService:\n"
+        "    def sign_in(self, user):\n"
+        "        return login(user)\n",
+        encoding="utf-8",
+    )
+    try:
+        result = rebuild_index(root, data_dir)
+        graph = result.get("codeGraph", {})
+        assert_true(int(graph.get("nodes", 0)) >= 4, "code graph should index file, functions, class, and method nodes")
+        assert_true(int(graph.get("edges", 0)) >= 3, "code graph should create contains/calls edges")
+        status = code_graph_status(root, data_dir)
+        assert_true(status["ready"] is True, "code graph status should report ready after rebuild")
+        search = search_code_graph(root, data_dir, "login", limit=5)
+        names = {item["name"] for item in search.get("nodes", [])}
+        assert_true("login" in names, "code graph search should find function symbols by name")
+        context, coverage = build_code_graph_context(root, data_dir, "login sign_in", limit=5)
+        assert_true("CODE GRAPH CONTEXT" in context, "code graph context should produce a compact markdown block")
+        assert_true("sign_in" in context and "login" in context, "code graph context should include related symbols")
+        assert_true(int(coverage.get("edgesSent", 0)) > 0, "code graph context should include relationship edges")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_codeworker_codegraph_plugin_is_installable_and_queryable():
+    plugin_root = ROOT / "plugins" / "codeworker-codegraph"
+    manifest = json.loads((plugin_root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    skill_path = plugin_root / "skills" / "codeworker-codegraph" / "SKILL.md"
+    script_path = plugin_root / "scripts" / "query_codeworker_graph.py"
+    skill_script_path = plugin_root / "skills" / "codeworker-codegraph" / "scripts" / "query_codeworker_graph.py"
+    assert_true(manifest["name"] == "codeworker-codegraph", "plugin manifest should use the normalized plugin name")
+    assert_true(manifest.get("skills") == "./skills/", "plugin manifest should expose the skills directory")
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert_true("name: codeworker-codegraph" in skill_text, "skill frontmatter should expose codeworker-codegraph")
+    assert_true(script_path.exists(), "plugin should include the graph query helper script")
+    assert_true(skill_script_path.exists(), "installed skill should be self-contained with its own query helper script")
+
+    root = ROOT / ".tmp" / "regression-codegraph-plugin"
+    data_dir = ROOT / ".tmp" / "regression-codegraph-plugin-index"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sample.py").write_text("def plugin_entry():\n    return 1\n", encoding="utf-8")
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--project",
+                str(root),
+                "--data-dir",
+                str(data_dir),
+                "--rebuild",
+                "--query",
+                "plugin_entry",
+                "--json",
+            ],
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+        assert_true(completed.returncode == 0, f"plugin query script should run successfully: {completed.stderr}")
+        payload = json.loads(completed.stdout)
+        assert_true(payload["coverage"]["nodesSent"] > 0, "plugin query script should return code graph context")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_codegraph_api_helpers_return_status_context_and_coverage():
+    root = ROOT / ".tmp" / "regression-codegraph-api"
+    data_dir = ROOT / ".tmp" / "regression-codegraph-api-index"
+    old_data_dir = server.DATA_DIR
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "service.py").write_text(
+        "def fetch_user(user_id):\n"
+        "    return user_id\n\n"
+        "def render_profile(user_id):\n"
+        "    return fetch_user(user_id)\n",
+        encoding="utf-8",
+    )
+    try:
+        server.DATA_DIR = data_dir
+        initial = server.code_graph_status_payload(root)
+        assert_true(initial["ready"] is False, "CodeGraph status should report not ready before indexing")
+        payload = server.code_graph_query_payload(root, "render_profile fetch_user", limit=5)
+        assert_true(payload["status"]["ready"] is True, "CodeGraph query should ensure the graph index exists")
+        assert_true(len(payload["nodes"]) >= 1, "CodeGraph query should return symbol nodes")
+        assert_true("CODE GRAPH CONTEXT" in payload["context"], "CodeGraph query should return compact graph context")
+        assert_true(int(payload["coverage"].get("nodesSent", 0)) >= 1, "CodeGraph query should return coverage nodes")
+        assert_true("indexDir" in payload["status"], "CodeGraph status should include indexDir")
+        assert_true(payload["matchedFiles"], "CodeGraph query should return matched files for pinning")
+        assert_true(payload["message"], "CodeGraph query should return a user-facing message")
+        status = server.code_graph_status_payload(root)
+        assert_true(status["sampleSymbols"], "CodeGraph status should return sample symbols for query chips")
+        assert_true(status["sampleFiles"], "CodeGraph status should return sample files for query chips")
+        assert_true(status["indexUpdatedAt"], "CodeGraph status should return indexUpdatedAt")
+        no_match = server.code_graph_query_payload(root, "definitely_missing_symbol_xyz", limit=5)
+        assert_true(no_match["nodes"] == [] and no_match["edges"] == [], "missing symbol should not return false matches")
+        assert_true(no_match["suggestions"], "missing symbol should return usable suggestions")
+        assert_true("definitely_missing_symbol_xyz" in no_match["message"], "missing symbol message should include the query")
+    finally:
+        server.DATA_DIR = old_data_dir
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def test_rag_model_loading_locator_prefers_source_chunks():
     root = ROOT / ".tmp" / "regression-model-locator"
     data_dir = ROOT / ".tmp" / "regression-model-locator-index"
@@ -716,6 +899,34 @@ def test_project_rag_context_without_pins():
         context, coverage = server.build_project_rag_context(root, state, "target_login_flow 在哪裡", "gemma4")
         assert_true(coverage["mode"] == "project-rag", "chat without pins should use project-rag context")
         assert_true("target_login_flow" in context, "project-rag context should include matching chunk")
+    finally:
+        server.DATA_DIR = old_data_dir
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def test_project_rag_rebuilds_graphless_existing_index():
+    root = ROOT / ".tmp" / "regression-graphless-index"
+    data_dir = ROOT / ".tmp" / "regression-graphless-data"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "main.py").write_text("def graphless_entry():\n    return 1\n", encoding="utf-8")
+    old_data_dir = server.DATA_DIR
+    server.DATA_DIR = data_dir
+    try:
+        first = rebuild_index(root, data_dir)
+        db_path = Path(first["database"])
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("DELETE FROM code_edges")
+            conn.execute("DELETE FROM code_nodes")
+            conn.commit()
+        finally:
+            conn.close()
+        result, rebuilt = server.ensure_project_index(root)
+        assert_true(rebuilt is True, "existing RAG index without code graph should be rebuilt after upgrade")
+        assert_true(int(result.get("codeGraph", {}).get("nodes", 0)) > 0, "rebuilt graphless index should include code graph nodes")
     finally:
         server.DATA_DIR = old_data_dir
         shutil.rmtree(root, ignore_errors=True)
@@ -947,6 +1158,199 @@ def test_thread_continuation_generation_loads_requested_thread_history():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_thread_save_updates_default_title_and_restores_project_context():
+    old_threads_dir = server.THREADS_DIR
+    old_active_thread_id = server.ACTIVE_THREAD_ID
+    old_state = (
+        server.STATE.project_path,
+        server.STATE.model_key,
+        server.STATE.model_alias,
+        server.STATE.summary,
+        list(server.STATE.tree),
+        list(server.STATE.files),
+        list(server.STATE.entrypoints),
+        list(server.STATE.tests),
+        list(server.STATE.pinned_files),
+        server.STATE.current_preview_path,
+        list(server.STATE.history),
+        list(server.STATE.transcript),
+        server.STATE.memory_summary,
+        server.STATE.memory_compacted_count,
+        server.STATE.pending_edit,
+        server.STATE.ui_state,
+    )
+    root = ROOT / ".tmp" / "regression-thread-state"
+    threads_dir = root / "threads"
+    shutil.rmtree(root, ignore_errors=True)
+    threads_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.THREADS_DIR = threads_dir
+        server.ACTIVE_THREAD_ID = "default-title-thread"
+        server.save_thread_file(
+            {
+                "id": "default-title-thread",
+                "title": "New chat",
+                "createdAt": 1,
+                "updatedAt": 1,
+                "modelKey": "gemma4",
+                "modelName": "Gemma 4 26B",
+                "projectPath": "",
+                "history": [],
+                "memorySummary": "",
+                "memoryCompactedCount": 0,
+            }
+        )
+        with server.STATE_LOCK:
+            server.STATE.project_path = str(root)
+            server.STATE.model_key = "gemma4"
+            server.STATE.model_alias = server.get_model_alias("gemma4")
+            server.STATE.summary = "project summary"
+            server.STATE.tree = ["src/app.py"]
+            server.STATE.files = [server.ProjectFile(path="src/app.py", size=12, language="Python")]
+            server.STATE.entrypoints = ["src/app.py"]
+            server.STATE.tests = ["tests/test_app.py"]
+            server.STATE.pinned_files = ["src/app.py"]
+            server.STATE.current_preview_path = "src/app.py"
+            server.STATE.history = [{"role": "user", "content": "請分析登入流程涉及哪些檔案？"}]
+            server.STATE.transcript = []
+            server.STATE.memory_summary = "memory"
+            server.STATE.memory_compacted_count = 2
+            server.STATE.pending_edit = {"id": "edit-1", "status": "preview"}
+            server.STATE.ui_state = "ready"
+            server.save_current_thread_locked()
+        saved = server.load_thread_file(server.thread_path("default-title-thread")) or {}
+        assert_true(saved.get("title") != "New chat", "default thread title should update after the first user message")
+        assert_true(saved.get("projectPath") == str(root), "thread should persist project path")
+        assert_true(saved.get("tree") == ["src/app.py"], "thread should persist file tree")
+        assert_true(saved.get("pinnedFiles") == ["src/app.py"], "thread should persist pinned files")
+        assert_true(saved.get("pendingEdit") == {"id": "edit-1", "status": "preview"}, "thread should persist pending edit preview")
+        assert_true(saved.get("transcriptVersion") == 1, "thread should persist transcript version")
+        assert_true(len(saved.get("transcript") or []) == 1, "thread should fallback to history when saving missing transcript")
+        assert_true(saved["transcript"][0]["kind"] == "chat", "history fallback transcript item should be a chat item")
+
+        with server.STATE_LOCK:
+            server.STATE.project_path = "C:/leaked-project"
+            server.STATE.summary = "leaked"
+            server.STATE.tree = ["leaked.py"]
+            server.STATE.files = [server.ProjectFile(path="leaked.py", size=1, language="Python")]
+            server.STATE.pinned_files = ["leaked.py"]
+            server.STATE.current_preview_path = "leaked.py"
+            server.STATE.pending_edit = {"id": "leaked"}
+            server.STATE.transcript = [{"id": "leaked", "kind": "tool-codegraph", "title": "leaked", "createdAt": 1, "data": {}}]
+            server.apply_thread_to_state_locked(
+                {
+                    "id": "empty-thread",
+                    "title": "Empty",
+                    "modelKey": "gemma4",
+                    "history": [],
+                    "projectPath": "",
+                    "memorySummary": "",
+                    "memoryCompactedCount": 0,
+                }
+            )
+            assert_true(server.STATE.project_path is None, "selecting a thread without projectPath should clear previous project path")
+            assert_true(server.STATE.tree == [], "selecting a thread without tree should clear previous file tree")
+            assert_true(server.STATE.pending_edit is None, "selecting a thread without pendingEdit should clear previous edit preview")
+            assert_true(server.STATE.ui_state == "idle", "selecting a thread without project context should return UI to idle")
+            assert_true(server.STATE.transcript == [], "selecting an empty legacy thread should clear previous transcript")
+    finally:
+        server.THREADS_DIR = old_threads_dir
+        server.ACTIVE_THREAD_ID = old_active_thread_id
+        with server.STATE_LOCK:
+            (
+                server.STATE.project_path,
+                server.STATE.model_key,
+                server.STATE.model_alias,
+                server.STATE.summary,
+                server.STATE.tree,
+                server.STATE.files,
+                server.STATE.entrypoints,
+                server.STATE.tests,
+                server.STATE.pinned_files,
+                server.STATE.current_preview_path,
+                server.STATE.history,
+                server.STATE.transcript,
+                server.STATE.memory_summary,
+                server.STATE.memory_compacted_count,
+                server.STATE.pending_edit,
+                server.STATE.ui_state,
+            ) = old_state
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_cleanup_empty_threads_only_removes_e2e_threads():
+    old_threads_dir = server.THREADS_DIR
+    old_active_thread_id = server.ACTIVE_THREAD_ID
+    old_history = list(server.STATE.history)
+    old_transcript = list(server.STATE.transcript)
+    old_memory = server.STATE.memory_summary
+    old_compacted = server.STATE.memory_compacted_count
+    old_pending = server.STATE.pending_edit
+    root = ROOT / ".tmp" / "regression-thread-cleanup"
+    threads_dir = root / "threads"
+    shutil.rmtree(root, ignore_errors=True)
+    threads_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.THREADS_DIR = threads_dir
+        server.ACTIVE_THREAD_ID = "e2e-empty"
+        server.save_thread_file({"id": "e2e-empty", "title": "UI 驗證 1", "history": [], "metadata": {"source": "webui-e2e"}, "modelKey": "gemma4", "createdAt": 1, "updatedAt": 1})
+        server.save_thread_file({"id": "prefix-empty", "title": "UI 驗證 2", "history": [], "modelKey": "gemma4", "createdAt": 1, "updatedAt": 1})
+        server.save_thread_file({"id": "user-empty", "title": "使用者空白", "history": [], "modelKey": "gemma4", "createdAt": 1, "updatedAt": 1})
+        server.save_thread_file({"id": "e2e-with-history", "title": "UI 驗證 3", "history": [{"role": "user", "content": "keep"}], "metadata": {"source": "webui-e2e"}, "modelKey": "gemma4", "createdAt": 1, "updatedAt": 1})
+        with server.STATE_LOCK:
+            data = server.cleanup_empty_threads_locked()
+        assert_true(data["deletedCount"] == 2, "cleanup should remove only empty E2E threads")
+        assert_true(not server.thread_path("e2e-empty").exists(), "cleanup should delete metadata-marked empty E2E thread")
+        assert_true(not server.thread_path("prefix-empty").exists(), "cleanup should delete UI verification empty thread")
+        assert_true(server.thread_path("user-empty").exists(), "cleanup must not delete normal empty user thread")
+        assert_true(server.thread_path("e2e-with-history").exists(), "cleanup must not delete E2E thread with history")
+    finally:
+        server.THREADS_DIR = old_threads_dir
+        server.ACTIVE_THREAD_ID = old_active_thread_id
+        server.STATE.history = old_history
+        server.STATE.transcript = old_transcript
+        server.STATE.memory_summary = old_memory
+        server.STATE.memory_compacted_count = old_compacted
+        server.STATE.pending_edit = old_pending
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_tool_transcript_items_do_not_enter_model_history():
+    old_threads_dir = server.THREADS_DIR
+    old_active_thread_id = server.ACTIVE_THREAD_ID
+    old_history = list(server.STATE.history)
+    old_transcript = list(server.STATE.transcript)
+    root = ROOT / ".tmp" / "regression-transcript-tools"
+    threads_dir = root / "threads"
+    shutil.rmtree(root, ignore_errors=True)
+    threads_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.THREADS_DIR = threads_dir
+        server.ACTIVE_THREAD_ID = "transcript-thread"
+        with server.STATE_LOCK:
+            server.STATE.history = [{"role": "user", "content": "請說明 Form1"}]
+            server.STATE.transcript = []
+            item = server.append_tool_transcript_item_locked(
+                "tool-codegraph",
+                "CodeGraph 查詢",
+                "找到 Form1.cs",
+                {"operation": "query", "matchedFiles": ["Form1.cs"]},
+            )
+        saved = server.load_thread_file(server.thread_path("transcript-thread")) or {}
+        assert_true(item["kind"] == "tool-codegraph", "tool transcript item should keep its kind")
+        assert_true(len(saved.get("history") or []) == 1, "tool transcript item must not be appended to chat history")
+        assert_true(len(saved.get("transcript") or []) == 1, "tool transcript item should be persisted in transcript")
+        model_messages = server.build_history_messages(saved.get("history"), "gemma4")
+        assert_true(all("找到 Form1.cs" not in str(msg.get("content", "")) for msg in model_messages), "tool transcript content must not enter model history")
+    finally:
+        server.THREADS_DIR = old_threads_dir
+        server.ACTIVE_THREAD_ID = old_active_thread_id
+        with server.STATE_LOCK:
+            server.STATE.history = old_history
+            server.STATE.transcript = old_transcript
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_generic_previous_answer_file_generation_defaults_to_markdown():
     history = [
         {"role": "user", "content": "請寫產品說明"},
@@ -1080,6 +1484,52 @@ def test_stream_chat_initializes_model_generation_flag():
     )
 
 
+def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
+    html = (ROOT / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "webui" / "static" / "styles.css").read_text(encoding="utf-8")
+    js = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "webui" / "static" / "js").glob("app-*.js")))
+    assert_true('id="sidebarStatusDetails"' in html, "secondary model and hardware details should be grouped in a disclosure")
+    assert_true('id="fileTreeCount"' in html, "file tree should expose a result count")
+    assert_true('id="aiActivity"' in html and 'id="chatBusyBar"' in html, "chat UI should include a visible busy indicator")
+    assert_true(".sidebar" in css and "grid-template-rows" in css, "sidebar layout should reserve flexible space for the file tree")
+    assert_true(".ai-spinner" in css and "@keyframes aiBusyBar" in css, "busy indicator should have spinner/bar animation styles")
+    assert_true("function setAiBusy" in js, "app should control the AI busy indicator from JS")
+    assert_true("setAiBusy(true" in js and "setAiBusy(false" in js, "chat/analyze flows should toggle the AI busy indicator")
+
+
+def test_static_ui_exposes_codegraph_tools_split_scripts_and_virtual_tree():
+    html = (ROOT / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "webui" / "static" / "styles.css").read_text(encoding="utf-8")
+    js = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "webui" / "static" / "js").glob("app-*.js")))
+    codegraph_js = ROOT / "webui" / "static" / "js" / "app-codegraph.js"
+    tree_js = ROOT / "webui" / "static" / "js" / "app-tree.js"
+    assert_true('id="codeGraphToolbar"' in html, "chat UI should expose a CodeGraph toolbar")
+    assert_true('id="codeGraphResults"' in html, "chat UI should expose CodeGraph results")
+    assert_true('id="structurePanel"' in html, "chat UI should expose project structure analysis results")
+    assert_true('id="codeGraphQueryInput"' not in html, "CodeGraph should reuse the main chat input instead of a second query field")
+    assert_true("查詢關聯" in html, "CodeGraph primary action should clearly describe relationship lookup")
+    assert_true("分析專案檔案結構" in html, "analysis action should be positioned as file-structure analysis")
+    assert_true("/js/app-state.js" in html and "/js/app-main.js" in html, "index should load split plain scripts")
+    assert_true(".codegraph-toolbar" in css and ".codegraph-results" in css, "CodeGraph UI should have dedicated styles")
+    assert_true(".structure-panel" in css and ".structure-grid" in css, "file-structure analysis should have dedicated layout styles")
+    assert_true(codegraph_js.exists(), "CodeGraph behavior should live in a split script")
+    assert_true(tree_js.exists(), "virtual file tree behavior should live in a split script")
+    codegraph_source = codegraph_js.read_text(encoding="utf-8")
+    assert_true("queryCodeGraph" in codegraph_source, "CodeGraph split script should implement query behavior")
+    assert_true("elements.chatInput.value.trim()" in codegraph_source, "CodeGraph query should read the shared chat input")
+    assert_true("renderCodeGraphOperation" in codegraph_source, "CodeGraph operations should render inline progress and results")
+    assert_true("renderCodeGraphStatusPanel" in codegraph_source, "CodeGraph should render a persistent status panel")
+    assert_true("codegraph-chip" in codegraph_source, "CodeGraph should expose clickable query suggestion chips")
+    assert_true("codeGraphLastRebuild" in js, "CodeGraph should preserve rebuild results when a follow-up query runs")
+    assert_true("codeGraphQueryInput" not in js, "split scripts should not keep stale CodeGraph query input references")
+    assert_true("/api/project/structure" in js, "Analyze file structure should use the deterministic structure API")
+    assert_true("pinStructureRecommendedFiles" in js, "file-structure analysis should expose one-click recommended pinning")
+    assert_true("virtualTree" in tree_js.read_text(encoding="utf-8"), "tree split script should implement virtualization state")
+    assert_true("function maintainChatAutoScroll" in js, "streaming chat should use a guarded auto-scroll helper")
+    assert_true("state.chatScroll.followLatest" in js, "streaming chat should track whether the user wants to follow the latest output")
+    assert_true("function appendLiveText" in js and "maintainChatAutoScroll();" in js, "streaming token append should preserve manual scroll position")
+
+
 def main():
     tests = [
         test_no_context_chat_payload,
@@ -1091,13 +1541,19 @@ def main():
         test_hardware_profile_classification_and_recommendations,
         test_llama_launcher_accepts_auto_hardware_args,
         test_launch_webui_restarts_stale_codeworker_server,
+        test_bootstrap_stops_codeworker_runtime_users_before_winpython_update,
         test_hardware_optimization_log_entry_contains_diagnostics,
         test_model_file_matching_does_not_fallback_on_pattern_miss,
+        test_project_structure_classifies_multi_language_files,
         test_http_error_body_is_preserved,
         test_rag_manifest_search_and_stale,
+        test_code_graph_indexes_symbols_and_relationships,
+        test_codeworker_codegraph_plugin_is_installable_and_queryable,
+        test_codegraph_api_helpers_return_status_context_and_coverage,
         test_rag_model_loading_locator_prefers_source_chunks,
         test_rag_chinese_game_speed_query_finds_code,
         test_project_rag_context_without_pins,
+        test_project_rag_rebuilds_graphless_existing_index,
         test_generated_text_file_requires_confirmation,
         test_generation_prompt_infers_multiple_documents_from_previous_answer,
         test_generation_prompt_infers_excel,
@@ -1108,6 +1564,9 @@ def main():
         test_inline_docx_generation_uses_pasted_content_without_model,
         test_previous_answer_docx_generation_uses_history_without_model,
         test_thread_continuation_generation_loads_requested_thread_history,
+        test_thread_save_updates_default_title_and_restores_project_context,
+        test_cleanup_empty_threads_only_removes_e2e_threads,
+        test_tool_transcript_items_do_not_enter_model_history,
         test_generic_previous_answer_file_generation_defaults_to_markdown,
         test_generation_without_project_uses_app_root_and_previous_answer,
         test_generated_pdf_keeps_chinese_text_extractable,
@@ -1116,6 +1575,8 @@ def main():
         test_model_initiated_generation_uses_model_title_for_filename,
         test_generation_system_prompt_is_only_added_for_generation_requests,
         test_stream_chat_initializes_model_generation_flag,
+        test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator,
+        test_static_ui_exposes_codegraph_tools_split_scripts_and_virtual_tree,
         test_gemma_multimodal_payload_and_fallback,
         test_image_metadata_fallback_blocks_guessing,
         test_video_metadata_fallback_blocks_guessing,

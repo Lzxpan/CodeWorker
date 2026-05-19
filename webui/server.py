@@ -12,6 +12,7 @@ import platform
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from core.models import (
     get_model_config as get_registry_model_config,
@@ -42,7 +43,16 @@ from core.hardware import (
 )
 from agent.runtime import confirm_action as confirm_agent_action
 from agent.runtime import run_agent
-from rag.index import impact_analysis, index_dir as rag_index_dir, index_is_stale, rebuild_index, search_index
+from rag.index import (
+    build_code_graph_context,
+    code_graph_status,
+    impact_analysis,
+    index_dir as rag_index_dir,
+    index_is_stale,
+    rebuild_index,
+    search_code_graph,
+    search_index,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -190,11 +200,13 @@ SUPPORTED_IMAGE_MIME_TYPES = {
     "image/webp": ".webp",
 }
 TEXT_UPLOAD_EXTENSIONS = {
-    ".pas", ".dfm", ".dpr", ".dproj", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp",
-    ".java", ".kt", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rust",
-    ".swift", ".lua", ".sql", ".sh", ".bat", ".cmd", ".ps1", ".cs", ".html",
+    ".pas", ".dfm", ".dpr", ".dproj", ".cpp", ".cc", ".cxx", ".c", ".h", ".hh", ".hpp", ".hxx",
+    ".java", ".kt", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rust", ".php", ".rb",
+    ".swift", ".lua", ".sql", ".sh", ".bat", ".cmd", ".ps1", ".cs", ".vb", ".html",
     ".css", ".scss", ".vue", ".svelte", ".json", ".yaml", ".yml", ".xml",
-    ".toml", ".ini", ".csv", ".env", ".txt", ".md", ".tex", ".rtf",
+    ".toml", ".ini", ".config", ".csv", ".env", ".txt", ".md", ".tex", ".rtf",
+    ".csproj", ".vbproj", ".vcxproj", ".filters", ".props", ".targets", ".sln",
+    ".groupproj", ".fmx", ".rc", ".res", ".resx", ".xaml", ".mak", ".mk",
 }
 DOCUMENT_UPLOAD_EXTENSIONS = {".pdf", ".doc", ".docx"}
 AUDIO_UPLOAD_EXTENSIONS = {".mp3", ".wav", ".aac", ".flac", ".m4a", ".ogg"}
@@ -224,10 +236,17 @@ IGNORED_EXTENSIONS = {
 LANGUAGE_BY_EXTENSION = {
     ".py": "Python", ".js": "JavaScript", ".jsx": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript",
     ".java": "Java", ".kt": "Kotlin", ".go": "Go", ".rs": "Rust", ".php": "PHP", ".rb": "Ruby", ".cs": "C#",
-    ".cpp": "C++", ".cc": "C++", ".cxx": "C++", ".c": "C", ".h": "C/C++ Header", ".hpp": "C/C++ Header",
+    ".vb": "Visual Basic", ".pas": "Delphi/Object Pascal", ".dpr": "Delphi", ".dproj": "Delphi Project",
+    ".dfm": "Delphi Form", ".fmx": "Delphi FMX Form", ".groupproj": "Delphi Project Group",
+    ".csproj": ".NET Project", ".vbproj": ".NET Project", ".sln": "Visual Studio Solution",
+    ".vcxproj": "C++ Project", ".filters": "Visual Studio Filters", ".props": "MSBuild", ".targets": "MSBuild",
+    ".cpp": "C++", ".cc": "C++", ".cxx": "C++", ".c": "C", ".h": "C/C++ Header", ".hh": "C/C++ Header",
+    ".hpp": "C/C++ Header", ".hxx": "C/C++ Header",
     ".swift": "Swift", ".m": "Objective-C", ".mm": "Objective-C++", ".scala": "Scala", ".sql": "SQL",
     ".html": "HTML", ".css": "CSS", ".scss": "SCSS", ".vue": "Vue", ".svelte": "Svelte", ".json": "JSON",
-    ".yml": "YAML", ".yaml": "YAML", ".toml": "TOML", ".xml": "XML", ".sh": "Shell", ".bat": "Batch",
+    ".yml": "YAML", ".yaml": "YAML", ".toml": "TOML", ".ini": "INI", ".config": "Config",
+    ".xml": "XML", ".xaml": "XAML", ".resx": "Resource",
+    ".rc": "Resource", ".res": "Resource", ".sh": "Shell", ".bat": "Batch",
     ".cmd": "Batch", ".ps1": "PowerShell", ".md": "Markdown", ".txt": "Text",
     ".pdf": "PDF", ".doc": "Word", ".docx": "Word", ".rtf": "RTF", ".png": "Image", ".jpg": "Image",
     ".jpeg": "Image", ".webp": "Image", ".bmp": "Image", ".svg": "SVG", ".gif": "Image",
@@ -285,6 +304,7 @@ class SessionState:
     pinned_files: List[str] = field(default_factory=list)
     current_preview_path: Optional[str] = None
     history: List[Dict[str, object]] = field(default_factory=list)
+    transcript: List[Dict[str, object]] = field(default_factory=list)
     memory_summary: str = ""
     memory_compacted_count: int = 0
     pending_edit: Optional[Dict[str, object]] = None
@@ -808,6 +828,7 @@ def clear_session(ui_state: str = "idle") -> None:
         STATE.pinned_files = []
         STATE.current_preview_path = None
         STATE.history = []
+        STATE.transcript = []
         STATE.memory_summary = ""
         STATE.memory_compacted_count = 0
         STATE.pending_edit = None
@@ -2621,20 +2642,238 @@ def file_kind_from_path(path: str) -> str:
     return "text"
 
 
-def detect_entrypoints(file_paths: List[str]) -> List[str]:
-    patterns = [
-        r"(^|/)(package\.json|pyproject\.toml|requirements\.txt|go\.mod|cargo\.toml|pom\.xml|build\.gradle|build\.gradle\.kts)$",
-        r"(^|/)(app|main|index|server|manage)\.(py|js|ts|tsx|jsx|go|rs|php|rb|cs|java)$",
-        r"(^|/)src/(main|index|app|server)\.(ts|tsx|js|jsx|py|go|rs)$",
+STRUCTURE_CATEGORY_KEYS = [
+    "entrypoints",
+    "projectConfigs",
+    "sourceFiles",
+    "uiFiles",
+    "assetFiles",
+    "testFiles",
+    "generatedFiles",
+    "ignoredBuildOutputs",
+]
+
+SOURCE_EXTENSIONS = {
+    ".cs", ".vb", ".pas", ".dpr", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+    ".js", ".jsx", ".ts", ".tsx", ".py", ".java", ".kt", ".go", ".rs", ".php", ".rb",
+    ".swift", ".lua",
+}
+PROJECT_CONFIG_FILENAMES = {
+    "package.json", "pnpm-lock.yaml", "yarn.lock", "package-lock.json", "vite.config.js",
+    "vite.config.ts", "next.config.js", "next.config.mjs", "next.config.ts", "pyproject.toml",
+    "requirements.txt", "setup.py", "setup.cfg", "tox.ini", "poetry.lock", "pom.xml",
+    "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "go.mod",
+    "go.sum", "cargo.toml", "cargo.lock", "composer.json", "gemfile", "cmakelists.txt",
+    "makefile",
+}
+PROJECT_CONFIG_EXTENSIONS = {
+    ".csproj", ".vbproj", ".sln", ".dproj", ".groupproj", ".vcxproj", ".filters", ".props", ".targets",
+}
+UI_EXTENSIONS = {".dfm", ".fmx", ".xaml", ".resx"}
+ASSET_RESOURCE_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS | AUDIO_UPLOAD_EXTENSIONS | VIDEO_UPLOAD_EXTENSIONS | {".rc", ".res", ".ico"}
+BUILD_OUTPUT_DIRS = {
+    "bin", "obj", ".vs", "dist", "build", "target", "out", ".cache", "coverage", ".next", ".nuxt",
+    "debug", "release", "x64", "x86", "win32",
+}
+GENERATED_FILE_TOKENS = {
+    ".designer.", ".g.", ".generated.", ".assemblyinfo.", ".globalusings.",
+}
+ENTRYPOINT_FILENAMES = {
+    "program.cs", "program.vb", "startup.cs", "app.xaml", "mainwindow.xaml",
+    "project1.dpr", "main.c", "main.cpp", "main.cc", "main.cxx", "main.py", "app.py",
+    "manage.py", "index.js", "index.ts", "index.tsx", "main.js", "main.ts", "main.tsx",
+    "app.js", "app.ts", "app.tsx", "server.js", "server.ts", "main.go", "main.rs",
+    "main.java", "application.kt",
+}
+
+
+def path_parts_lower(path: str) -> Tuple[str, ...]:
+    return tuple(part.lower() for part in PurePosixPath(path.replace("\\", "/")).parts if part)
+
+
+def path_name_lower(path: str) -> str:
+    return PurePosixPath(path.replace("\\", "/")).name.lower()
+
+
+def path_suffix_lower(path: str) -> str:
+    return PurePosixPath(path.replace("\\", "/")).suffix.lower()
+
+
+def is_build_output_path(path: str) -> bool:
+    parts = path_parts_lower(path)
+    return any(part in BUILD_OUTPUT_DIRS for part in parts)
+
+
+def is_generated_file_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    return is_build_output_path(path) or any(token in lowered for token in GENERATED_FILE_TOKENS)
+
+
+def is_project_config_path(path: str) -> bool:
+    name = path_name_lower(path)
+    lowered = path.replace("\\", "/").lower()
+    return name in PROJECT_CONFIG_FILENAMES or path_suffix_lower(path) in PROJECT_CONFIG_EXTENSIONS or lowered.endswith(".vcxproj.filters")
+
+
+def is_entrypoint_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    name = path_name_lower(path)
+    if name in ENTRYPOINT_FILENAMES:
+        return True
+    patterns = (
+        r"(^|/)src/(main|index|app|server)\.(ts|tsx|js|jsx|py|go|rs|java|kt)$",
+        r"(^|/)(cmd/[^/]+/main\.go)$",
+        r"(^|/)src/main/(java|kotlin)/.+\.(java|kt)$",
+        r"(^|/)src/main\.(c|cc|cpp|cxx)$",
+        r"(^|/)(winmain|wwinmain)\.(c|cc|cpp|cxx)$",
+    )
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def is_test_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    parts = path_parts_lower(path)
+    name = path_name_lower(path)
+    return (
+        any(part in {"test", "tests", "__tests__", "spec", "specs"} for part in parts)
+        or ".spec." in lowered
+        or ".test." in lowered
+        or name.startswith("test_")
+        or name.endswith("_test.go")
+        or name.endswith("test.java")
+        or name.endswith("tests.cs")
+    )
+
+
+def is_ui_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    name = path_name_lower(path)
+    suffix = path_suffix_lower(path)
+    return (
+        suffix in UI_EXTENSIONS
+        or ".designer." in lowered
+        or re.match(r"form\d*\.((cs)|(vb))$", name) is not None
+        or name in {"mainwindow.xaml", "app.xaml"}
+        or "/my project/" in f"/{lowered}"
+    )
+
+
+def is_asset_path(path: str) -> bool:
+    parts = path_parts_lower(path)
+    suffix = path_suffix_lower(path)
+    return (
+        suffix in ASSET_RESOURCE_EXTENSIONS
+        or any(part in {"assets", "asset", "resources", "resource", "content", "res", "wwwroot", "media", "images", "sounds", "audio", "video"} for part in parts)
+    )
+
+
+def is_source_path(path: str) -> bool:
+    return path_suffix_lower(path) in SOURCE_EXTENSIONS
+
+
+def dedupe_paths(paths: Iterable[str], limit: Optional[int] = None) -> List[str]:
+    seen: Set[str] = set()
+    result: List[str] = []
+    for path in paths:
+        normalized = path.replace("\\", "/")
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized)
+        if limit and len(result) >= limit:
+            break
+    return result
+
+
+def make_recommended_pins(categories: Dict[str, List[str]], limit: int = 16) -> List[str]:
+    ordered: List[str] = []
+    ordered.extend(categories.get("entrypoints", []))
+    ordered.extend(categories.get("projectConfigs", []))
+    ordered.extend(categories.get("sourceFiles", [])[:8])
+    ordered.extend(categories.get("uiFiles", [])[:4])
+    ordered.extend(categories.get("testFiles", [])[:3])
+    ignored = {path.lower() for path in categories.get("ignoredBuildOutputs", [])}
+    generated = {path.lower() for path in categories.get("generatedFiles", []) if path.lower() not in {item.lower() for item in categories.get("uiFiles", [])}}
+    return dedupe_paths((path for path in ordered if path.lower() not in ignored and path.lower() not in generated), limit)
+
+
+def classify_project_structure_paths(file_paths: List[str]) -> Dict[str, List[str]]:
+    categories: Dict[str, List[str]] = {key: [] for key in STRUCTURE_CATEGORY_KEYS}
+    for path in sorted(dedupe_paths(file_paths), key=lambda item: item.lower()):
+        ignored = is_build_output_path(path)
+        generated = is_generated_file_path(path)
+        if ignored:
+            categories["ignoredBuildOutputs"].append(path)
+        elif generated:
+            categories["generatedFiles"].append(path)
+        if is_entrypoint_path(path) and not ignored:
+            categories["entrypoints"].append(path)
+        if is_project_config_path(path) and not ignored:
+            categories["projectConfigs"].append(path)
+        if is_ui_path(path) and not ignored:
+            categories["uiFiles"].append(path)
+        if is_asset_path(path) and not ignored:
+            categories["assetFiles"].append(path)
+        if is_test_path(path) and not ignored:
+            categories["testFiles"].append(path)
+        if is_source_path(path) and not ignored and not is_test_path(path):
+            categories["sourceFiles"].append(path)
+    return {key: dedupe_paths(value, 80) for key, value in categories.items()}
+
+
+def build_project_structure(project_root: Path, files: List[ProjectFile]) -> Dict[str, object]:
+    file_paths = [file.path for file in files]
+    categories = classify_project_structure_paths(file_paths)
+    recommended_pins = make_recommended_pins(categories)
+    category_counts = {key: len(value) for key, value in categories.items()}
+    total_size = sum(file.size for file in files)
+    summary = build_structure_summary(project_root, files, categories, recommended_pins)
+    return {
+        "projectPath": str(project_root),
+        "categories": categories,
+        "recommendedPins": recommended_pins,
+        "counts": {
+            "totalFiles": len(files),
+            "totalBytes": total_size,
+            "categories": category_counts,
+            "languages": language_breakdown(files),
+        },
+        "summary": summary,
+    }
+
+
+def build_structure_summary(
+    project_root: Path,
+    files: List[ProjectFile],
+    categories: Dict[str, List[str]],
+    recommended_pins: List[str],
+) -> str:
+    total_size = sum(file.size for file in files)
+    entrypoints = categories.get("entrypoints", [])
+    tests = categories.get("testFiles", [])
+    configs = categories.get("projectConfigs", [])
+    ignored = categories.get("ignoredBuildOutputs", [])
+    lines = [
+        f"專案路徑: {project_root}",
+        f"檔案數量(已掃描): {len(files)}",
+        f"估計文字檔總大小: {total_size} bytes",
+        "主要語言: " + (", ".join(language_breakdown(files)) if files else "無"),
+        "可能入口檔案: " + (", ".join(entrypoints[:8]) if entrypoints else "未找到明確入口檔案"),
+        "專案/建置設定: " + (", ".join(configs[:8]) if configs else "未找到專案設定檔"),
+        "測試相關檔案: " + (", ".join(tests[:8]) if tests else "未找到測試檔案"),
+        "建議優先釘選: " + (", ".join(recommended_pins[:10]) if recommended_pins else "尚無建議釘選檔案"),
+        "可忽略產物: " + (", ".join(ignored[:8]) if ignored else "未掃描到明確 build output"),
     ]
-    return [path for path in file_paths if any(re.search(pattern, path.lower()) for pattern in patterns)][:12]
+    return "\n".join(lines)
+
+
+def detect_entrypoints(file_paths: List[str]) -> List[str]:
+    return classify_project_structure_paths(file_paths).get("entrypoints", [])[:12]
 
 
 def detect_test_locations(file_paths: List[str]) -> List[str]:
-    return [
-        path for path in file_paths
-        if any(token in path.lower() for token in ["/test", "/tests", "__tests__", ".spec.", ".test."])
-    ][:20]
+    return classify_project_structure_paths(file_paths).get("testFiles", [])[:20]
 
 
 def language_breakdown(files: List[ProjectFile]) -> List[str]:
@@ -2652,8 +2891,8 @@ def build_summary(project_root: Path, files: List[ProjectFile], entrypoints: Lis
         f"檔案數量(已掃描): {len(files)}",
         f"估計文字檔總大小: {total_size} bytes",
         "主要語言: " + (", ".join(language_breakdown(files)) if files else "無"),
-        "可能入口檔案: " + (", ".join(entrypoints[:8]) if entrypoints else "未明確找到"),
-        "測試相關檔案: " + (", ".join(tests[:8]) if tests else "未明確找到"),
+        "可能入口檔案: " + (", ".join(entrypoints[:8]) if entrypoints else "未找到明確入口檔案"),
+        "測試相關檔案: " + (", ".join(tests[:8]) if tests else "未找到測試檔案"),
     ]
     return "\n".join(lines)
 
@@ -3279,6 +3518,17 @@ def public_generated_action(action: Dict[str, object]) -> Dict[str, object]:
         "overwrites": action.get("overwrites"),
         "sizeBytes": action.get("sizeBytes", 0),
     }
+
+
+def append_generated_actions_transcript_locked(public_actions: List[Dict[str, object]], message: str = "") -> Optional[Dict[str, object]]:
+    if not public_actions:
+        return None
+    return append_tool_transcript_item_locked(
+        "action-generated-file",
+        "檔案預覽",
+        message or "檔案預覽已準備完成，確認後才會寫入。",
+        {"pendingActions": public_actions, "pendingAction": public_actions[0]},
+    )
 
 
 def infer_generation_root_from_action(action: Dict[str, object], target: Path) -> Optional[Path]:
@@ -4127,6 +4377,112 @@ def build_stream_reply_text(reasoning: str, content: str) -> str:
     return "\n\n".join(parts).strip()
 
 
+TRANSCRIPT_VERSION = 1
+
+
+def make_transcript_item(
+    kind: str,
+    title: str = "",
+    content: str = "",
+    role: str = "",
+    data: Optional[Dict[str, object]] = None,
+    created_at: Optional[float] = None,
+) -> Dict[str, object]:
+    return {
+        "id": uuid.uuid4().hex,
+        "kind": kind,
+        "role": role,
+        "title": title,
+        "content": content,
+        "createdAt": created_at or current_timestamp(),
+        "data": data if isinstance(data, dict) else {},
+    }
+
+
+def transcript_item_from_history(item: Dict[str, object]) -> Optional[Dict[str, object]]:
+    role = str(item.get("role", "")).strip()
+    if role not in {"user", "assistant"}:
+        return None
+    content = str(item.get("content", "") or "")
+    if not content and not item.get("attachments"):
+        return None
+    data: Dict[str, object] = {}
+    for key in ("attachments", "modelKey", "modelName", "contextUsed", "kind"):
+        if key in item:
+            data[key] = item.get(key)
+    title = "User" if role == "user" else str(item.get("modelName") or "Assistant")
+    return make_transcript_item("chat", title=title, content=content, role=role, data=data)
+
+
+def transcript_from_history(history: object) -> List[Dict[str, object]]:
+    if not isinstance(history, list):
+        return []
+    items: List[Dict[str, object]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        item = transcript_item_from_history(entry)
+        if item:
+            items.append(item)
+    return items
+
+
+def normalize_transcript_item(item: object) -> Optional[Dict[str, object]]:
+    if not isinstance(item, dict):
+        return None
+    kind = str(item.get("kind") or "").strip()
+    if not kind:
+        return None
+    data = item.get("data")
+    try:
+        created_at = float(item.get("createdAt") or current_timestamp())
+    except (TypeError, ValueError):
+        created_at = current_timestamp()
+    return {
+        "id": str(item.get("id") or uuid.uuid4().hex),
+        "kind": kind,
+        "role": str(item.get("role") or ""),
+        "title": str(item.get("title") or ""),
+        "content": str(item.get("content") or ""),
+        "createdAt": created_at,
+        "data": data if isinstance(data, dict) else {},
+    }
+
+
+def normalize_transcript(transcript: object, history: object) -> List[Dict[str, object]]:
+    if isinstance(transcript, list) and transcript:
+        items = [normalize_transcript_item(item) for item in transcript]
+        return [item for item in items if item]
+    return transcript_from_history(history)
+
+
+def append_transcript_item_locked(
+    kind: str,
+    title: str = "",
+    content: str = "",
+    role: str = "",
+    data: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    item = make_transcript_item(kind, title=title, content=content, role=role, data=data)
+    STATE.transcript.append(item)
+    return item
+
+
+def append_tool_transcript_item_locked(
+    kind: str,
+    title: str,
+    content: str = "",
+    data: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    item = append_transcript_item_locked(kind, title=title, content=content, role="tool", data=data)
+    save_current_thread_locked()
+    return item
+
+
+def transcript_data_copy(data: Dict[str, object]) -> Dict[str, object]:
+    return json.loads(json.dumps(data, ensure_ascii=False))
+
+
 def append_chat_exchange_locked(
     model_key: str,
     message: str,
@@ -4134,6 +4490,7 @@ def append_chat_exchange_locked(
     context: str,
     reply: str,
     assistant_kind: str = "chat",
+    context_coverage: Optional[Dict[str, object]] = None,
 ) -> None:
     STATE.model_key = model_key
     STATE.model_alias = get_model_alias(model_key)
@@ -4141,14 +4498,44 @@ def append_chat_exchange_locked(
     if attachments:
         user_record["attachments"] = [build_history_attachment(item) for item in attachments]
     STATE.history.append(user_record)
-    STATE.history.append({
+    append_transcript_item_locked(
+        "chat",
+        title="User",
+        content=message,
+        role="user",
+        data={
+            "attachments": user_record.get("attachments", []),
+            "contextUsed": bool(context.strip()),
+        },
+    )
+    if context_coverage is not None:
+        append_transcript_item_locked(
+            "status-context",
+            title="Context",
+            role="tool",
+            data={"contextCoverage": context_coverage},
+        )
+    assistant_record = {
         "role": "assistant",
         "content": reply,
         "kind": assistant_kind,
         "modelKey": model_key,
         "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)),
         "contextUsed": bool(context.strip()),
-    })
+    }
+    STATE.history.append(assistant_record)
+    append_transcript_item_locked(
+        "chat",
+        title=str(assistant_record.get("modelName") or model_key),
+        content=reply,
+        role="assistant",
+        data={
+            "kind": assistant_kind,
+            "modelKey": model_key,
+            "modelName": assistant_record.get("modelName"),
+            "contextUsed": bool(context.strip()),
+        },
+    )
     compact_session_memory_locked(model_key)
     save_current_thread_locked()
 
@@ -4165,6 +4552,13 @@ def format_thread_time(timestamp: object) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(numeric))
 
 
+DEFAULT_THREAD_TITLES = {"", "New chat", "新對話"}
+
+
+def is_default_thread_title(title: object) -> bool:
+    return str(title or "").strip() in DEFAULT_THREAD_TITLES
+
+
 def safe_thread_id(value: object) -> str:
     text = re.sub(r"[^a-zA-Z0-9_-]", "", str(value or ""))
     return text[:64]
@@ -4172,6 +4566,165 @@ def safe_thread_id(value: object) -> str:
 
 def thread_path(thread_id: str) -> Path:
     return THREADS_DIR / f"{safe_thread_id(thread_id)}.json"
+
+
+def index_updated_at(project_root: Path) -> str:
+    target_dir = rag_index_dir(DATA_DIR, project_root)
+    candidates = [
+        target_dir / "manifest.json",
+        target_dir / "index.sqlite",
+    ]
+    timestamps = []
+    for path in candidates:
+        try:
+            if path.exists():
+                timestamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    if not timestamps:
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(max(timestamps)))
+
+
+def sample_code_graph_items(project_root: Path, limit: int = 6) -> Dict[str, List[str]]:
+    db_path = rag_index_dir(DATA_DIR, project_root) / "index.sqlite"
+    if not db_path.exists():
+        return {"sampleSymbols": [], "sampleFiles": []}
+    sample_limit = max(1, limit)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        symbols = [
+            str(row["name"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT name, kind, file_path, start_line
+                FROM code_nodes
+                WHERE kind != 'file' AND length(name) > 1
+                ORDER BY
+                  CASE kind WHEN 'class' THEN 0 WHEN 'function' THEN 1 WHEN 'method' THEN 2 ELSE 3 END,
+                  file_path,
+                  start_line
+                LIMIT ?
+                """,
+                (sample_limit,),
+            ).fetchall()
+        ]
+        files = [
+            str(row["file_path"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT file_path
+                FROM code_nodes
+                WHERE kind = 'file'
+                ORDER BY file_path
+                LIMIT ?
+                """,
+                (sample_limit * 4,),
+            ).fetchall()
+        ]
+        files = [path for path in files if not is_generated_file_path(path)]
+    except sqlite3.OperationalError:
+        return {"sampleSymbols": [], "sampleFiles": []}
+    finally:
+        conn.close()
+    return {
+        "sampleSymbols": dedupe_paths(symbols, limit),
+        "sampleFiles": dedupe_paths(files, limit),
+    }
+
+
+def matched_code_graph_files(nodes: List[object], edges: List[object]) -> List[str]:
+    files: List[str] = []
+    for node in nodes:
+        if isinstance(node, dict) and node.get("path"):
+            files.append(str(node.get("path")))
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = edge.get("source", {}) if isinstance(edge.get("source"), dict) else {}
+        target = edge.get("target", {}) if isinstance(edge.get("target"), dict) else {}
+        if source.get("path"):
+            files.append(str(source.get("path")))
+        if target.get("path"):
+            files.append(str(target.get("path")))
+    return dedupe_paths(files, 24)
+
+
+def code_graph_suggestions(status: Dict[str, object], limit: int = 8) -> List[str]:
+    values: List[str] = []
+    for key in ("sampleSymbols", "sampleFiles"):
+        items = status.get(key, [])
+        if isinstance(items, list):
+            values.extend(str(item) for item in items if str(item).strip())
+    return dedupe_paths(values, limit)
+
+
+def code_graph_status_payload(project_root: Path) -> Dict[str, object]:
+    status = dict(code_graph_status(project_root, DATA_DIR))
+    status["indexDir"] = str(rag_index_dir(DATA_DIR, project_root))
+    status["indexUpdatedAt"] = index_updated_at(project_root)
+    status.update(sample_code_graph_items(project_root))
+    return status
+
+
+def code_graph_query_payload(project_root: Path, query: str, limit: int = 8) -> Dict[str, object]:
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        raise ValueError("query is required.")
+    clean_limit = max(1, min(24, int(limit or 8)))
+    ensure_project_index(project_root)
+    result = search_code_graph(project_root, DATA_DIR, clean_query, clean_limit)
+    context, coverage = build_code_graph_context(project_root, DATA_DIR, clean_query, limit=clean_limit)
+    nodes = result.get("nodes", []) if isinstance(result, dict) else []
+    edges = result.get("edges", []) if isinstance(result, dict) else []
+    status = code_graph_status_payload(project_root)
+    matched_files = matched_code_graph_files(nodes, edges)
+    suggestions = code_graph_suggestions(status)
+    if nodes or edges:
+        message = f"CodeGraph found {len(nodes)} symbol(s), {len(edges)} relationship(s), and {len(matched_files)} matched file(s) for: {clean_query}"
+    else:
+        message = f"CodeGraph could not find '{clean_query}' in the current project. Try a symbol, class, function, or file from the suggestions."
+    return {
+        "query": clean_query,
+        "limit": clean_limit,
+        "nodes": nodes,
+        "edges": edges,
+        "matchedFiles": matched_files,
+        "suggestions": suggestions,
+        "message": message,
+        "status": status,
+        "context": context,
+        "coverage": coverage,
+    }
+
+
+def serialize_project_files(files: List[ProjectFile]) -> List[Dict[str, object]]:
+    return [asdict(file) for file in files]
+
+
+def deserialize_project_files(value: object) -> List[ProjectFile]:
+    if not isinstance(value, list):
+        return []
+    files: List[ProjectFile] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        files.append(ProjectFile(path=path, size=size, language=str(item.get("language") or "Other")))
+    return files
+
+
+def string_list(value: object) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
 
 
 def serialize_current_thread_locked(thread_id: Optional[str] = None) -> Dict[str, object]:
@@ -4191,9 +4744,20 @@ def serialize_current_thread_locked(thread_id: Optional[str] = None) -> Dict[str
         "modelKey": STATE.model_key,
         "modelName": str(get_model_capabilities(STATE.model_key).get("display_name", STATE.model_key)),
         "projectPath": STATE.project_path,
+        "summary": STATE.summary,
+        "tree": list(STATE.tree),
+        "files": serialize_project_files(STATE.files),
+        "entrypoints": list(STATE.entrypoints),
+        "tests": list(STATE.tests),
+        "pinnedFiles": list(STATE.pinned_files),
+        "currentPreviewPath": STATE.current_preview_path,
         "history": STATE.history,
+        "transcriptVersion": TRANSCRIPT_VERSION,
+        "transcript": STATE.transcript if STATE.transcript else transcript_from_history(STATE.history),
         "memorySummary": STATE.memory_summary,
         "memoryCompactedCount": STATE.memory_compacted_count,
+        "pendingEdit": STATE.pending_edit,
+        "uiState": STATE.ui_state,
     }
 
 
@@ -4221,8 +4785,14 @@ def save_current_thread_locked() -> None:
     path = thread_path(ACTIVE_THREAD_ID)
     existing = load_thread_file(path) or {}
     thread = serialize_current_thread_locked(ACTIVE_THREAD_ID)
-    thread["title"] = existing.get("title") or thread["title"]
+    existing_title = str(existing.get("title") or "").strip()
+    generated_title = str(thread.get("title") or "").strip()
+    if existing_title and not is_default_thread_title(existing_title):
+        thread["title"] = existing_title
+    else:
+        thread["title"] = generated_title or existing_title or "New chat"
     thread["createdAt"] = existing.get("createdAt") or thread["createdAt"]
+    thread["metadata"] = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
     thread["updatedAt"] = current_timestamp()
     save_thread_file(thread)
 
@@ -4234,11 +4804,33 @@ def apply_thread_to_state_locked(thread: Dict[str, object]) -> None:
     STATE.model_key = model_key
     STATE.model_alias = get_model_alias(model_key)
     STATE.history = list(thread.get("history") or [])
+    STATE.transcript = normalize_transcript(thread.get("transcript"), STATE.history)
     STATE.memory_summary = str(thread.get("memorySummary", ""))
     STATE.memory_compacted_count = int(thread.get("memoryCompactedCount", 0) or 0)
     project_path = str(thread.get("projectPath") or "").strip()
-    if project_path:
-        STATE.project_path = project_path
+    STATE.project_path = project_path or None
+    STATE.summary = str(thread.get("summary") or "")
+    STATE.tree = string_list(thread.get("tree"))
+    STATE.files = deserialize_project_files(thread.get("files"))
+    STATE.entrypoints = string_list(thread.get("entrypoints"))
+    STATE.tests = string_list(thread.get("tests"))
+    STATE.pinned_files = string_list(thread.get("pinnedFiles"))
+    current_preview_path = str(thread.get("currentPreviewPath") or "").strip()
+    STATE.current_preview_path = current_preview_path or None
+    pending_edit = thread.get("pendingEdit")
+    STATE.pending_edit = pending_edit if isinstance(pending_edit, dict) else None
+    requested_ui_state = str(thread.get("uiState") or "").strip()
+    STATE.ui_state = requested_ui_state or ("ready" if STATE.project_path else "idle")
+    if not STATE.project_path:
+        STATE.summary = ""
+        STATE.tree = []
+        STATE.files = []
+        STATE.entrypoints = []
+        STATE.tests = []
+        STATE.pinned_files = []
+        STATE.current_preview_path = None
+        STATE.pending_edit = None
+        STATE.ui_state = "idle"
 
 
 def ensure_active_thread_locked() -> str:
@@ -4291,20 +4883,58 @@ def thread_list_payload_locked() -> Dict[str, object]:
     return {"activeThreadId": active_id, "threads": items}
 
 
-def create_thread_locked(title: str = "") -> Dict[str, object]:
+def create_thread_locked(title: str = "", metadata: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     global ACTIVE_THREAD_ID
     save_current_thread_locked()
     thread_id = uuid.uuid4().hex
     ACTIVE_THREAD_ID = thread_id
     STATE.history = []
+    STATE.transcript = []
     STATE.memory_summary = ""
     STATE.memory_compacted_count = 0
     STATE.pending_edit = None
     thread = serialize_current_thread_locked(thread_id)
     if title.strip():
         thread["title"] = title.strip()[:80]
+    if isinstance(metadata, dict):
+        thread["metadata"] = metadata
     save_thread_file(thread)
     return thread_list_payload_locked()
+
+
+def thread_is_e2e_empty(thread: Dict[str, object]) -> bool:
+    history = thread.get("history") if isinstance(thread.get("history"), list) else []
+    if history:
+        return False
+    metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
+    title = str(thread.get("title") or "")
+    return metadata.get("source") == "webui-e2e" or title.startswith("UI 驗證")
+
+
+def cleanup_empty_threads_locked() -> Dict[str, object]:
+    global ACTIVE_THREAD_ID
+    deleted: List[str] = []
+    for path in THREADS_DIR.glob("*.json"):
+        thread = load_thread_file(path)
+        if not thread or not thread_is_e2e_empty(thread):
+            continue
+        thread_id = str(thread.get("id", ""))
+        try:
+            path.unlink()
+            deleted.append(thread_id)
+        except OSError:
+            continue
+    if ACTIVE_THREAD_ID in deleted:
+        ACTIVE_THREAD_ID = None
+        STATE.history = []
+        STATE.transcript = []
+        STATE.memory_summary = ""
+        STATE.memory_compacted_count = 0
+        STATE.pending_edit = None
+    data = thread_list_payload_locked()
+    data["deletedCount"] = len(deleted)
+    data["deletedThreadIds"] = deleted
+    return data
 
 
 def select_thread_locked(thread_id: str) -> Dict[str, object]:
@@ -4359,6 +4989,7 @@ def delete_thread_locked(thread_id: str) -> Dict[str, object]:
     if ACTIVE_THREAD_ID == thread_id:
         ACTIVE_THREAD_ID = None
         STATE.history = []
+        STATE.transcript = []
         STATE.memory_summary = ""
         STATE.memory_compacted_count = 0
         STATE.pending_edit = None
@@ -5053,12 +5684,20 @@ def ensure_project_index(project_root: Path) -> Tuple[Dict[str, object], bool]:
     db_path = rag_index_dir(DATA_DIR, project_root) / "index.sqlite"
     skeleton_path = rag_index_dir(DATA_DIR, project_root) / "skeleton.json"
     if db_path.exists() and skeleton_path.exists() and not index_is_stale(project_root, DATA_DIR):
+        code_graph = code_graph_status(project_root, DATA_DIR)
+        if not code_graph.get("ready"):
+            return rebuild_index(project_root, DATA_DIR), True
         return {
             "projectHash": rag_index_dir(DATA_DIR, project_root).name,
             "indexDir": str(rag_index_dir(DATA_DIR, project_root)),
             "database": str(db_path),
             "files": len(load_cached_skeleton(project_root)),
             "chunks": 0,
+            "codeGraph": {
+                "nodes": int(code_graph.get("nodeCount", 0) or 0),
+                "edges": int(code_graph.get("edgeCount", 0) or 0),
+                "unresolvedReferences": int(code_graph.get("unresolvedCount", 0) or 0),
+            },
         }, False
     return rebuild_index(project_root, DATA_DIR), True
 
@@ -5094,6 +5733,7 @@ def build_project_rag_context(
     excerpt_chars = 1200 if total_limit >= 20000 else 900
     search_result = search_index(project_root, DATA_DIR, prompt, limit=search_limit)
     matches = search_result.get("matches", []) if isinstance(search_result, dict) else []
+    graph_context, graph_coverage = build_code_graph_context(project_root, DATA_DIR, prompt, limit=10)
     chunks: List[str] = []
     files_sent: List[Dict[str, object]] = []
 
@@ -5112,6 +5752,8 @@ def build_project_rag_context(
         ),
         total_limit,
     )
+
+    append_context_section(chunks, graph_context, total_limit)
 
     if matches:
         match_lines = ["RAG MATCHES FOR USER REQUEST"]
@@ -5195,6 +5837,7 @@ def build_project_rag_context(
         "indexFiles": indexed_files,
         "indexChunks": int(index_result.get("chunks", 0) or 0),
         "indexDir": str(index_result.get("indexDir", "")),
+        "codeGraph": graph_coverage,
     }
     return "\n\n".join(chunks), coverage
 
@@ -6647,13 +7290,16 @@ def build_session_payload(
 ) -> Dict[str, object]:
     files = collect_project_files(project_root)
     file_paths = [file.path for file in files]
-    entrypoints = detect_entrypoints(file_paths)
-    tests = detect_test_locations(file_paths)
-    summary = build_summary(project_root, files, entrypoints, tests)
+    structure = build_project_structure(project_root, files)
+    structure_categories = structure.get("categories", {})
+    entrypoints = list(structure_categories.get("entrypoints", [])) if isinstance(structure_categories, dict) else detect_entrypoints(file_paths)
+    tests = list(structure_categories.get("testFiles", [])) if isinstance(structure_categories, dict) else detect_test_locations(file_paths)
+    summary = str(structure.get("summary") or build_summary(project_root, files, entrypoints, tests))
     tree = file_paths[:MAX_TREE_ITEMS]
     _, model_alias = resolve_model_details(model_key)
     with STATE_LOCK:
         existing_history = list(STATE.history)
+        existing_transcript = list(STATE.transcript)
         existing_memory_summary = STATE.memory_summary
         existing_memory_compacted_count = STATE.memory_compacted_count
         existing_pins = [path for path in STATE.pinned_files if path in file_paths]
@@ -6669,6 +7315,7 @@ def build_session_payload(
         STATE.pinned_files = existing_pins if preserve_pins else []
         STATE.current_preview_path = existing_preview if preserve_history or preserve_pins else None
         STATE.history = existing_history if preserve_history else []
+        STATE.transcript = existing_transcript if preserve_history else []
         STATE.memory_summary = existing_memory_summary if preserve_history else ""
         STATE.memory_compacted_count = existing_memory_compacted_count if preserve_history else 0
         STATE.pending_edit = None
@@ -6682,6 +7329,7 @@ def build_session_payload(
         "tree": tree,
         "entrypoints": entrypoints,
         "tests": tests,
+        "structure": structure,
         "fileCount": len(files),
         "uiState": "ready",
     }
@@ -6848,6 +7496,8 @@ def get_status_payload_unlocked() -> Dict[str, object]:
             "pinnedFiles": STATE.pinned_files,
             "currentPreviewPath": STATE.current_preview_path,
             "history": STATE.history[-20:],
+            "transcriptVersion": TRANSCRIPT_VERSION,
+            "transcript": STATE.transcript,
             "memorySummary": STATE.memory_summary,
             "memoryCompactedCount": STATE.memory_compacted_count,
             "pendingEdit": STATE.pending_edit,
@@ -6930,6 +7580,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/threads":
             self.handle_threads_list()
             return
+        if parsed.path == "/api/codegraph/status":
+            self.handle_codegraph_status()
+            return
+        if parsed.path == "/api/project/structure":
+            self.handle_project_structure()
+            return
         if parsed.path == "/api/media-assessment":
             json_response(self, {"ok": True, "data": get_media_analysis_assessment()})
             return
@@ -6985,6 +7641,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/threads":
             self.handle_threads_create()
             return
+        if parsed.path == "/api/threads/cleanup-empty":
+            self.handle_threads_cleanup_empty()
+            return
         if parsed.path.startswith("/api/threads/") and parsed.path.endswith("/select"):
             self.handle_threads_select(parsed.path.split("/")[-2])
             return
@@ -6993,6 +7652,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/rag/search":
             self.handle_rag_search()
+            return
+        if parsed.path == "/api/codegraph/query":
+            self.handle_codegraph_query()
             return
         if parsed.path == "/api/agent/run":
             self.handle_agent_run()
@@ -7062,11 +7724,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             title = str(payload.get("title", "")).strip()
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None
             with STATE_LOCK:
-                data = create_thread_locked(title)
+                data = create_thread_locked(title, metadata=metadata)
             json_response(self, {"ok": True, "data": data})
         except Exception as exc:
             error_response(self, make_error("THREAD_CREATE_FAILED", "Failed to create thread.", str(exc)))
+
+    def handle_threads_cleanup_empty(self) -> None:
+        try:
+            with STATE_LOCK:
+                data = cleanup_empty_threads_locked()
+                status = get_status_payload_unlocked()
+            json_response(self, {"ok": True, "data": {**data, "status": status}})
+        except Exception as exc:
+            error_response(self, make_error("THREAD_CLEANUP_FAILED", "Failed to clean up empty test threads.", str(exc)))
 
     def handle_threads_select(self, thread_id: str) -> None:
         try:
@@ -7204,6 +7876,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             requests = parse_generation_requests(payload, history_snapshot)
             actions = [create_generated_file_preview(project_root, request) for request in requests]
             public_actions = [public_generated_action(action) for action in actions]
+            with STATE_LOCK:
+                transcript_item = append_generated_actions_transcript_locked(public_actions)
             json_response(
                 self,
                 {
@@ -7211,6 +7885,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "data": {
                         "pendingAction": public_actions[0] if public_actions else None,
                         "pendingActions": public_actions,
+                        "transcriptItem": transcript_item,
                     },
                 },
             )
@@ -7248,12 +7923,81 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_index_rebuild(self) -> None:
         try:
             project_root = self.get_ready_project_root()
+            started = time.perf_counter()
             result = rebuild_index(project_root, DATA_DIR)
+            result["durationMs"] = int((time.perf_counter() - started) * 1000)
+            result["indexUpdatedAt"] = index_updated_at(project_root)
+            result.update(sample_code_graph_items(project_root))
+            with STATE_LOCK:
+                transcript_item = append_tool_transcript_item_locked(
+                    "tool-codegraph",
+                    "重新掃描索引",
+                    "",
+                    {"operation": "rebuild", "result": transcript_data_copy(result)},
+                )
+            result["transcriptItem"] = transcript_item
             json_response(self, {"ok": True, "data": result})
         except ValueError as exc:
             error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
         except Exception as exc:
             error_response(self, make_error("INDEX_FAILED", "Rebuild index failed.", traceback.format_exc() or str(exc)))
+
+    def handle_codegraph_status(self) -> None:
+        try:
+            project_root = self.get_ready_project_root()
+            json_response(self, {"ok": True, "data": code_graph_status_payload(project_root)})
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("CODEGRAPH_STATUS_FAILED", "CodeGraph status failed.", str(exc)))
+
+    def handle_project_structure(self) -> None:
+        try:
+            project_root = self.get_ready_project_root()
+            with STATE_LOCK:
+                files = list(STATE.files)
+            if not files:
+                files = collect_project_files(project_root)
+            data = build_project_structure(project_root, files)
+            with STATE_LOCK:
+                transcript_item = append_tool_transcript_item_locked(
+                    "tool-structure",
+                    "分析專案檔案結構",
+                    "",
+                    {"structure": transcript_data_copy(data)},
+                )
+            data["transcriptItem"] = transcript_item
+            json_response(self, {"ok": True, "data": data})
+        except ValueError as exc:
+            error_response(self, make_error("PROJECT_NOT_READY", "Project is not ready.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("PROJECT_STRUCTURE_FAILED", "Project structure analysis failed.", str(exc)))
+
+    def handle_codegraph_query(self) -> None:
+        try:
+            payload = self.read_json_body()
+            query = str(payload.get("query", "")).strip()
+            limit = int(payload.get("limit", 8) or 8)
+            project_root = self.get_ready_project_root()
+            data = code_graph_query_payload(project_root, query, limit)
+            title = "CodeGraph 查詢"
+            content = str(data.get("message") or "")
+            with STATE_LOCK:
+                transcript_item = append_tool_transcript_item_locked(
+                    "tool-codegraph",
+                    title,
+                    content,
+                    {"operation": "query", "result": transcript_data_copy(data)},
+                )
+            data["transcriptItem"] = transcript_item
+            json_response(self, {"ok": True, "data": data})
+        except ValueError as exc:
+            details = str(exc)
+            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "CODEGRAPH_QUERY_FAILED"
+            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "CodeGraph query failed."
+            error_response(self, make_error(code, message, details))
+        except Exception as exc:
+            error_response(self, make_error("CODEGRAPH_QUERY_FAILED", "CodeGraph query failed.", str(exc)))
 
     def handle_rag_search(self) -> None:
         try:
@@ -7264,6 +8008,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             project_root = self.get_ready_project_root()
             ensure_project_index(project_root)
             result = search_index(project_root, DATA_DIR, query, int(payload.get("limit", 8) or 8))
+            result["codeGraph"] = search_code_graph(project_root, DATA_DIR, query, int(payload.get("limit", 8) or 8))
             json_response(self, {"ok": True, "data": result})
         except ValueError as exc:
             message = "Project is not ready." if str(exc) == "請先完成開啟專案。" else "RAG search failed."
@@ -7428,6 +8173,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)),
                     "contextUsed": bool(context.strip()),
                 })
+                append_transcript_item_locked(
+                    "chat",
+                    title=str(get_model_capabilities(model_key).get("display_name", model_key)),
+                    content=reply,
+                    role="assistant",
+                    data={"kind": "analysis", "modelKey": model_key, "contextUsed": bool(context.strip())},
+                )
                 compact_session_memory_locked(model_key)
                 save_current_thread_locked()
             json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": context_coverage}})
@@ -7525,7 +8277,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 public_actions = [public_generated_action(action) for action in actions]
                 reply = "已根據你貼上的內容建立檔案預覽，確認後才會寫入。"
                 with STATE_LOCK:
-                    append_chat_exchange_locked(model_key, message, attachments, "", reply)
+                    append_chat_exchange_locked(model_key, message, attachments, "", reply, context_coverage={"mode": "direct-file-generation", "files": len(public_actions)})
+                    transcript_item = append_generated_actions_transcript_locked(public_actions, reply)
                 json_response(
                     self,
                     {
@@ -7536,6 +8289,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                             "contextCoverage": {"mode": "direct-file-generation", "files": len(public_actions)},
                             "pendingAction": public_actions[0] if public_actions else None,
                             "pendingActions": public_actions,
+                            "transcriptItem": transcript_item,
                         },
                     },
                 )
@@ -7566,7 +8320,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     )
                 )
             with STATE_LOCK:
-                append_chat_exchange_locked(model_key, message, attachments, context, reply)
+                append_chat_exchange_locked(model_key, message, attachments, context, reply, context_coverage=context_coverage)
             json_response(self, {"ok": True, "data": {"reply": reply, "modelKey": model_key, "contextCoverage": context_coverage, "attachmentFallback": fallback_info}})
         except ModelReplyError as exc:
             error_response(self, exc.error)
@@ -7715,7 +8469,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         },
                     )
                 with STATE_LOCK:
-                    append_chat_exchange_locked(model_key, message, attachments, "", reply)
+                    append_chat_exchange_locked(model_key, message, attachments, "", reply, context_coverage={"mode": "direct-file-generation", "files": len(public_actions)})
+                    append_generated_actions_transcript_locked(public_actions, reply)
                 write_sse_event(self, "done", {"reply": reply, "modelKey": model_key, "modelName": str(get_model_capabilities(model_key).get("display_name", model_key)), "contextCoverage": {"mode": "direct-file-generation", "files": len(public_actions)}})
                 return
             write_sse_event(self, "status", {"message": "啟動本地模型", "modelKey": model_key})
@@ -7777,13 +8532,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if not reply:
                 raise ModelReplyError(make_error("MODEL_EMPTY_REPLY", "模型沒有產生可顯示的最終答案。", "", extra={"modelKey": model_key}))
             with STATE_LOCK:
-                append_chat_exchange_locked(model_key, message, attachments, context, reply)
+                append_chat_exchange_locked(model_key, message, attachments, context, reply, context_coverage=context_coverage)
             if file_generation_requested:
                 try:
                     generation_requests = build_generation_requests_from_model_reply(message, content or reply)
                     generated_actions = [create_generated_file_preview(generation_root, request) for request in generation_requests]
                     public_actions = [public_generated_action(action) for action in generated_actions]
                     if public_actions:
+                        with STATE_LOCK:
+                            append_generated_actions_transcript_locked(public_actions, "已根據模型回覆建立檔案預覽，確認後才會寫入。")
                         write_sse_event(
                             self,
                             "generated_file_preview",
@@ -7812,7 +8569,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             partial_reply = build_stream_reply_text("".join(reasoning_parts), "".join(content_parts))
             if partial_reply:
                 with STATE_LOCK:
-                    append_chat_exchange_locked(model_key, message, attachments, context, partial_reply, assistant_kind="chat-partial")
+                    append_chat_exchange_locked(model_key, message, attachments, context, partial_reply, assistant_kind="chat-partial", context_coverage=context_coverage)
             write_sse_event(self, "error", make_error("MODEL_START_FAILED", "Chat failed.", str(exc), extra={"modelKey": model_key}))
 
     def handle_edit_plan(self) -> None:
@@ -7848,8 +8605,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             reply_text = format_plan_for_chat(public_plan)
             with STATE_LOCK:
                 STATE.pending_edit = public_plan
-                STATE.history.append({"role": "user", "content": message, "kind": "edit-request"})
-                STATE.history.append({"role": "assistant", "content": reply_text, "kind": "edit-plan"})
+                user_record = {"role": "user", "content": message, "kind": "edit-request"}
+                assistant_record = {"role": "assistant", "content": reply_text, "kind": "edit-plan"}
+                STATE.history.append(user_record)
+                STATE.history.append(assistant_record)
+                append_transcript_item_locked("chat", title="User", content=message, role="user", data={"kind": "edit-request"})
+                append_transcript_item_locked("chat", title="Assistant", content=reply_text, role="assistant", data={"kind": "edit-plan"})
                 compact_session_memory_locked(STATE.model_key)
                 save_current_thread_locked()
             setattr(self.server, "_pending_edit_internal", plan)
@@ -7898,6 +8659,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_reset_history(self) -> None:
         with STATE_LOCK:
             STATE.history = []
+            STATE.transcript = []
             STATE.memory_summary = ""
             STATE.memory_compacted_count = 0
             STATE.pending_edit = None

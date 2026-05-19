@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CodeWorker V1.01.001 Web UI</title>
+  <title>CodeWorker V1.01.002 Web UI</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
         <div class="brand-main">
           <div class="brand-mark">CW</div>
           <div class="brand-copy">
-            <h1 id="brandTitle">CodeWorker V1.01.001</h1>
+            <h1 id="brandTitle">CodeWorker V1.01.002</h1>
             <p id="brandSubtitle">本地離線專案分析與對話</p>
           </div>
         </div>
@@ -63,14 +63,17 @@
             <button type="button" class="help-trigger" data-help="open-project" aria-label="開啟專案說明">?</button>
           </div>
           <div class="action-item">
-            <button id="analyzeBtn">分析專案</button>
-            <button type="button" class="help-trigger" data-help="analyze-project" aria-label="分析專案說明">?</button>
+            <button id="analyzeBtn">分析專案檔案結構</button>
+            <button type="button" class="help-trigger" data-help="analyze-project" aria-label="分析專案檔案結構說明">?</button>
           </div>
         </div>
 
-        <p id="firstRunHint" class="hint">第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。</p>
-        <div id="modelStatus" class="model-status meta">模型狀態：尚未檢查</div>
-        <div id="hardwareStatus" class="hardware-status meta" role="status">硬體偵測：尚未檢查</div>
+        <details id="sidebarStatusDetails" class="secondary-tools">
+          <summary>狀態與設定</summary>
+          <p id="firstRunHint" class="hint">第一次開啟專案時，若本機尚未有 runtime 或模型，系統會自動下載。</p>
+          <div id="modelStatus" class="model-status meta">模型狀態：尚未檢查</div>
+          <div id="hardwareStatus" class="hardware-status meta" role="status">硬體偵測：尚未檢查</div>
+        </details>
       </section>
 
       <section id="errorPanel" class="panel error-panel hidden">
@@ -116,8 +119,9 @@
             <h2 id="fileTreeTitle">檔案樹</h2>
             <button type="button" class="help-trigger" data-help="file-tree" aria-label="檔案樹說明">?</button>
           </div>
+          <span id="fileTreeCount" class="tree-count meta" aria-live="polite">0</span>
         </div>
-        <input id="fileTreeSearch" class="tree-search" type="search" placeholder="搜尋檔案，例如 .py 或檔名">
+        <input id="fileTreeSearch" class="tree-search" type="search" aria-label="搜尋檔案" placeholder="搜尋檔案，例如 .py 或檔名">
         <div id="fileTree" class="tree empty">尚未載入檔案。</div>
       </section>
     </aside>
@@ -130,18 +134,39 @@
               <h2 id="chatPanelTitle">對話</h2>
               <button type="button" class="help-trigger" data-help="chat-panel" aria-label="對話說明">?</button>
             </div>
-            <div id="statusBadge" class="status">待命</div>
+            <div class="chat-title-actions">
+              <div id="aiActivity" class="ai-activity hidden" role="status" aria-live="polite" aria-label="AI 正在回覆">
+                <span class="ai-spinner" aria-hidden="true"></span>
+                <span id="aiActivityText">AI 正在回覆</span>
+              </div>
+              <div id="statusBadge" class="status">待命</div>
+            </div>
           </div>
+          <div id="chatBusyBar" class="chat-busy-bar hidden" aria-hidden="true"><span></span></div>
           <div id="chatLog" class="chat-log"></div>
           <div id="contextCoverageBanner" class="context-coverage-banner hidden" data-mode="full">未使用專案上下文。</div>
           <div id="agentPanel" class="agent-panel hidden"></div>
           <div id="pendingActionPanel" class="pending-action-panel hidden"></div>
+          <div id="structurePanel" class="structure-panel hidden" aria-live="polite"></div>
+          <div id="codeGraphToolbar" class="codegraph-toolbar" aria-label="CodeGraph">
+            <div class="codegraph-copy">
+              <strong>CodeGraph</strong>
+              <span id="codeGraphHint" class="meta">在下方對話框輸入 symbol、檔名或問題，再查 callers/callees/imports。</span>
+            </div>
+            <div class="codegraph-controls">
+              <button id="codeGraphUsePromptBtn" type="button">查詢關聯</button>
+              <button id="codeGraphRebuildBtn" type="button" class="ghost">重建索引</button>
+              <button id="codeGraphPinBtn" type="button" class="ghost" disabled>釘選命中文件</button>
+              <button type="button" class="help-trigger" data-help="codegraph" aria-label="CodeGraph 說明">?</button>
+            </div>
+          </div>
+          <div id="codeGraphResults" class="codegraph-results hidden" aria-live="polite">尚未查詢 CodeGraph。</div>
           <form id="chatForm" class="chat-form">
             <div class="field-label-row">
               <label id="chatInputLabel" for="chatInput" class="meta">對話輸入</label>
               <button type="button" class="help-trigger" data-help="chat-input" aria-label="對話輸入說明">?</button>
             </div>
-            <textarea id="chatInput" rows="4" placeholder="輸入你的問題，例如：請分析登入流程涉及哪些檔案？"></textarea>
+            <textarea id="chatInput" rows="4" placeholder="輸入問題、修改需求或 CodeGraph 查詢，例如：Form1、AudioManager、Program.cs、誰呼叫 build_project_rag_context？"></textarea>
             <div id="chatImagePreview" class="chat-image-preview hidden"></div>
             <div class="chat-footer-row">
               <div class="chat-footer-meta">
@@ -212,6 +237,13 @@
     </label>
   </template>
 
-  <script src="/app.js"></script>
+  <script src="/js/app-state.js"></script>
+  <script src="/js/app-core.js"></script>
+  <script src="/js/app-ui.js"></script>
+  <script src="/js/app-tree.js"></script>
+  <script src="/js/app-thread.js"></script>
+  <script src="/js/app-codegraph.js"></script>
+  <script src="/js/app-chat.js"></script>
+  <script src="/js/app-main.js"></script>
 </body>
 </html>

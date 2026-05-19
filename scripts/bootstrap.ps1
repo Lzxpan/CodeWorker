@@ -37,6 +37,41 @@ function Clear-Directory {
     Get-ChildItem -LiteralPath $Path -Force | Remove-Item -Recurse -Force
 }
 
+function Stop-CodeWorkerProcessesUsingRuntime {
+    param(
+        [string]$RootDir,
+        [string]$RuntimeDir
+    )
+
+    if (-not (Test-Path -LiteralPath $RuntimeDir)) {
+        return
+    }
+
+    $root = (Resolve-Path -LiteralPath $RootDir).Path.ToLowerInvariant()
+    $runtime = (Resolve-Path -LiteralPath $RuntimeDir).Path.ToLowerInvariant()
+    $currentPid = $PID
+    $processes = Get-CimInstance Win32_Process | Where-Object {
+        $pidValue = [int]$_.ProcessId
+        if ($pidValue -eq $currentPid) {
+            return $false
+        }
+        $commandLine = ($_.CommandLine + "").ToLowerInvariant()
+        $executablePath = ($_.ExecutablePath + "").ToLowerInvariant()
+        $isCodeWorkerCommand = $commandLine.Contains($root)
+        $usesRuntime = $executablePath.StartsWith($runtime) -or $commandLine.Contains($runtime)
+        return $isCodeWorkerCommand -and $usesRuntime
+    }
+
+    foreach ($process in $processes) {
+        Write-Step ("Stopping CodeWorker process using runtime before update: PID {0}" -f $process.ProcessId)
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+    }
+
+    if ($processes) {
+        Start-Sleep -Milliseconds 800
+    }
+}
+
 function Get-PortablePythonExe {
     $rootDir = Get-RootDir
     $candidates = @(
@@ -464,6 +499,10 @@ function Install-RuntimePackage {
 
     Write-Step "Downloading $($asset.Name)"
     Download-File -Url $asset.Url -Destination $archivePath
+
+    if ($Name -eq "winPython") {
+        Stop-CodeWorkerProcessesUsingRuntime -RootDir $RootDir -RuntimeDir $targetDir
+    }
 
     Write-Step "Installing $Name into '$targetDir'"
     switch ($Config.extract) {

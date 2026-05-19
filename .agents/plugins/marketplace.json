@@ -1,0 +1,20 @@
+{
+  "name": "codeworker-local-marketplace",
+  "interface": {
+    "displayName": "CodeWorker Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "codeworker-codegraph",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codeworker-codegraph"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Engineering"
+    }
+  ]
+}

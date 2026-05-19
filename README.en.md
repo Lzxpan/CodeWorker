@@ -1,4 +1,4 @@
-# CodeWorker V1.01.001
+# CodeWorker V1.01.002
 
 > A privacy-first offline Windows code assistant built around local LLM workflows.
 
@@ -17,9 +17,13 @@ Core capabilities:
 - Hardware auto-optimization: the Web UI detects RAM, CPU, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability, then recommends a model and applies backend, context, threads, and GPU layer settings.
 - Context selector: each model remembers its own context options from `4k` to `256k`; `GLM-4.6` also exposes a `200k` option.
 - Full-project retrieval: once a project is opened, chat can use the local RAG index to search paths, symbols, summaries, and chunks even when no files are pinned.
+- CodeGraph-style semantic index: every RAG rebuild also writes `code_nodes`, `code_edges`, and `code_unresolved_refs` for symbol entry points, imports, calls, extends, and impact navigation.
+- File-structure analysis: deterministic multi-language classification finds entrypoints, core source, project config, UI, assets, tests, and ignored outputs before pinning files.
+- Single transcript stream: AI replies, file-structure analysis, CodeGraph queries, context coverage, and generated-file confirmations are kept in one scrollable transcript.
+- Codex plugin: `plugins\codeworker-codegraph` can be installed in Codex so agents query the local CodeWorker graph before deciding which files to read.
 - Focused context: checked files in the `File tree` become pinned context and take priority over broad RAG.
 - Attachments: code, config, documents, images, audio, and video can be attached. CodeWorker sends extracted text, keyframes, or transcripts when available, otherwise metadata fallback.
-- Threads: the right `240px` thread panel can create, switch, rename, and delete conversations. Each thread keeps its own history and memory.
+- Threads: the right `240px` thread panel can create, switch, rename, and delete conversations. Each thread keeps its own history, memory, and transcript.
 - Model-driven file generation: ask for a document in normal chat. The model produces the content and title, CodeWorker uses the title to name the file, creates a pending preview, and only writes `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx` after confirmation.
 - Agent safety: writes, patches, deletes, and commands become pending actions and only run after user confirmation.
 
@@ -35,6 +39,7 @@ Core capabilities:
 - Without an opened project, chat behaves as normal Q&A. With an opened project and no pinned files, chat uses full-project RAG. With pinned files, pinned context takes priority.
 - Videos are analyzed through `FFmpeg` keyframes, not by sending raw MP4 binaries to the model. Audio and video audio tracks try `whisper.cpp` speech-to-text.
 - File generation and Agent writes require confirmation before touching the project root. After a file is written, the UI shows the final path and filename.
+- The CodeGraph feature follows local semantic-indexing ideas from `colbymchenry/codegraph`; source, author, and license attribution are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
@@ -55,6 +60,21 @@ This prepares the components defined in `config\bootstrap.manifest.json`:
 - `whisper.cpp` plus the speech-to-text model
 - `Gemma 4 26B` / `Qwen 3.5 9B Vision` GGUF files and `mmproj`
 - Python document packages: `pypdf`, `pdfplumber`, `python-docx`, `reportlab`, `python-pptx`, `openpyxl`
+
+### Update an existing installation
+
+```cmd
+git pull
+scripts\bootstrap.cmd
+scripts\launch-webui.cmd
+```
+
+Update checks:
+
+1. The Web UI brand should show `CodeWorker V1.01.002`.
+2. `scripts\bootstrap.cmd` fills missing runtimes, Python packages, model manifest data, and already downloaded assets without redownloading files that still pass validation.
+3. `scripts\launch-webui.cmd` starts `http://127.0.0.1:8764`; if an older CodeWorker Web UI owns the port, it reclaims that process first.
+4. After opening a project, `Analyze file structure`, `Query CodeGraph from input`, `Rescan index`, and normal chat should all append results into the same transcript.
 
 ### Launch the Web UI
 
@@ -80,7 +100,7 @@ scripts\install-aider.cmd
 
 ### Screenshot
 
-![CodeWorker V1.01.001 English Web UI overview](docs/screenshots/webui-overview-en-v101000.png)
+![CodeWorker V1.01.002 English Web UI overview](docs/screenshots/webui-overview-en-v101002.png)
 
 ### General Q&A
 
@@ -92,9 +112,61 @@ scripts\install-aider.cmd
 
 1. Choose the project root in `Project path`.
 2. Click `Open project`.
-3. Click `Analyze project` when the cache should be rebuilt.
+3. Click `Analyze file structure` when many files need to be organized before pinning.
 4. Ask where code lives, which files matter, or how to change a behavior. Without pinned files, CodeWorker searches the whole project through RAG.
 5. Check file names in the `File tree` when you want focused context.
+
+### Analyze File Structure And Pinning
+
+1. Open a project and click `Analyze file structure`.
+2. CodeWorker classifies files by language and toolchain into entrypoints, core source, project configs, UI/forms, assets, tests, generated files, and build outputs.
+3. The result appears as a transcript tool card, so it does not overwrite chat history.
+4. Click `Pin recommended files` to add entrypoints, configs, core source, UI, and tests to pinned files before asking AI to analyze or modify code.
+
+### CodeGraph Relationship Query
+
+Use CodeGraph when you do not yet know which files to pin, or when you want an impact map before editing.
+
+1. Type a current-project symbol, class/function, file name, or question in the chat input, for example `Form1`, `AudioManager`, `Program.cs`, or `who calls build_project_rag_context?`.
+2. Click `Query CodeGraph from input`. This only queries the local SQLite graph; it does not ask AI.
+3. The transcript shows matched symbols, relationships, matched files, nodes/edges/unresolved counts, and next-step guidance.
+4. If the result is relevant, click `Pin matched files`, then press the normal `Send` button so AI answers with those pinned files.
+5. If a new file or symbol is missing, click `Rescan index`. It rebuilds both RAG and CodeGraph indexes, keeps the rebuild summary, and appends a follow-up query card if the input still has a query.
+
+Benefits:
+
+- Find symbols and relationships before reading files, reducing blind exploration in large projects.
+- Check callers/callees/imports/extends before editing, which lowers the risk of missing affected code.
+- Runs through local SQLite and local models; no API key is required and project code is not sent to the cloud.
+- Works well with `Analyze file structure`: classify files first, then use CodeGraph to inspect symbol relationships.
+
+### Single Transcript And Streaming Reading
+
+- Chat, tool results, CodeGraph, file-structure analysis, context coverage, and file confirmations all live in one transcript.
+- During AI streaming, the chat follows only when you are near the bottom. If you scroll up to read older content, it will not force-scroll back down.
+- After switching threads or reloading the page, chat and tool cards replay from persisted `transcript`. Old threads without `transcript` fall back from existing `history`.
+
+### Install The CodeWorker CodeGraph Codex Plugin
+
+CodeWorker also ships a repo-local Codex plugin:
+
+```cmd
+codex plugin install plugins\codeworker-codegraph
+```
+
+After installation, use the `codeworker-codegraph` skill in Codex. Common queries:
+
+```powershell
+runtime\WinPython\python\python.exe C:\Users\Admin\.codex\skills\codeworker-codegraph\scripts\query_codeworker_graph.py --project C:\path\to\project --status
+runtime\WinPython\python\python.exe C:\Users\Admin\.codex\skills\codeworker-codegraph\scripts\query_codeworker_graph.py --project C:\path\to\project --rebuild --query "Form1"
+runtime\WinPython\python\python.exe C:\Users\Admin\.codex\skills\codeworker-codegraph\scripts\query_codeworker_graph.py --project C:\path\to\project --query "AudioManager callers" --json
+```
+
+Use cases:
+
+- Before changing a feature, find related symbols and call relationships.
+- When onboarding to an unfamiliar project, find entrypoints and core files first.
+- To help Codex avoid aimless `rg` / `Read`, use the graph as a navigation map and then read targeted files.
 
 Suggested prompts:
 
@@ -151,6 +223,8 @@ CodeWorker/
 ├─ runtime/       # WinPython, PortableGit, llama.cpp, FFmpeg, whisper.cpp
 ├─ scripts/       # bootstrap, model resolution, server launch, and regression tests
 ├─ webui/         # Python backend, RAG/Agent modules, and frontend assets
+├─ plugins/       # Codex plugins such as codeworker-codegraph
+├─ THIRD_PARTY_NOTICES.md
 ├─ README.md
 ├─ README.zh-TW.md
 └─ README.en.md
@@ -166,9 +240,12 @@ Key files:
 - `webui\core\hardware.py`: detects the hardware profile, chooses the backend, recommends a model, and generates auto-optimization settings.
 - `webui\core\models.py`: model registry, status, and OpenAI-compatible endpoint data.
 - `webui\rag\index.py`: hierarchical project index, SQLite FTS5 fallback, chunk search, and impact hints.
+- `webui\rag\code_graph.py`: CodeGraph-style symbol graph, relationship edges, graph search, and compact graph context.
 - `webui\agent\runtime.py`: ReAct-style Agent, tool calls, pending actions, and audit log.
-- `webui\static\app.js`: frontend chat, context dropdown, threads, attachments, file tree, and streaming.
-- `webui\static\styles.css`: 450px sidebar, main chat, and 240px thread panel.
+- `webui\static\js\app-*.js`: frontend state, API, UI, file tree, threads, chat, CodeGraph, and bootstrapping.
+- `webui\static\styles.css`: 450px sidebar, single transcript chat, input area, and 240px thread panel.
+- `plugins\codeworker-codegraph`: repo-local Codex plugin with the `codeworker-codegraph` skill and `query_codeworker_graph.py` query tool.
+- `THIRD_PARTY_NOTICES.md`: third-party source, author, and license notices.
 
 ---
 
@@ -179,8 +256,9 @@ flowchart LR
     U["User"] --> W["Web UI"]
     W --> K["Context selector per model"]
     W --> T["Thread panel"]
-    W --> O["Open project / Analyze project"]
-    O --> I["Local RAG index / cache"]
+    W --> O["Open project / Analyze file structure"]
+    O --> I["Local RAG index / CodeGraph"]
+    W --> X["CodeGraph query / rescan"]
     W --> P["Pinned files"]
     W --> F["Attachments"]
     W --> G["Model decides file generation"]
@@ -190,24 +268,49 @@ flowchart LR
     T --> S
     K --> S
     G --> A["Auto pending preview"]
+    O --> H["Transcript tool card"]
+    X --> H
     A --> Q["User confirmation"]
     Q --> D["Write generated file"]
     S --> C["Assemble memory / RAG / pinned context / attachments"]
     C --> M["llama.cpp local model server"]
-    M --> R["Streaming reply / reasoning panel"]
+    M --> R["Streaming reply"]
+    R --> H
 ```
 
 Workflow rules:
 
 - Without an opened project, the chat payload only contains the user question, attachments, and conversation memory.
 - With an opened project and no pinned files, RAG searches paths, symbols, summaries, and chunks.
+- `Analyze file structure` and CodeGraph queries are written only to `transcript`; they are not sent into model history.
 - With pinned files, pinned context takes priority.
 - Long-answer continuation uses the previous answer tail instead of resending large `PROJECT RAG CONTEXT`.
 - File generation is triggered through normal chat. The model first produces content and a title, then CodeWorker creates the pending preview. Multi-format requests create multiple previews. Document outputs clean Markdown markers and use a CJK-capable PDF font.
 
+CodeGraph attribution:
+
+- Upstream project: [`colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph)
+- Author / copyright holder: Colby Mchenry
+- License: MIT License
+- CodeWorker implementation: follows the upstream local symbol graph + relationships + SQLite workflow, rewritten as a Python-native lightweight implementation. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ---
 
 ## 7. Version History
+
+### V1.01.002
+
+- updated the Web UI version to `CodeWorker V1.01.002`.
+- integrated chat, AI streaming, file-structure analysis, CodeGraph query / rebuild, context coverage, and generated-file confirmations into one transcript scroll container.
+- added persisted `transcriptVersion: 1` and `transcript` thread data; old threads fall back from existing `history`.
+- kept `history` as the model-context source while tool cards and status cards only enter `transcript`, preventing CodeGraph / analysis cards from being sent to the LLM.
+- repositioned `Analyze project` as `Analyze file structure`, a pre-pin classifier for entrypoints, core source, project configs, UI/forms, assets, tests, generated files, and build outputs.
+- expanded multi-language classification for Delphi / Object Pascal, C, C++, VB, .NET, JS/TS, Python, Java/Kotlin, Go, Rust, PHP, Ruby, and common resource folders.
+- changed the CodeGraph toolbar to use the chat input; query results, no-match suggestions, matched files, rebuild summaries, and pin feedback are appended into the transcript.
+- added regression coverage for `/api/project/structure`, `/api/codegraph/status`, `/api/codegraph/query`, and `POST /api/threads/cleanup-empty`.
+- officially added `scripts\run_webui_e2e.mjs` and `scripts\run_webui_e2e.cmd`, covering three browser E2E rounds, thread cleanup, CodeGraph, file tree virtualization, busy indicator, and responsive layout.
+- added `THIRD_PARTY_NOTICES.md` with attribution for `colbymchenry/codegraph`, author Colby Mchenry, and MIT License.
+- added V1.01.002 Traditional Chinese and English Web UI screenshots for README usage documentation.
 
 ### V1.01.001
 
@@ -218,6 +321,8 @@ Workflow rules:
 - `scripts\launch_llama_server.py` now supports `--n-gpu-layers`, `--flash-attn`, and `--jinja` instead of forcing CPU-only startup.
 - added `logs\hardware-optimization.jsonl` with hardware profile, model recommendation, launch plan, backend, context, threads, GPU layers, model file paths, and log paths.
 - every `llama-server-*.log` starts with `[CODEWORKER_LAUNCH_METADATA]` so the actual command and llama.cpp startup arguments can be inspected.
+- added a CodeGraph-style local semantic index inside the RAG index with `code_nodes`, `code_edges`, and `code_unresolved_refs` so model context receives symbol and relationship maps first.
+- added the `plugins\codeworker-codegraph` Codex plugin for the `codeworker-codegraph` skill and `query_codeworker_graph.py` local graph query script.
 - pending high-end validation: CUDA / Vulkan runtime selection, `Qwen3-Coder 30B A3B`, `GLM-4.6`, large contexts, and GPU offload stability need logs from a high-end PC.
 
 ### V1.01.000
@@ -281,6 +386,13 @@ Workflow rules:
 ## 8. Copyright and License
 
 This project is licensed under [MIT](LICENSE).
+
+CodeGraph notice:
+
+- CodeWorker's CodeGraph-style feature follows the local semantic-indexing and graph-first exploration workflow from [`colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph).
+- `colbymchenry/codegraph` author / copyright holder is Colby Mchenry and it is licensed under MIT License.
+- CodeWorker does not currently vendor the upstream TypeScript package; this repository provides a Python-native lightweight implementation in `webui\rag\code_graph.py`.
+- See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for detailed third-party source and license notes.
 
 If you use CodeWorker inside customer environments or air-gapped networks, verify:
 
