@@ -1,0 +1,39 @@
+{
+  "name": "codeworker-codegraph",
+  "version": "0.1.0",
+  "description": "CodeWorker CodeGraph plugin for Codex. Use it to query CodeWorker's local symbol graph, callers/callees, imports, and RAG context before broad codebase exploration.",
+  "author": {
+    "name": "CodeWorker"
+  },
+  "homepage": "https://github.com/Lzxpan/CodeWorker",
+  "repository": "https://github.com/Lzxpan/CodeWorker",
+  "license": "MIT",
+  "keywords": [
+    "codeworker",
+    "codegraph",
+    "rag",
+    "static-analysis",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CodeWorker CodeGraph",
+    "shortDescription": "Query CodeWorker's local code graph before exploring files",
+    "longDescription": "CodeWorker CodeGraph gives Codex a local-first workflow for codebase exploration. It uses CodeWorker's SQLite RAG and symbol graph index to find entry points, relationships, and impact hints before reading files. This CodeWorker implementation follows graph-first ideas from colbymchenry/codegraph by Colby Mchenry, licensed under MIT.",
+    "developerName": "CodeWorker",
+    "category": "Engineering",
+    "capabilities": [
+      "Read",
+      "Local"
+    ],
+    "websiteURL": "https://github.com/Lzxpan/CodeWorker",
+    "privacyPolicyURL": "https://github.com/Lzxpan/CodeWorker",
+    "termsOfServiceURL": "https://github.com/Lzxpan/CodeWorker",
+    "defaultPrompt": [
+      "Use CodeWorker CodeGraph to find the login flow entry points",
+      "Use CodeWorker CodeGraph before editing the model launch path"
+    ],
+    "brandColor": "#2563EB",
+    "screenshots": []
+  }
+}
