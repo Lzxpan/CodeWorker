@@ -351,10 +351,42 @@ function actionRiskLabel(action) {
   return high ? "高風險" : "需確認";
 }
 
+function renderEditSnippetBlock(label, value) {
+  const text = String(value || "").trim();
+  return `
+    <div class="edit-snippet-block">
+      <div class="meta">${escapeHtml(label)}</div>
+      <pre class="diff-block">${escapeHtml(text || (state.language === "en" ? "Not provided." : "未提供。"))}</pre>
+    </div>
+  `;
+}
+
+function renderEditDetailHtml(detail, fallbackAction = null) {
+  const before = detail?.beforeSnippet || detail?.before || "";
+  const after = detail?.afterSnippet || detail?.after || "";
+  const diff = detail?.diffWindow || detail?.diff || fallbackAction?.diffWindow || fallbackAction?.diff || "";
+  const notes = Array.isArray(detail?.notes) ? detail.notes.filter(Boolean) : [];
+  return `
+    <div class="edit-detail-grid">
+      <div><strong>${escapeHtml(state.language === "en" ? "Location" : "修改位置")}：</strong>${escapeHtml(detail?.location || (state.language === "en" ? "Not provided" : "未提供"))}</div>
+      <div><strong>${escapeHtml(state.language === "en" ? "Target" : "命中函式/區塊")}：</strong>${escapeHtml(detail?.target || (state.language === "en" ? "Not provided" : "未提供"))}</div>
+      <div><strong>${escapeHtml(state.language === "en" ? "Reason" : "原因")}：</strong>${escapeHtml(detail?.reason || detail?.whyHere || fallbackAction?.summary || (state.language === "en" ? "Not provided" : "未提供"))}</div>
+    </div>
+    ${renderEditSnippetBlock(state.language === "en" ? "Original snippet" : "建議替換前片段", before)}
+    ${renderEditSnippetBlock(state.language === "en" ? "Modified snippet" : "建議替換後片段", after)}
+    ${renderEditSnippetBlock("Diff", diff)}
+    ${notes.length ? `<div class="meta">${escapeHtml(state.language === "en" ? "Notes" : "補充說明")}：${escapeHtml(notes.join("；"))}</div>` : ""}
+  `;
+}
+
 function renderEditPlanHtml(plan) {
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const edits = Array.isArray(plan?.edits) ? plan.edits : [];
+  const suggestions = Array.isArray(plan?.suggestions) ? plan.suggestions : [];
   const actionHtml = actions.length
-    ? actions.map((action) => `
+    ? actions.map((action) => {
+      const detail = edits.find((item) => item.path === action.path) || null;
+      return `
       <section class="edit-action-card">
         <div class="tool-card-head">
           <strong>${escapeHtml(action.kind || "action")}</strong>
@@ -363,12 +395,25 @@ function renderEditPlanHtml(plan) {
         <div class="tool-card-body">
           <div><strong>${escapeHtml(state.language === "en" ? "Path" : "檔案")}：</strong>${escapeHtml(action.path || action.command || "")}</div>
           ${action.targetPath ? `<div><strong>${escapeHtml(state.language === "en" ? "Target" : "目標")}：</strong>${escapeHtml(action.targetPath)}</div>` : ""}
-          ${action.summary ? `<div>${escapeHtml(action.summary)}</div>` : ""}
-          <pre class="diff-block">${escapeHtml(action.diffWindow || action.diff || "")}</pre>
+          ${renderEditDetailHtml(detail || {}, action)}
         </div>
       </section>
-    `).join("")
-    : `<div class="tool-card-body">${escapeHtml(state.language === "en" ? "No directly applicable file actions. Review the advisory text and refine the request." : "沒有可直接套用的檔案操作。請查看文字建議後補充需求。")}</div>`;
+    `;
+    }).join("")
+    : suggestions.length
+      ? suggestions.map((item) => `
+        <section class="edit-action-card">
+          <div class="tool-card-head">
+            <strong>${escapeHtml(state.language === "en" ? "Manual suggestion" : "手動修改建議")}</strong>
+            <span class="badge">${escapeHtml(state.language === "en" ? "advisory" : "文字模式")}</span>
+          </div>
+          <div class="tool-card-body">
+            <div><strong>${escapeHtml(state.language === "en" ? "Path" : "檔案")}：</strong>${escapeHtml(item.path || "")}</div>
+            ${renderEditDetailHtml(item, null)}
+          </div>
+        </section>
+      `).join("")
+      : `<div class="tool-card-body">${escapeHtml(state.language === "en" ? "No directly applicable file actions. Review the advisory text and refine the request." : "沒有可直接套用的檔案操作。請查看文字建議後補充需求。")}</div>`;
   const canApply = actions.some((action) => action.status === "pending");
   return `
     <section class="transcript-tool-section edit-plan-status">
@@ -382,7 +427,9 @@ function renderEditPlanHtml(plan) {
       </div>
       <div class="edit-action-list">${actionHtml}</div>
       <div class="tool-action-row">
-        <button type="button" class="primary" data-edit-apply ${canApply ? "" : "disabled"}>${escapeHtml(t("buttons.applyEdit"))}</button>
+        ${canApply
+          ? `<button type="button" class="primary" data-edit-apply>${escapeHtml(t("buttons.applyEdit"))}</button>`
+          : `<button type="button" disabled>${escapeHtml(state.language === "en" ? "No applicable action" : "沒有可套用操作")}</button>`}
         <button type="button" data-git-diff>${escapeHtml(t("buttons.gitDiff"))}</button>
         <button type="button" data-edit-discard>${escapeHtml(t("buttons.discardEdit"))}</button>
       </div>
@@ -441,6 +488,7 @@ async function generateEditPlan() {
   appendMessage("user", message);
   elements.chatInput.value = "";
   setStatus(state.language === "en" ? "Generating edit suggestion" : "正在產生修改建議", true);
+  setAiBusy(true, state.language === "en" ? "AI is generating an edit plan" : "AI 正在產生修改建議");
   try {
     const data = await requestJson("/api/edit/plan", {
       method: "POST",
@@ -454,6 +502,8 @@ async function generateEditPlan() {
   } catch (error) {
     setStatus(state.language === "en" ? "Edit suggestion failed" : "產生建議失敗");
     showError(normalizeError(error, "EDIT_PLAN_FAILED", state.language === "en" ? "Failed to generate edit suggestion." : "產生修改建議失敗。"));
+  } finally {
+    setAiBusy(false);
   }
 }
 

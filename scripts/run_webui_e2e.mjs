@@ -144,6 +144,7 @@ async function installCodeGraphMocks(page) {
     await route.fulfill(ok({ pinnedFiles: body.files || [] }));
   });
   await page.route("**/api/edit/plan", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 180));
     await route.fulfill(ok({
       plan: {
         mode: "precise",
@@ -288,9 +289,16 @@ test.describe("CodeWorker WebUI CodeGraph E2E", () => {
 
       await page.locator("#chatInput").fill("把 Form1 標題改成 New");
       await page.locator("#editPlanBtn").click();
+      await expect(page.locator("#aiActivity")).toBeVisible();
+      await expect(page.locator("#aiActivity")).toContainText(/產生修改建議|edit plan/i);
       await expect(page.locator("#chatLog")).toContainText("修改計畫");
       await expect(page.locator("#chatLog")).toContainText("patch_file");
       await expect(page.locator("#chatLog")).toContainText("Form1.cs");
+      await expect(page.locator("#chatLog")).toContainText("修改位置");
+      await expect(page.locator("#chatLog")).toContainText("建議替換前片段");
+      await expect(page.locator("#chatLog")).toContainText("Text = \"Old\"");
+      await expect(page.locator("#chatLog")).toContainText("Text = \"New\"");
+      await expect(page.locator("#aiActivity")).toBeHidden();
       await page.locator("#chatLog [data-edit-apply]").last().click();
       await expect(page.locator("#chatLog")).toContainText(/修改已套用|Edit applied/);
       await expect(page.locator("#chatLog")).toContainText("111111111111");

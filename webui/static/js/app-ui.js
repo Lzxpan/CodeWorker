@@ -574,8 +574,9 @@ function renderThreads(threads = []) {
 
 function applyTranslations() {
   document.documentElement.lang = t("htmlLang");
-  document.title = t("pageTitle");
-  elements.brandTitle.textContent = t("brandTitle");
+  const appName = state.appName || t("brandTitle");
+  document.title = state.appName ? `${appName} Web UI` : t("pageTitle");
+  elements.brandTitle.textContent = appName;
   elements.brandSubtitle.textContent = t("brandSubtitle");
   elements.langZhBtn.textContent = t("languageSwitch.zh");
   elements.langEnBtn.textContent = t("languageSwitch.en");

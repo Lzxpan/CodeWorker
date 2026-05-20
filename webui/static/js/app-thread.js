@@ -1,5 +1,8 @@
 async function refreshStatus() {
   const data = await requestJson("/api/status");
+  state.appVersion = data.appVersion || state.appVersion;
+  state.appName = data.appName || state.appName;
+  applyTranslations();
   state.projectPath = data.projectPath || "";
   state.modelKey = data.modelKey || "gemma4";
   state.modelCapabilities = data.models || {};

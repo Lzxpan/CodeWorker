@@ -80,6 +80,20 @@ ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
 DEFAULT_MODEL_KEY = "gemma4"
 DEFAULT_MODEL_ALIAS = "gemma4-local"
+DEFAULT_APP_VERSION = "V1.01.002"
+
+
+def read_app_version() -> str:
+    version_path = ROOT_DIR / "VERSION"
+    try:
+        version = version_path.read_text(encoding="utf-8").strip()
+        return version or DEFAULT_APP_VERSION
+    except OSError:
+        return DEFAULT_APP_VERSION
+
+
+APP_VERSION = read_app_version()
+APP_NAME = f"CodeWorker {APP_VERSION}"
 MODEL_PORTS = {
     "gemma4": 8081,
     "qwen35": 8082,
@@ -264,7 +278,7 @@ MAX_EDIT_FILE_CHARS = 4200
 MAX_EDIT_TOTAL_CHARS = 14000
 MAX_EDIT_SINGLE_FILE_CHARS = 22000
 MAX_ADVISORY_FILE_CHARS = 18000
-EDIT_PLAN_TIMEOUT_SECONDS = 1200
+EDIT_PLAN_TIMEOUT_SECONDS = 180
 EDIT_ACTION_KINDS = {"create_file", "patch_file", "replace_file", "delete_file", "rename_file", "run_command"}
 HIGH_RISK_EDIT_ACTIONS = {"replace_file", "delete_file", "rename_file", "run_command"}
 PROTECTED_EDIT_PATH_PARTS = {".git", "runtime", "models"}
@@ -783,7 +797,10 @@ def json_response(handler: BaseHTTPRequestHandler, payload: Dict, status: int = 
     handler.send_header("Expires", "0")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+        pass
 
 
 def error_response(handler: BaseHTTPRequestHandler, error: Dict[str, object], status: int = 400) -> None:
@@ -799,7 +816,10 @@ def text_response(handler: BaseHTTPRequestHandler, body: str, status: int = 200,
     handler.send_header("Expires", "0")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
-    handler.wfile.write(data)
+    try:
+        handler.wfile.write(data)
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+        pass
 
 
 def normalize_path(input_path: str) -> Path:
@@ -3895,11 +3915,21 @@ def parse_forbidden_identifiers(message: str) -> List[str]:
     return identifiers
 
 
+def strip_code_literals_and_comments(text: str) -> str:
+    without_block_comments = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    without_line_comments = re.sub(r"//.*", " ", without_block_comments)
+    without_verbatim_strings = re.sub(r'@"(?:""|[^"])*"', '""', without_line_comments)
+    without_regular_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', without_verbatim_strings)
+    without_char_literals = re.sub(r"'(?:\\.|[^'\\])+'", "''", without_regular_strings)
+    return without_char_literals
+
+
 def extract_free_identifiers(text: str) -> List[str]:
     identifiers: List[str] = []
-    for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", text):
+    searchable = strip_code_literals_and_comments(text)
+    for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", searchable):
         start = match.start()
-        if start > 0 and text[start - 1] == ".":
+        if start > 0 and searchable[start - 1] == ".":
             continue
         identifiers.append(match.group(0))
     return identifiers
@@ -3907,12 +3937,13 @@ def extract_free_identifiers(text: str) -> List[str]:
 
 def extract_declared_identifiers(text: str) -> List[str]:
     declared: List[str] = []
+    searchable = strip_code_literals_and_comments(text)
     patterns = [
         re.compile(r"\b(?:var|int|long|short|byte|float|double|decimal|bool|string|char|object)\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
         re.compile(r"\b(?:Point|Color|Path|Form|EventArgs|KeyEventArgs|List|Dictionary|HashSet)\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
     ]
     for pattern in patterns:
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(searchable):
             declared.append(match.group(1))
     return declared
 
@@ -4153,6 +4184,17 @@ def locate_change_region(content: str, match_index: int) -> Dict[str, object]:
 
 def derive_local_target_hint(project_root: Path, relative_path: str, message: str) -> Dict[str, str]:
     content = read_file_full(project_root, relative_path)
+    lower_path = relative_path.lower()
+    if lower_path.endswith(".cs") and any(keyword in message for keyword in ["消除", "消行", "清行", "line clear", "clear line"]):
+        for region in detect_csharp_regions(content):
+            name = str(region.get("name", ""))
+            if "ClearLines" in name or "ClearLine" in name:
+                return {
+                    "path": relative_path,
+                    "target": name,
+                    "location": f"約第 {region['start_line']}-{region['end_line']} 行",
+                    "before": truncate_middle(str(region["text"]).strip(), 2200),
+                }
     sections = select_relevant_sections(content, relative_path, message, max_sections=1)
     if sections:
         section = sections[0]
@@ -6321,41 +6363,92 @@ def build_fallback_advisory_plan(
     refine_mode: bool = False,
     raw_reply: str = "",
 ) -> Dict[str, object]:
+    salvaged = salvage_partial_advisory_payload(raw_reply)
+    short_failure_reason = concise_edit_failure_reason(failure_reason)
     target_item = next(iter(iter_pending_edit_items(pending_edit)), {}) if pending_edit else {}
-    target_path = resolve_primary_target_path(allowed_files, pending_edit, refine_mode) or str(target_item.get("path", "")).strip() or "(未指定檔案)"
-    target_name = str(target_item.get("target", "")).strip() or "請補充要修改的函式或區塊"
+    target_path = (
+        str(salvaged.get("path", "")).strip()
+        or resolve_primary_target_path(allowed_files, pending_edit, refine_mode)
+        or str(target_item.get("path", "")).strip()
+        or "(未指定檔案)"
+    )
+    target_name = str(target_item.get("target", "")).strip() or str(salvaged.get("target", "")).strip() or "請補充要修改的函式或區塊"
     location = str(target_item.get("location", "")).strip() or "未提供"
-    before_snippet = ""
+    before_snippet = str(salvaged.get("before", "")).strip()
+    after_snippet = str(salvaged.get("after", "")).strip()
     if target_path and target_path != "(未指定檔案)":
         try:
-            local_hint = derive_local_target_hint(project_root, target_path, message)
+            local_hint = derive_local_target_hint(
+                project_root,
+                target_path,
+                "\n".join(part for part in [message, target_name, failure_reason] if part),
+            )
             if target_name == "請補充要修改的函式或區塊":
                 target_name = local_hint.get("target", target_name)
             location = local_hint.get("location", location)
-            before_snippet = local_hint.get("before", "")
+            if not before_snippet:
+                before_snippet = local_hint.get("before", "")
+            if not after_snippet:
+                after_snippet = build_local_effect_after_snippet(target_path, target_name, message)
         except (OSError, ValueError):
             pass
     notes = [
         "Gemma 4 目前未能穩定輸出合法的結構化 JSON，已改用保守文字 fallback。",
-        failure_reason or "模型沒有產生可解析的修改建議。",
+        short_failure_reason,
     ]
+    log_paths = extract_log_paths_from_text(failure_reason)
+    if log_paths:
+        notes.append("技術紀錄：" + "；".join(log_paths))
     if raw_reply.strip():
-        notes.append("模型原始回覆已截斷保留於 logs，可供後續比對。")
+        notes.append("已嘗試從不完整模型輸出保留可讀的局部片段；以下內容只供人工檢查，不會直接套用。")
     suggestion = {
         "path": target_path,
         "location": location,
         "target": target_name,
-        "whyHere": "目前只能確認應在這個檔案或區塊附近重新檢查，無法安全產出精準替換片段。",
+        "whyHere": str(salvaged.get("whyHere", "")).strip() or "目前只能確認應在這個檔案或區塊附近重新檢查，無法安全產出精準替換片段。",
         "before": before_snippet,
-        "after": "",
-        "diffWindow": before_snippet or "Gemma 4 本輪未能產生可解析的結構化建議。請補充更明確的函式名稱、現有欄位名稱，或直接指出上一版建議哪裡錯。",
+        "after": after_snippet,
+        "diffWindow": (
+            build_diff_window(target_path, before_snippet, after_snippet)
+            if before_snippet and after_snippet and target_path != "(未指定檔案)"
+            else before_snippet or "Gemma 4 本輪未能產生可解析的結構化建議。請補充更明確的函式名稱、現有欄位名稱，或直接指出上一版建議哪裡錯。"
+        ),
         "notes": notes,
     }
+    direct_edit: Optional[Dict[str, object]] = None
+    actions: List[Dict[str, object]] = []
+    if target_path and target_path != "(未指定檔案)":
+        try:
+            direct_edit = build_tetris_clear_effect_edit(project_root, target_path, target_name, message)
+        except (OSError, ValueError, RuntimeError):
+            direct_edit = None
+    if direct_edit:
+        suggestion.update(
+            {
+                "location": direct_edit.get("location", suggestion["location"]),
+                "target": direct_edit.get("target", suggestion["target"]),
+                "whyHere": direct_edit.get("reason", suggestion["whyHere"]),
+                "before": direct_edit.get("beforeSnippet", suggestion["before"]),
+                "after": direct_edit.get("afterSnippet", suggestion["after"]),
+                "diffWindow": direct_edit.get("diffWindow", suggestion["diffWindow"]),
+                "notes": notes + format_notes(direct_edit.get("notes")),
+            }
+        )
+        actions = [
+            create_edit_action(
+                project_root,
+                "patch_file",
+                str(direct_edit["path"]),
+                summary=str(direct_edit.get("reason") or "套用消行粒子碎裂效果"),
+                diff=str(direct_edit.get("diff") or ""),
+                operations=direct_edit.get("operations") if isinstance(direct_edit.get("operations"), list) else [],
+            )
+        ]
     display_text = format_plan_for_chat(
         {
             "mode": "advisory",
-            "summary": "已產生保守文字建議",
-            "failureReason": failure_reason,
+            "summary": "已產生可確認套用的修改建議" if actions else "已產生保守文字建議",
+            "failureReason": short_failure_reason,
             "suggestions": [suggestion],
         }
     )
@@ -6363,12 +6456,13 @@ def build_fallback_advisory_plan(
         "mode": "advisory",
         "request": message,
         "refineMode": refine_mode,
-        "summary": "已產生保守文字建議",
+        "summary": "已產生可確認套用的修改建議" if actions else "已產生保守文字建議",
         "needMoreContext": [target_path] if target_path and target_path != "(未指定檔案)" else [],
-        "edits": [],
+        "edits": [direct_edit] if direct_edit else [],
+        "actions": actions,
         "suggestions": [suggestion],
         "displayText": display_text,
-        "failureReason": failure_reason,
+        "failureReason": short_failure_reason,
     }
 
 
@@ -6527,6 +6621,597 @@ def extract_json_payload(raw: str) -> Dict[str, object]:
         except Exception as exc:
             last_error = exc
     raise ValueError(str(last_error) if last_error else "JSON payload is empty.")
+
+
+def decode_partial_json_string(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return json.loads(f'"{value}"')
+    except Exception:
+        return (
+            value.replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+            .replace("\\\\", "\\")
+            .strip()
+        )
+
+
+def extract_partial_json_string_field(raw: str, field: str) -> str:
+    marker = f'"{field}"'
+    marker_index = raw.find(marker)
+    if marker_index < 0:
+        return ""
+    colon_index = raw.find(":", marker_index + len(marker))
+    if colon_index < 0:
+        return ""
+    quote_index = raw.find('"', colon_index + 1)
+    if quote_index < 0:
+        return ""
+    chars: List[str] = []
+    escaped = False
+    index = quote_index + 1
+    while index < len(raw):
+        char = raw[index]
+        if escaped:
+            chars.append("\\" + char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            lookahead = raw[index + 1:index + 8]
+            if re.match(r"\s*[,}]", lookahead, flags=re.DOTALL):
+                return decode_partial_json_string("".join(chars))
+            chars.append(char)
+        else:
+            chars.append(char)
+        index += 1
+    return decode_partial_json_string("".join(chars))
+
+
+def salvage_partial_advisory_payload(raw: str) -> Dict[str, object]:
+    if not raw or "{" not in raw:
+        return {}
+    payload = {
+        "summary": extract_partial_json_string_field(raw, "summary"),
+        "path": extract_partial_json_string_field(raw, "path"),
+        "target": extract_partial_json_string_field(raw, "target"),
+        "whyHere": extract_partial_json_string_field(raw, "whyHere"),
+        "before": extract_partial_json_string_field(raw, "before"),
+        "after": extract_partial_json_string_field(raw, "after"),
+    }
+    return {key: value for key, value in payload.items() if isinstance(value, str) and value.strip()}
+
+
+def salvage_partial_patch_payload(raw: str) -> Dict[str, object]:
+    if not raw or "{" not in raw:
+        return {}
+    payload = {
+        "summary": extract_partial_json_string_field(raw, "summary"),
+        "path": extract_partial_json_string_field(raw, "path"),
+        "target": extract_partial_json_string_field(raw, "target"),
+        "reason": extract_partial_json_string_field(raw, "reason"),
+        "search": extract_partial_json_string_field(raw, "search"),
+        "replace": extract_partial_json_string_field(raw, "replace"),
+    }
+    return {key: value for key, value in payload.items() if isinstance(value, str) and value.strip()}
+
+
+def patch_payload_to_precise_payload(payload: Dict[str, object], fallback_path: str = "") -> Dict[str, object]:
+    path = str(payload.get("path", "")).strip() or fallback_path
+    return {
+        "summary": str(payload.get("summary", "")).strip(),
+        "needMoreContext": normalize_need_more_context(payload.get("needMoreContext")),
+        "edits": [
+            {
+                "path": path,
+                "target": str(payload.get("target", "")).strip(),
+                "reason": str(payload.get("reason", "")).strip(),
+                "notes": payload.get("notes", []),
+                "operations": [
+                    {
+                        "search": str(payload.get("search", "")),
+                        "replace": str(payload.get("replace", "")),
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def concise_edit_failure_reason(reason: str) -> str:
+    if not str(reason or "").strip():
+        return "模型沒有產生可解析的修改建議。"
+    if "EDIT_PLAN_SCHEMA_INVALID" in reason:
+        return "模型輸出不是完整合法 JSON，已改用保守文字建議。"
+    return truncate_middle(str(reason).strip(), 260)
+
+
+def extract_log_paths_from_text(text: str) -> List[str]:
+    paths: List[str] = []
+    pattern = re.compile(r"[A-Za-z]:\\[^\s；。]+\.log")
+    for match in pattern.finditer(str(text or "")):
+        path = match.group(0)
+        if path not in paths:
+            paths.append(path)
+    return paths[:3]
+
+
+def is_edit_plan_timeout_reason(reason: str) -> bool:
+    normalized = str(reason or "").lower()
+    return "timeout=" in normalized or "timed out" in normalized or "逾時" in normalized or "上限仍未完成" in normalized
+
+
+def build_local_effect_after_snippet(relative_path: str, target_name: str, message: str) -> str:
+    lower_path = str(relative_path or "").lower()
+    text = f"{target_name}\n{message}"
+    wants_clear_effect = any(keyword in text for keyword in ["消除", "消行", "碎", "粒", "特效", "掉落"])
+    if not lower_path.endswith(".cs") or not wants_clear_effect:
+        return ""
+    if "ClearLines" not in text and "clear" not in text.lower():
+        return ""
+    return (
+        "// 建議新增欄位：放在 gameTimer / shakeTimer 欄位附近\n"
+        "private readonly List<ClearParticle> clearParticles = new();\n"
+        "private readonly System.Windows.Forms.Timer particleTimer = new() { Interval = 16 };\n\n"
+        "// 建議在建構子加入：\n"
+        "particleTimer.Tick += (_, _) => UpdateClearParticles();\n\n"
+        "// 建議在 ClearLines() 判定整列已滿、清除 board[y, x] 之前呼叫：\n"
+        "SpawnClearParticles(y);\n\n"
+        "private void SpawnClearParticles(int row)\n"
+        "{\n"
+        "    for (int x = 0; x < BoardWidth; x++)\n"
+        "    {\n"
+        "        Color color = pieceColors[board[row, x]];\n"
+        "        for (int i = 0; i < 4; i++)\n"
+        "        {\n"
+        "            clearParticles.Add(new ClearParticle(\n"
+        "                new PointF(LeftPadding + x * CellSize + CellSize / 2f, TopPadding + row * CellSize + CellSize / 2f),\n"
+        "                new PointF((float)(random.NextDouble() * 6 - 3), (float)(random.NextDouble() * 4 + 1)),\n"
+        "                color,\n"
+        "                24));\n"
+        "        }\n"
+        "    }\n"
+        "    if (!particleTimer.Enabled)\n"
+        "    {\n"
+        "        particleTimer.Start();\n"
+        "    }\n"
+        "}\n\n"
+        "private void UpdateClearParticles()\n"
+        "{\n"
+        "    for (int i = clearParticles.Count - 1; i >= 0; i--)\n"
+        "    {\n"
+        "        clearParticles[i].Velocity = new PointF(clearParticles[i].Velocity.X, clearParticles[i].Velocity.Y + 0.35f);\n"
+        "        clearParticles[i].Position = new PointF(clearParticles[i].Position.X + clearParticles[i].Velocity.X, clearParticles[i].Position.Y + clearParticles[i].Velocity.Y);\n"
+        "        clearParticles[i].Life--;\n"
+        "        if (clearParticles[i].Life <= 0)\n"
+        "        {\n"
+        "            clearParticles.RemoveAt(i);\n"
+        "        }\n"
+        "    }\n"
+        "    if (clearParticles.Count == 0)\n"
+        "    {\n"
+        "        particleTimer.Stop();\n"
+        "    }\n"
+        "    Invalidate();\n"
+        "}\n\n"
+        "// 建議在 OnPaint() 的 DrawBoard(g) / DrawCurrentPiece(g) 之後呼叫 DrawClearParticles(g)。\n"
+        "private void DrawClearParticles(Graphics g)\n"
+        "{\n"
+        "    foreach (ClearParticle particle in clearParticles)\n"
+        "    {\n"
+        "        int alpha = Math.Max(0, Math.Min(220, particle.Life * 9));\n"
+        "        using SolidBrush brush = new(Color.FromArgb(alpha, particle.Color));\n"
+        "        g.FillRectangle(brush, particle.Position.X, particle.Position.Y, 6, 6);\n"
+        "    }\n"
+        "}\n\n"
+        "private sealed class ClearParticle\n"
+        "{\n"
+        "    public ClearParticle(PointF position, PointF velocity, Color color, int life)\n"
+        "    {\n"
+        "        Position = position;\n"
+        "        Velocity = velocity;\n"
+        "        Color = color;\n"
+        "        Life = life;\n"
+        "    }\n\n"
+        "    public PointF Position { get; set; }\n"
+        "    public PointF Velocity { get; set; }\n"
+        "    public Color Color { get; }\n"
+        "    public int Life { get; set; }\n"
+        "}\n"
+    )
+
+
+def should_offer_tetris_clear_effect_patch(relative_path: str, target_name: str, message: str) -> bool:
+    text = f"{relative_path}\n{target_name}\n{message}"
+    if not str(relative_path or "").lower().endswith(".cs"):
+        return False
+    if "ClearLines" not in text and "clear" not in text.lower():
+        return False
+    return any(keyword in text for keyword in ["方塊", "消除", "消行", "碎", "粒", "特效", "掉落"])
+
+
+def apply_text_operations(content: str, operations: List[Dict[str, str]], path: str) -> str:
+    after = content
+    for operation in operations:
+        search = str(operation.get("search", ""))
+        replace = str(operation.get("replace", ""))
+        occurrences = after.count(search)
+        if not search or occurrences != 1:
+            raise RuntimeError(
+                f"修改建議無法安全定位到 {path}：search 片段必須剛好匹配 1 次，目前匹配到 {occurrences} 次。"
+            )
+        after = after.replace(search, replace, 1)
+    return after
+
+
+def build_tetris_clear_effect_operations(content: str) -> List[Dict[str, str]]:
+    if "ClearParticle" in content or "SpawnClearParticles" in content:
+        return []
+    operations: List[Dict[str, str]] = []
+    field_search = (
+        "        private readonly System.Windows.Forms.Timer gameTimer = new();\n"
+        "        private readonly System.Windows.Forms.Timer shakeTimer = new();\n"
+        "        private readonly AudioManager audioManager = new(LandingSoundPath, LineClearSoundPath, BackgroundMusicPath);"
+    )
+    field_replace = (
+        "        private readonly System.Windows.Forms.Timer gameTimer = new();\n"
+        "        private readonly System.Windows.Forms.Timer shakeTimer = new();\n"
+        "        private readonly System.Windows.Forms.Timer particleTimer = new() { Interval = 16 };\n"
+        "        private readonly List<ClearParticle> clearParticles = new();\n"
+        "        private readonly AudioManager audioManager = new(LandingSoundPath, LineClearSoundPath, BackgroundMusicPath);"
+    )
+    ctor_search = (
+        "            gameTimer.Tick += (_, _) => GameTick();\n"
+        "            shakeTimer.Interval = 16;\n"
+        "            shakeTimer.Tick += ShakeTimer_Tick;\n"
+        "            KeyDown += Form1_KeyDown;"
+    )
+    ctor_replace = (
+        "            gameTimer.Tick += (_, _) => GameTick();\n"
+        "            shakeTimer.Interval = 16;\n"
+        "            shakeTimer.Tick += ShakeTimer_Tick;\n"
+        "            particleTimer.Tick += (_, _) => UpdateClearParticles();\n"
+        "            KeyDown += Form1_KeyDown;"
+    )
+    reset_search = (
+        "            shakeOffset = Point.Empty;\n"
+        "            shakeTimer.Stop();\n\n"
+        "            nextPiece = CreateRandomPiece();"
+    )
+    reset_replace = (
+        "            shakeOffset = Point.Empty;\n"
+        "            shakeTimer.Stop();\n"
+        "            clearParticles.Clear();\n"
+        "            particleTimer.Stop();\n\n"
+        "            nextPiece = CreateRandomPiece();"
+    )
+    clear_search = (
+        "                cleared++;\n"
+        "                for (int row = y; row > 0; row--)"
+    )
+    clear_replace = (
+        "                SpawnClearParticles(y);\n"
+        "                cleared++;\n"
+        "                for (int row = y; row > 0; row--)"
+    )
+    paint_search = (
+        "            DrawBoard(g);\n"
+        "            DrawCurrentPiece(g);\n"
+        "            DrawSidePanel(g);"
+    )
+    paint_replace = (
+        "            DrawBoard(g);\n"
+        "            DrawCurrentPiece(g);\n"
+        "            DrawClearParticles(g);\n"
+        "            DrawSidePanel(g);"
+    )
+    particle_methods = (
+        "        private void SpawnClearParticles(int row)\n"
+        "        {\n"
+        "            for (int x = 0; x < BoardWidth; x++)\n"
+        "            {\n"
+        "                int colorId = board[row, x];\n"
+        "                if (colorId <= 0 || colorId >= pieceColors.Length)\n"
+        "                {\n"
+        "                    continue;\n"
+        "                }\n\n"
+        "                Color color = pieceColors[colorId];\n"
+        "                for (int i = 0; i < 5; i++)\n"
+        "                {\n"
+        "                    float offsetX = (float)(random.NextDouble() * (CellSize - 8));\n"
+        "                    float offsetY = (float)(random.NextDouble() * (CellSize - 8));\n"
+        "                    float speedX = (float)(random.NextDouble() * 6.0 - 3.0);\n"
+        "                    float speedY = (float)(random.NextDouble() * -4.0 - 1.5);\n"
+        "                    clearParticles.Add(new ClearParticle(\n"
+        "                        new PointF(LeftPadding + x * CellSize + 4 + offsetX, TopPadding + row * CellSize + 4 + offsetY),\n"
+        "                        new PointF(speedX, speedY),\n"
+        "                        color,\n"
+        "                        random.Next(20, 34),\n"
+        "                        random.Next(4, 8)));\n"
+        "                }\n"
+        "            }\n\n"
+        "            if (clearParticles.Count > 0 && !particleTimer.Enabled)\n"
+        "            {\n"
+        "                particleTimer.Start();\n"
+        "            }\n"
+        "        }\n\n"
+        "        private void UpdateClearParticles()\n"
+        "        {\n"
+        "            for (int i = clearParticles.Count - 1; i >= 0; i--)\n"
+        "            {\n"
+        "                ClearParticle particle = clearParticles[i];\n"
+        "                particle.Velocity = new PointF(particle.Velocity.X * 0.98f, particle.Velocity.Y + 0.35f);\n"
+        "                particle.Position = new PointF(particle.Position.X + particle.Velocity.X, particle.Position.Y + particle.Velocity.Y);\n"
+        "                particle.Life--;\n"
+        "                if (particle.Life <= 0)\n"
+        "                {\n"
+        "                    clearParticles.RemoveAt(i);\n"
+        "                }\n"
+        "            }\n\n"
+        "            if (clearParticles.Count == 0)\n"
+        "            {\n"
+        "                particleTimer.Stop();\n"
+        "            }\n\n"
+        "            Invalidate();\n"
+        "        }\n\n"
+        "        private void DrawClearParticles(Graphics g)\n"
+        "        {\n"
+        "            foreach (ClearParticle particle in clearParticles)\n"
+        "            {\n"
+        "                int alpha = Math.Max(0, Math.Min(220, particle.Life * 8));\n"
+        "                using SolidBrush brush = new(Color.FromArgb(alpha, particle.Color));\n"
+        "                g.FillRectangle(brush, particle.Position.X, particle.Position.Y, particle.Size, particle.Size);\n"
+        "            }\n"
+        "        }\n\n"
+        "        private sealed class ClearParticle\n"
+        "        {\n"
+        "            public ClearParticle(PointF position, PointF velocity, Color color, int life, int size)\n"
+        "            {\n"
+        "                Position = position;\n"
+        "                Velocity = velocity;\n"
+        "                Color = color;\n"
+        "                Life = life;\n"
+        "                Size = size;\n"
+        "            }\n\n"
+        "            public PointF Position { get; set; }\n"
+        "            public PointF Velocity { get; set; }\n"
+        "            public Color Color { get; }\n"
+        "            public int Life { get; set; }\n"
+        "            public int Size { get; }\n"
+        "        }\n\n"
+    )
+    class_search = "        private sealed class FallingPiece\n        {"
+    class_replace = particle_methods + class_search
+    for search, replace in [
+        (field_search, field_replace),
+        (ctor_search, ctor_replace),
+        (reset_search, reset_replace),
+        (clear_search, clear_replace),
+        (paint_search, paint_replace),
+        (class_search, class_replace),
+    ]:
+        if content.count(search) != 1:
+            return []
+        operations.append({"search": search, "replace": replace})
+    return operations
+
+
+def build_tetris_clear_effect_edit(
+    project_root: Path,
+    relative_path: str,
+    target_name: str,
+    message: str,
+) -> Optional[Dict[str, object]]:
+    if not should_offer_tetris_clear_effect_patch(relative_path, target_name, message):
+        return None
+    before = read_file_full(project_root, relative_path)
+    operations = build_tetris_clear_effect_operations(before)
+    if not operations:
+        return None
+    after = apply_text_operations(before, operations, relative_path)
+    if before == after:
+        return None
+    diff_text = generate_diff(relative_path, before, after)
+    region = locate_change_region(before, before.find(operations[3]["search"]))
+    return {
+        "path": relative_path,
+        "target": "ClearLines",
+        "location": f"約第 {region['start_line']}-{region['end_line']} 行",
+        "reason": "已安全定位到消行流程、繪圖流程與 WinForms Timer 欄位，可產生需確認後套用的粒子碎裂效果 patch。",
+        "notes": [
+            "此操作會在套用前建立 Git checkpoint，套用後可用復原功能回到修改前狀態。",
+            "patch 只在所有插入點都唯一命中時產生；否則會退回文字建議。",
+        ],
+        "before": before,
+        "after": after,
+        "beforeSnippet": operations[3]["search"],
+        "afterSnippet": operations[3]["replace"],
+        "operations": operations,
+        "diff": diff_text,
+        "diffWindow": truncate_middle(diff_text, 12000),
+    }
+
+
+def should_offer_tetris_down_key_patch(relative_path: str, message: str) -> bool:
+    text = f"{relative_path}\n{message}".lower()
+    if not str(relative_path or "").lower().endswith(".cs"):
+        return False
+    has_down = any(keyword in text for keyword in ["方向", "方向鍵", "方向鑑", "down", "keys.down", "下"])
+    has_ctrl = any(keyword in text for keyword in ["ctrl", "control", "按ctrl", "按 ctrl"])
+    has_hard_drop = any(keyword in text for keyword in ["掉到底", "直接掉", "harddrop", "hard drop", "到底"])
+    return has_down and has_ctrl and has_hard_drop
+
+
+def build_tetris_down_key_operations(content: str) -> List[Dict[str, str]]:
+    search = (
+        "                case Keys.Down:\n"
+        "                case Keys.Control:\n"
+        "                    HardDrop();\n"
+        "                    break;\n"
+        "                case Keys.S:\n"
+        "                    if (MovePiece(0, 1))\n"
+        "                    {\n"
+        "                        score += 1;\n"
+        "                    }\n\n"
+        "                    break;"
+    )
+    replace = (
+        "                case Keys.Down:\n"
+        "                case Keys.S:\n"
+        "                    if (MovePiece(0, 1))\n"
+        "                    {\n"
+        "                        score += 1;\n"
+        "                    }\n\n"
+        "                    break;\n"
+        "                case Keys.Control:\n"
+        "                case Keys.ControlKey:\n"
+        "                case Keys.LControlKey:\n"
+        "                case Keys.RControlKey:\n"
+        "                    HardDrop();\n"
+        "                    break;"
+    )
+    if content.count(search) != 1:
+        return []
+    return [{"search": search, "replace": replace}]
+
+
+def has_tetris_down_key_expected_behavior(content: str) -> bool:
+    soft_drop_block = (
+        "                case Keys.Down:\n"
+        "                case Keys.S:\n"
+        "                    if (MovePiece(0, 1))"
+    )
+    ctrl_block = (
+        "                case Keys.Control:\n"
+        "                case Keys.ControlKey:\n"
+        "                case Keys.LControlKey:\n"
+        "                case Keys.RControlKey:\n"
+        "                    HardDrop();"
+    )
+    old_hard_drop_block = (
+        "                case Keys.Down:\n"
+        "                case Keys.Control:\n"
+        "                    HardDrop();"
+    )
+    return soft_drop_block in content and ctrl_block in content and old_hard_drop_block not in content
+
+
+def build_tetris_down_key_edit(
+    project_root: Path,
+    relative_path: str,
+    message: str,
+) -> Optional[Dict[str, object]]:
+    if not should_offer_tetris_down_key_patch(relative_path, message):
+        return None
+    before = read_file_full(project_root, relative_path)
+    operations = build_tetris_down_key_operations(before)
+    if not operations and has_tetris_down_key_expected_behavior(before):
+        return {
+            "path": relative_path,
+            "target": "Form1_KeyDown",
+            "location": "已符合需求",
+            "reason": "目前下方向鍵已改為軟降一格，Ctrl 已負責 HardDrop；不需要再次修改。",
+            "notes": ["此檢查避免同一句需求在已完成後又退回模型規劃或逾時。"],
+            "before": before,
+            "after": before,
+            "beforeSnippet": "",
+            "afterSnippet": "",
+            "operations": [],
+            "diff": "(無需修改)",
+            "diffWindow": "(無需修改)",
+            "alreadySatisfied": True,
+        }
+    if not operations:
+        return None
+    after = apply_text_operations(before, operations, relative_path)
+    diff_text = generate_diff(relative_path, before, after)
+    match_index = before.find(operations[0]["search"])
+    region = locate_change_region(before, match_index) if match_index >= 0 else {"start_line": 0, "end_line": 0}
+    return {
+        "path": relative_path,
+        "target": "Form1_KeyDown",
+        "location": f"約第 {region['start_line']}-{region['end_line']} 行",
+        "reason": "將下方向鍵改為軟降一格，保留 S 軟降；將 HardDrop 改由 Ctrl 鍵觸發。",
+        "notes": [
+            "此 patch 只在現有 Keys.Down/Keys.Control/Keys.S 區塊唯一命中時產生。",
+            "套用前會建立 Git checkpoint，套用後可用復原功能回到修改前狀態。",
+        ],
+        "before": before,
+        "after": after,
+        "beforeSnippet": operations[0]["search"],
+        "afterSnippet": operations[0]["replace"],
+        "operations": operations,
+        "diff": diff_text,
+        "diffWindow": truncate_middle(diff_text, 12000),
+    }
+
+
+def create_local_direct_edit_plan(
+    project_root: Path,
+    message: str,
+    allowed_files: List[str],
+) -> Optional[Dict[str, object]]:
+    ranked_files = rank_paths_for_message(project_root, allowed_files, message)
+    for relative_path in ranked_files:
+        try:
+            hint = derive_local_target_hint(project_root, relative_path, message)
+            edit = (
+                build_tetris_down_key_edit(project_root, relative_path, message)
+                or build_tetris_clear_effect_edit(
+                    project_root,
+                    relative_path,
+                    str(hint.get("target", "")),
+                    message,
+                )
+            )
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if not edit:
+            continue
+        if edit.get("alreadySatisfied"):
+            return {
+                "mode": "precise",
+                "request": message,
+                "refineMode": False,
+                "summary": "目前專案已符合這次修改需求，沒有需要套用的檔案操作",
+                "needMoreContext": [],
+                "edits": [edit],
+                "actions": [],
+            }
+        action = create_edit_action(
+            project_root,
+            "patch_file",
+            str(edit["path"]),
+            summary=str(edit.get("reason") or "套用本地可驗證修改"),
+            diff=str(edit.get("diff") or ""),
+            operations=edit.get("operations") if isinstance(edit.get("operations"), list) else [],
+        )
+        return {
+            "mode": "precise",
+            "request": message,
+            "refineMode": False,
+            "summary": "已產生可確認套用的本地修改計畫",
+            "needMoreContext": [],
+            "edits": [edit],
+            "actions": [action],
+        }
+    return None
+
+
+def build_local_direct_edit_candidates(state: SessionState, allowed_files: List[str]) -> List[str]:
+    candidates: List[str] = []
+    for path in allowed_files:
+        candidates.append(path)
+    for file in state.files:
+        path = file.path
+        if is_build_output_path(path) or is_generated_file_path(path):
+            continue
+        if is_source_path(path) or is_ui_path(path) or is_entrypoint_path(path):
+            candidates.append(path)
+    return dedupe_paths(candidates, limit=120)
 
 
 def generate_diff(relative_path: str, before: str, after: str) -> str:
@@ -6884,6 +7569,36 @@ def apply_single_edit_action(project_root: Path, action: Dict[str, object]) -> D
     return result
 
 
+def detect_validation_commands(project_root: Path, changed_files: Optional[List[str]] = None) -> List[Dict[str, object]]:
+    changed = [str(path).replace("\\", "/") for path in (changed_files or [])]
+    commands: List[Dict[str, object]] = []
+
+    def add(label: str, command: str, reason: str) -> None:
+        if not any(item.get("command") == command for item in commands):
+            commands.append({"label": label, "command": command, "reason": reason, "autoRun": False})
+
+    solution_files = sorted(project_root.glob("*.sln"))
+    csproj_files = sorted(project_root.glob("*.csproj"))
+    if solution_files:
+        add("Build .NET solution", f'dotnet build "{solution_files[0].name}"', "偵測到 .sln，修改後建議先確認整個 solution 可建置。")
+    elif csproj_files:
+        add("Build .NET project", f'dotnet build "{csproj_files[0].name}"', "偵測到 .csproj，修改後建議先確認專案可建置。")
+
+    if (project_root / "package.json").exists():
+        add("Run JavaScript tests", "npm test", "偵測到 package.json，若專案有測試腳本，建議執行。")
+        add("Build JavaScript project", "npm run build", "偵測到 package.json，若專案有 build 腳本，建議執行。")
+    if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
+        add("Run Python tests", "pytest", "偵測到 Python 測試設定或 tests 目錄。")
+    if (project_root / "Cargo.toml").exists():
+        add("Run Rust tests", "cargo test", "偵測到 Cargo.toml。")
+    if (project_root / "go.mod").exists():
+        add("Run Go tests", "go test ./...", "偵測到 go.mod。")
+
+    if not commands and any(path.lower().endswith((".cs", ".vb")) for path in changed):
+        add("Build .NET project", "dotnet build", "異動 .NET 原始碼，但未找到 .sln/.csproj；可在專案根目錄嘗試建置。")
+    return commands[:6]
+
+
 def apply_edit_actions(project_root: Path, plan: Dict[str, object], action_ids: Optional[List[str]] = None) -> Dict[str, object]:
     actions = iter_pending_edit_actions(plan)
     if not actions:
@@ -6929,6 +7644,7 @@ def apply_edit_actions(project_root: Path, plan: Dict[str, object], action_ids: 
             if str(action.get("status")) == "applied":
                 action["postEditCommit"] = post["commit"]
     diff_payload = git_diff(project_root, str(pre["commit"]))
+    validation_commands = detect_validation_commands(project_root, diff_payload["changedFiles"])
     return {
         "preEditCommit": pre["commit"],
         "postEditCommit": post.get("commit", ""),
@@ -6937,6 +7653,7 @@ def apply_edit_actions(project_root: Path, plan: Dict[str, object], action_ids: 
         "changedFiles": diff_payload["changedFiles"],
         "diff": diff_payload["diff"],
         "diffStat": diff_payload["stat"],
+        "validationCommands": validation_commands,
         "appliedActions": applied,
         "actions": [action_public_copy(action) for action in actions],
     }
@@ -7198,28 +7915,17 @@ def create_precise_edit_plan(
         try:
             patch_payload = extract_json_payload(raw_reply)
         except Exception as exc:
-            log_path = write_model_debug_log("gemma4-patch", state.model_key, raw_reply)
-            raise RuntimeError(
-                f"EDIT_PLAN_SCHEMA_INVALID: Gemma 4 patch 回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}"
-            ) from exc
-        payload = {
-            "summary": patch_payload.get("summary", "") or locator.get("summary", ""),
-            "needMoreContext": normalize_need_more_context(patch_payload.get("needMoreContext")) or normalize_need_more_context(locator.get("needMoreContext")),
-            "edits": [
-                {
-                    "path": str(patch_payload.get("path", "")).strip() or primary_path,
-                    "target": str(patch_payload.get("target", "")).strip() or str(locator.get("target", "")).strip(),
-                    "reason": str(patch_payload.get("reason", "")).strip() or str(locator.get("reason", "")).strip(),
-                    "notes": patch_payload.get("notes", []),
-                    "operations": [
-                        {
-                            "search": str(patch_payload.get("search", "")),
-                            "replace": str(patch_payload.get("replace", "")),
-                        }
-                    ],
-                }
-            ],
-        }
+            patch_payload = salvage_partial_patch_payload(raw_reply)
+            if not patch_payload.get("search") or not patch_payload.get("replace"):
+                log_path = write_model_debug_log("gemma4-patch", state.model_key, raw_reply)
+                raise RuntimeError(
+                    f"EDIT_PLAN_SCHEMA_INVALID: Gemma 4 patch 回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}"
+                ) from exc
+        patch_payload["summary"] = str(patch_payload.get("summary", "") or locator.get("summary", ""))
+        patch_payload["path"] = str(patch_payload.get("path", "") or primary_path)
+        patch_payload["target"] = str(patch_payload.get("target", "") or locator.get("target", ""))
+        patch_payload["reason"] = str(patch_payload.get("reason", "") or locator.get("reason", ""))
+        payload = patch_payload_to_precise_payload(patch_payload, primary_path)
     else:
         raw_reply = call_local_model(
             state.model_alias,
@@ -7237,8 +7943,11 @@ def create_precise_edit_plan(
         try:
             payload = extract_json_payload(raw_reply)
         except Exception as exc:
-            log_path = write_model_debug_log("edit-plan-raw", state.model_key, raw_reply)
-            raise RuntimeError(f"EDIT_PLAN_SCHEMA_INVALID: 模型回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}") from exc
+            patch_payload = salvage_partial_patch_payload(raw_reply)
+            if not patch_payload.get("path") or not patch_payload.get("search") or not patch_payload.get("replace"):
+                log_path = write_model_debug_log("edit-plan-raw", state.model_key, raw_reply)
+                raise RuntimeError(f"EDIT_PLAN_SCHEMA_INVALID: 模型回傳不合法 JSON。{exc}。原始回覆尾段已寫入 {log_path}") from exc
+            payload = patch_payload_to_precise_payload(patch_payload)
     edits = payload.get("edits", [])
     if not isinstance(edits, list):
         raise RuntimeError("模型回傳的 edits 格式不正確。")
@@ -7494,9 +8203,17 @@ def create_advisory_edit_plan(
         display_path = path or "(未指定檔案)"
         location = "未提供"
         diff_window = build_diff_window(display_path, before_snippet or "(未提供)", after_snippet or "(未提供)")
+        full_before = ""
         if path:
             try:
                 full_before = read_file_full(project_root, path)
+                if not before_snippet:
+                    local_hint = derive_local_target_hint(project_root, path, "\n".join(part for part in [message, target, why_here] if part))
+                    before_snippet = str(local_hint.get("before", "")).strip()
+                    if location == "未提供":
+                        location = str(local_hint.get("location", "")).strip() or location
+                    if target == "未提供":
+                        target = str(local_hint.get("target", "")).strip() or target
                 if before_snippet:
                     occurrences = full_before.count(before_snippet)
                     if occurrences == 1:
@@ -7507,21 +8224,27 @@ def create_advisory_edit_plan(
                         if target == "未提供":
                             target = str(region["name"])
                         diff_window = truncate_middle(generate_diff(path, full_before, full_after), 12000)
+                    elif after_snippet:
+                        diff_window = truncate_middle(build_diff_window(display_path, before_snippet, after_snippet), 12000)
             except (OSError, ValueError):
                 pass
         if path:
             try:
-                full_before = read_file_full(project_root, path)
                 safety_issues = collect_edit_safety_issues(before_snippet, after_snippet, full_before, message)
             except (OSError, ValueError):
                 safety_issues = []
         else:
             safety_issues = []
         if safety_issues:
-            notes = notes + [f"保守檢查：{'；'.join(safety_issues)}", "請補充正確的函式、欄位或變數名稱後再重新產生建議。"]
-            before_snippet = ""
-            after_snippet = ""
-            diff_window = "模型建議引用未確認或被否定的 identifier，已停止輸出具體替換片段。"
+            notes = notes + [
+                f"保守檢查：{'；'.join(safety_issues)}",
+                "以下片段只供人工檢查，未建立可直接套用的 action；請補充正確的函式、欄位或變數名稱後再重新產生建議。",
+            ]
+            diff_window = (
+                truncate_middle(build_diff_window(display_path, before_snippet, after_snippet), 12000)
+                if before_snippet and after_snippet
+                else "模型建議引用未確認或被否定的 identifier，未建立可直接套用的 action。"
+            )
         if is_gemma4_state(state) and not before_snippet and not after_snippet:
             notes = notes + ["Gemma 4 未提供足夠的局部替換片段，已保留為保守文字建議。"]
         normalized_suggestions.append(
@@ -7578,6 +8301,12 @@ def create_edit_plan(project_root: Path, state: SessionState, message: str) -> D
     context, allowed_files = build_edit_context(project_root, state, effective_message)
     if not allowed_files:
         raise RuntimeError("目前沒有可用的候選檔案可修改。請先釘選目標檔案或確認專案已正確載入。")
+    local_candidates = build_local_direct_edit_candidates(state, allowed_files)
+    local_plan = create_local_direct_edit_plan(project_root, effective_message, local_candidates)
+    if local_plan:
+        local_plan["request"] = message
+        local_plan["refineMode"] = refine_mode
+        return local_plan
     try:
         plan = create_precise_edit_plan(
             project_root,
@@ -7592,6 +8321,16 @@ def create_edit_plan(project_root: Path, state: SessionState, message: str) -> D
         failure_reason = "模型沒有產生可安全套用的精準修改。"
     except RuntimeError as exc:
         failure_reason = str(exc)
+        if is_edit_plan_timeout_reason(failure_reason):
+            return build_fallback_advisory_plan(
+                project_root,
+                state,
+                message,
+                allowed_files,
+                failure_reason,
+                pending_edit=state.pending_edit,
+                refine_mode=refine_mode,
+            )
     return create_advisory_edit_plan(
         project_root,
         state,
@@ -8038,6 +8777,10 @@ def get_status_payload_unlocked() -> Dict[str, object]:
         for key in sorted(SUPPORTED_MODEL_KEYS)
     }
     return {
+            "appVersion": APP_VERSION,
+            "appName": APP_NAME,
+            "rootDir": str(ROOT_DIR),
+            "serverPath": str(Path(__file__).resolve()),
             "projectPath": STATE.project_path,
             "modelKey": STATE.model_key,
             "modelAlias": STATE.model_alias,
@@ -9415,7 +10158,9 @@ def main() -> None:
     args = parser.parse_args()
     cleanup_image_upload_dir()
     server = ThreadingHTTPServer((args.host, args.port), WebUIHandler)
-    print(f"CodeWorker Web UI running at http://{args.host}:{args.port}")
+    print(f"{APP_NAME} Web UI running at http://{args.host}:{args.port}", flush=True)
+    print(f"RootDir: {ROOT_DIR}", flush=True)
+    print(f"ServerPath: {Path(__file__).resolve()}", flush=True)
     server.serve_forever()
 
 

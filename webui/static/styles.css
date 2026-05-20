@@ -1182,6 +1182,19 @@ button.ghost { padding-inline: 12px; font-size: 0.88rem; }
   min-width: 0;
 }
 
+.edit-detail-grid {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  font-size: 0.92rem;
+}
+
+.edit-snippet-block {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
 .tool-action-row {
   display: flex;
   flex-wrap: wrap;

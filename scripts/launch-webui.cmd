@@ -4,6 +4,10 @@ call "%~dp0_env.cmd"
 
 set "WEBUI_PORT=8764"
 set "WEBUI_URL=http://127.0.0.1:%WEBUI_PORT%"
+set "WEBUI_EXPECTED_VERSION=V1.01.002"
+if exist "%ROOT_DIR%\VERSION" (
+    set /p WEBUI_EXPECTED_VERSION=<"%ROOT_DIR%\VERSION"
+)
 
 if not exist "%WINPY_PYTHON%" (
     echo [INFO] Portable Python not found. Running bootstrap first...
@@ -32,11 +36,15 @@ if not errorlevel 1 (
 for /f %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "[DateTime]::Now.ToString('yyyyMMdd-HHmmss')"' ) do set "STAMP=%%I"
 if not defined STAMP set "STAMP=unknown"
 set "LOG_FILE=%LOGS_DIR%\webui-%STAMP%.log"
+set "WEBUI_OPEN_URL=%WEBUI_URL%/?v=%WEBUI_EXPECTED_VERSION%-%STAMP%"
 
 echo [INFO] Starting local Web UI on %WEBUI_URL%
+echo [INFO] Expected Web UI version: %WEBUI_EXPECTED_VERSION%
+echo [INFO] Root directory: %ROOT_DIR%
+echo [INFO] Server script: %ROOT_DIR%\webui\server.py
 start "USB Code Assistant Web UI" /min cmd /c ""%WINPY_PYTHON%" "%ROOT_DIR%\webui\server.py" --port %WEBUI_PORT% > "%LOG_FILE%" 2>&1"
 
-call :wait_for_webui %WEBUI_PORT%
+call :wait_for_webui %WEBUI_PORT% "%WEBUI_EXPECTED_VERSION%"
 if errorlevel 1 (
     echo [ERROR] Web UI failed to become ready. Check the log:
     echo         "%LOG_FILE%"
@@ -44,7 +52,7 @@ if errorlevel 1 (
 )
 
 echo [OK] Web UI is ready at %WEBUI_URL%
-call :open_browser "%WEBUI_URL%"
+call :open_browser "%WEBUI_OPEN_URL%"
 exit /b 0
 
 :port_occupied
@@ -59,7 +67,7 @@ exit /b %ERRORLEVEL%
 set /a RETRIES=30
 
 :wait_loop
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'http://127.0.0.1:%~1/api/status' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $status=Invoke-RestMethod -Uri 'http://127.0.0.1:%~1/api/status' -TimeoutSec 2; $expected='%~2'; if (-not $expected -or $status.data.appVersion -eq $expected) { exit 0 }; Write-Host ('[WAIT] Web UI responded with version {0}, expected {1}.' -f $status.data.appVersion, $expected); exit 1 } catch { exit 1 }"
 if not errorlevel 1 exit /b 0
 
 set /a RETRIES-=1

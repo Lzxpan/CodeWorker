@@ -2,6 +2,8 @@ const state = {
   uiState: "idle",
   projectPath: "",
   modelKey: "gemma4",
+  appVersion: "",
+  appName: "",
   modelCapabilities: {},
   hardwareProfile: null,
   recommendedModelKey: "",

@@ -1112,6 +1112,570 @@ def test_edit_action_supports_create_replace_delete_rename_and_command():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_edit_apply_returns_validation_command_suggestions():
+    root = ROOT / ".tmp" / f"regression-edit-validation-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "Demo.csproj").write_text("<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n", encoding="utf-8")
+    source = root / "Program.cs"
+    source.write_text("class Program { static string Name() => \"old\"; }\n", encoding="utf-8")
+    try:
+        server.ensure_project_git_repo(root)
+        action = server.create_edit_action(
+            root,
+            "patch_file",
+            "Program.cs",
+            operations=[{"search": 'static string Name() => "old";', "replace": 'static string Name() => "new";'}],
+        )
+        result = server.apply_edit_actions(root, {"actions": [action]}, [str(action["id"])])
+        commands = result.get("validationCommands", [])
+        assert_true(commands, "apply result should include validation command suggestions")
+        assert_true(commands[0]["command"] == 'dotnet build "Demo.csproj"', "csproj edits should suggest dotnet build")
+        assert_true(commands[0]["autoRun"] is False, "validation suggestions should not auto-run arbitrary build commands")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_advisory_edit_plan_keeps_local_context_when_model_patch_is_unsafe():
+    root = ROOT / ".tmp" / f"regression-edit-advisory-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    readme = root / "README.md"
+    readme.write_text("# Game\n\nKeyboard controls are documented here.\n", encoding="utf-8")
+    source = root / "Form1.cs"
+    source.write_text(
+        "using System;\n"
+        "public class Form1 {\n"
+        "    private int[,] board = new int[20, 10];\n"
+        "    private void ClearLines() {\n"
+        "        for (int y = 0; y < 20; y++) {\n"
+        "            if (board[y, 0] > 0) {\n"
+        "                board[y, 0] = 0;\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_call_local_model = server.call_local_model
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen35",
+            model_alias="qwen35",
+            files=[server.ProjectFile(path="Form1.cs", size=source.stat().st_size, language="C#")],
+            tree=["Form1.cs"],
+            ui_state="ready",
+        )
+
+        def fake_call_local_model(*_args, **_kwargs):
+            return json.dumps({
+                "summary": "實作方塊消除粒子效果",
+                "needMoreContext": [],
+                "suggestions": [
+                    {
+                        "path": "Form1.cs",
+                        "target": "ClearLines",
+                        "whyHere": "ClearLines 目前直接清除資料，需要先產生粒子效果。",
+                        "before": "",
+                        "after": "CreateExplosionEffect(x, y, GetColorFromId(board[y, x]));",
+                        "notes": [],
+                    }
+                ],
+            }, ensure_ascii=False)
+
+        server.call_local_model = fake_call_local_model
+        plan = server.create_advisory_edit_plan(
+            root,
+            state,
+            "幫我將方塊消除的功能加上特效",
+            ["Form1.cs"],
+            failure_reason="patch JSON invalid",
+        )
+        suggestion = plan["suggestions"][0]
+        assert_true("private void ClearLines" in suggestion["before"], "advisory fallback should show the real local source region")
+        assert_true("CreateExplosionEffect" in suggestion["after"], "unsafe advisory output should remain visible for manual review")
+        assert_true("未建立可直接套用" in "；".join(suggestion["notes"]), "unsafe advisory output should clearly say it is not directly applicable")
+    finally:
+        server.call_local_model = original_call_local_model
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_model_precise_patch_creates_applyable_action_without_hardcoded_rule():
+    root = ROOT / ".tmp" / f"regression-edit-model-patch-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Program.cs"
+    source.write_text(
+        "namespace Demo;\n\n"
+        "public static class Program\n"
+        "{\n"
+        "    public static string Greeting()\n"
+        "    {\n"
+        "        return \"Hello\";\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_call_local_model = server.call_local_model
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen35",
+            model_alias="qwen35",
+            files=[server.ProjectFile(path="Program.cs", size=source.stat().st_size, language="C#")],
+            tree=["Program.cs"],
+            ui_state="ready",
+        )
+
+        def fake_call_local_model(*_args, **_kwargs):
+            return json.dumps({
+                "summary": "更新 Greeting 回傳文字",
+                "needMoreContext": [],
+                "edits": [
+                    {
+                        "path": "Program.cs",
+                        "target": "Greeting",
+                        "reason": "依需求調整顯示文字",
+                        "notes": [],
+                        "operations": [
+                            {
+                                "search": "        return \"Hello\";",
+                                "replace": "        return \"Hi\";",
+                            }
+                        ],
+                    }
+                ],
+            }, ensure_ascii=False)
+
+        server.call_local_model = fake_call_local_model
+        plan = server.create_edit_plan(root, state, "把 Greeting 回傳文字改成 Hi")
+        actions = plan.get("actions", [])
+        assert_true(plan["mode"] == "precise", "model patch should produce a precise plan")
+        assert_true(len(actions) == 1 and actions[0]["kind"] == "patch_file", "model patch should become a patch_file action")
+        server.apply_single_edit_action(root, actions[0])
+        assert_true('return "Hi";' in source.read_text(encoding="utf-8"), "model patch action should actually modify the file")
+    finally:
+        server.call_local_model = original_call_local_model
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_malformed_model_patch_is_salvaged_when_search_replace_are_unique():
+    root = ROOT / ".tmp" / f"regression-edit-model-salvage-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Program.cs"
+    source.write_text(
+        "namespace Demo;\n\n"
+        "public static class Program\n"
+        "{\n"
+        "    public static string Greeting()\n"
+        "    {\n"
+        "        return \"Hello\";\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_call_local_model = server.call_local_model
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen35",
+            model_alias="qwen35",
+            files=[server.ProjectFile(path="Program.cs", size=source.stat().st_size, language="C#")],
+            tree=["Program.cs"],
+            ui_state="ready",
+        )
+
+        def fake_call_local_model(*_args, **_kwargs):
+            return (
+                '{\n'
+                '  "summary": "更新 Greeting 回傳文字",\n'
+                '  "path": "Program.cs",\n'
+                '  "target": "Greeting",\n'
+                '  "reason": "依需求調整顯示文字",\n'
+                '  "search": "        return \\"Hello\\";",\n'
+                '  "replace": "        return \\"Hi\\";"\n'
+            )
+
+        server.call_local_model = fake_call_local_model
+        plan = server.create_edit_plan(root, state, "把 Greeting 回傳文字改成 Hi")
+        actions = plan.get("actions", [])
+        assert_true(len(actions) == 1 and actions[0]["kind"] == "patch_file", "salvaged patch should become a patch_file action")
+        server.apply_single_edit_action(root, actions[0])
+        assert_true('return "Hi";' in source.read_text(encoding="utf-8"), "salvaged patch should actually modify the file")
+    finally:
+        server.call_local_model = original_call_local_model
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_fallback_advisory_uses_pending_target_to_locate_real_method():
+    root = ROOT / ".tmp" / f"regression-edit-fallback-target-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Form1.cs"
+    source.write_text(
+        "using System.Drawing;\n"
+        "public class Form1 {\n"
+        "    private readonly Color[] pieceColors =\n"
+        "    {\n"
+        "        Color.Transparent,\n"
+        "        Color.Cyan,\n"
+        "        Color.Blue,\n"
+        "        Color.Red\n"
+        "    };\n"
+        "\n"
+        "    private int ClearLines()\n"
+        "    {\n"
+        "        int cleared = 0;\n"
+        "        for (int y = 19; y >= 0; y--)\n"
+        "        {\n"
+        "            cleared++;\n"
+        "        }\n"
+        "        return cleared;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="gemma4",
+            model_alias="gemma4",
+            files=[server.ProjectFile(path="Form1.cs", size=source.stat().st_size, language="C#")],
+            tree=["Form1.cs"],
+            ui_state="ready",
+        )
+        plan = server.build_fallback_advisory_plan(
+            root,
+            state,
+            "幫我將方塊消除的功能加上特效",
+            ["Form1.cs"],
+            "Gemma 4 patch 回傳不合法 JSON",
+            pending_edit={
+                "summary": "定位 ClearLines",
+                "edits": [{"path": "Form1.cs", "target": "ClearLines", "location": "", "beforeSnippet": ""}],
+            },
+            raw_reply="<think>cannot json</think>",
+        )
+        suggestion = plan["suggestions"][0]
+        assert_true("private int ClearLines" in suggestion["before"], "fallback should use the pending target instead of the file header")
+        assert_true("pieceColors" not in suggestion["before"], "fallback should not select the earlier color array when ClearLines is known")
+        assert_true("約第" in suggestion["location"], "fallback should show the located line range")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_fallback_advisory_salvages_partial_json_without_noisy_failure_text():
+    root = ROOT / ".tmp" / f"regression-edit-partial-json-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Form1.cs"
+    source.write_text(
+        "public class Form1 {\n"
+        "    private int ClearLines()\n"
+        "    {\n"
+        "        int cleared = 0;\n"
+        "        return cleared;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="gemma4",
+            model_alias="gemma4",
+            files=[server.ProjectFile(path="Form1.cs", size=source.stat().st_size, language="C#")],
+            tree=["Form1.cs"],
+            ui_state="ready",
+        )
+        raw_reply = (
+            '```json\n{\n'
+            '  "summary": "新增粒子效果",\n'
+            '  "path": "Form1.cs",\n'
+            '  "target": "ClearLines",\n'
+            '  "whyHere": "ClearLines 是消除列的位置",\n'
+            '  "before": "private int ClearLines()\\n    {\\n        int cleared = 0;\\n        return cleared;\\n    }",\n'
+            '  "after": "private int ClearLines()\\n    {\\n        int cleared = 0;\\n        SpawnLineParticles();\\n'
+        )
+        plan = server.build_fallback_advisory_plan(
+            root,
+            state,
+            "幫我將方塊消除的功能加上特效",
+            ["Form1.cs"],
+            r"EDIT_PLAN_SCHEMA_INVALID: 模型回傳不合法 JSON。原始回覆尾段已寫入 C:\tmp\gemma4-advisory.log",
+            raw_reply=raw_reply,
+        )
+        suggestion = plan["suggestions"][0]
+        assert_true("private int ClearLines" in suggestion["before"], "partial JSON salvage should keep before snippet")
+        assert_true("SpawnLineParticles" in suggestion["after"], "partial JSON salvage should keep incomplete after snippet")
+        assert_true("完整合法 JSON" in plan["failureReason"], "user-facing failure reason should be concise")
+        assert_true("Expecting value" not in plan["failureReason"], "user-facing failure reason should not expose parser details")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_edit_plan_timeout_short_circuits_to_local_fallback():
+    root = ROOT / ".tmp" / f"regression-edit-timeout-fallback-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Form1.cs"
+    source.write_text(
+        "public class Form1 {\n"
+        "    private int ClearLines()\n"
+        "    {\n"
+        "        int cleared = 0;\n"
+        "        return cleared;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_precise = server.create_precise_edit_plan
+    original_advisory = server.create_advisory_edit_plan
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="gemma4",
+            model_alias="gemma4",
+            files=[server.ProjectFile(path="Form1.cs", size=source.stat().st_size, language="C#")],
+            tree=["Form1.cs"],
+            ui_state="ready",
+        )
+
+        def timeout_precise(*args, **kwargs):
+            raise RuntimeError(f"本地模型回應已等到目前上限仍未完成。timeout={server.EDIT_PLAN_TIMEOUT_SECONDS}s。")
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("timeout fallback must not start a second advisory model call")
+
+        server.create_precise_edit_plan = timeout_precise
+        server.create_advisory_edit_plan = fail_if_called
+        plan = server.create_edit_plan(
+            root,
+            state,
+            "幫我將方塊消除的功能加上特效，讓方塊有碎成小塊掉落消失的感覺。",
+        )
+        suggestion = plan["suggestions"][0]
+        assert_true(plan["mode"] == "advisory", "timeout should return an advisory fallback")
+        assert_true(f"timeout={server.EDIT_PLAN_TIMEOUT_SECONDS}s" in plan["failureReason"], "timeout reason should remain visible")
+        assert_true("ClearLines" in suggestion["target"], "fallback should still locate ClearLines")
+        assert_true("private int ClearLines" in suggestion["before"], "fallback should include the local source region")
+        assert_true("ClearParticle" in suggestion["after"], "fallback should include a concrete local effect scaffold")
+    finally:
+        server.create_precise_edit_plan = original_precise
+        server.create_advisory_edit_plan = original_advisory
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_timeout_fallback_can_create_applyable_tetris_clear_effect_patch():
+    root = ROOT / ".tmp" / f"regression-edit-direct-tetris-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Form1.cs"
+    source.write_text(
+        "public class Form1 {\n"
+        "        private const int BoardWidth = 10;\n"
+        "        private const int BoardHeight = 20;\n"
+        "        private const int CellSize = 30;\n"
+        "        private readonly int[,] board = new int[BoardHeight, BoardWidth];\n"
+        "        private readonly Color[] pieceColors = { Color.Transparent, Color.Red };\n"
+        "        private readonly Random random = new();\n"
+        "        private readonly System.Windows.Forms.Timer gameTimer = new();\n"
+        "        private readonly System.Windows.Forms.Timer shakeTimer = new();\n"
+        "        private readonly AudioManager audioManager = new(LandingSoundPath, LineClearSoundPath, BackgroundMusicPath);\n"
+        "        private Point shakeOffset = Point.Empty;\n"
+        "\n"
+        "        public Form1()\n"
+        "        {\n"
+        "            gameTimer.Tick += (_, _) => GameTick();\n"
+        "            shakeTimer.Interval = 16;\n"
+        "            shakeTimer.Tick += ShakeTimer_Tick;\n"
+        "            KeyDown += Form1_KeyDown;\n"
+        "        }\n"
+        "\n"
+        "        private void StartNewGame()\n"
+        "        {\n"
+        "            shakeOffset = Point.Empty;\n"
+        "            shakeTimer.Stop();\n"
+        "\n"
+        "            nextPiece = CreateRandomPiece();\n"
+        "        }\n"
+        "\n"
+        "        private int ClearLines()\n"
+        "        {\n"
+        "            int cleared = 0;\n"
+        "            for (int y = BoardHeight - 1; y >= 0; y--)\n"
+        "            {\n"
+        "                bool full = true;\n"
+        "                if (!full)\n"
+        "                {\n"
+        "                    continue;\n"
+        "                }\n"
+        "\n"
+        "                cleared++;\n"
+        "                for (int row = y; row > 0; row--)\n"
+        "                {\n"
+        "                }\n"
+        "            }\n"
+        "\n"
+        "            return cleared;\n"
+        "        }\n"
+        "\n"
+        "        protected override void OnPaint(PaintEventArgs e)\n"
+        "        {\n"
+        "            DrawBoard(g);\n"
+        "            DrawCurrentPiece(g);\n"
+        "            DrawSidePanel(g);\n"
+        "        }\n"
+        "\n"
+        "        private sealed class FallingPiece\n"
+        "        {\n"
+        "        }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_precise = server.create_precise_edit_plan
+    original_advisory = server.create_advisory_edit_plan
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="gemma4",
+            model_alias="gemma4",
+            files=[server.ProjectFile(path="Form1.cs", size=source.stat().st_size, language="C#")],
+            tree=["Form1.cs"],
+            ui_state="ready",
+        )
+
+        def fail_if_precise_called(*args, **kwargs):
+            raise AssertionError("local direct fallback should not call the model-backed precise planner")
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("timeout fallback must not start a second advisory model call")
+
+        server.create_precise_edit_plan = fail_if_precise_called
+        server.create_advisory_edit_plan = fail_if_called
+        plan = server.create_edit_plan(
+            root,
+            state,
+            "幫我將方塊消除的功能加上特效，讓方塊有碎成小塊掉落消失的感覺。",
+        )
+        actions = plan.get("actions", [])
+        assert_true(len(actions) == 1, "direct fallback should create one patch_file action")
+        assert_true(actions[0]["kind"] == "patch_file", "direct fallback action should be patch_file")
+        assert_true(plan.get("edits") and plan["edits"][0].get("beforeSnippet"), "direct fallback should include reviewable snippets")
+        server.apply_single_edit_action(root, actions[0])
+        updated = source.read_text(encoding="utf-8")
+        assert_true("private readonly List<ClearParticle> clearParticles" in updated, "applied patch should add particle state")
+        assert_true("SpawnClearParticles(y);" in updated, "applied patch should hook ClearLines before shifting rows")
+        assert_true("DrawClearParticles(g);" in updated, "applied patch should render particles")
+        assert_true("private sealed class ClearParticle" in updated, "applied patch should add particle type")
+    finally:
+        server.create_precise_edit_plan = original_precise
+        server.create_advisory_edit_plan = original_advisory
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_local_direct_edit_changes_down_key_to_soft_drop_and_ctrl_to_hard_drop():
+    root = ROOT / ".tmp" / f"regression-edit-direct-keys-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    readme = root / "README.md"
+    readme.write_text("# Game\n\nKeyboard controls are documented here.\n", encoding="utf-8")
+    source = root / "Form1.cs"
+    source.write_text(
+        "public class Form1 {\n"
+        "        private void Form1_KeyDown(object? sender, KeyEventArgs e)\n"
+        "        {\n"
+        "            if (isGameOver)\n"
+        "            {\n"
+        "                return;\n"
+        "            }\n"
+        "\n"
+        "            switch (e.KeyCode)\n"
+        "            {\n"
+        "                case Keys.Left:\n"
+        "                case Keys.A:\n"
+        "                    MovePiece(-1, 0);\n"
+        "                    break;\n"
+        "                case Keys.Right:\n"
+        "                case Keys.D:\n"
+        "                    MovePiece(1, 0);\n"
+        "                    break;\n"
+        "                case Keys.Down:\n"
+        "                case Keys.Control:\n"
+        "                    HardDrop();\n"
+        "                    break;\n"
+        "                case Keys.S:\n"
+        "                    if (MovePiece(0, 1))\n"
+        "                    {\n"
+        "                        score += 1;\n"
+        "                    }\n"
+        "\n"
+        "                    break;\n"
+        "                case Keys.Up:\n"
+        "                    RotatePiece();\n"
+        "                    break;\n"
+        "            }\n"
+        "        }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_precise = server.create_precise_edit_plan
+    original_advisory = server.create_advisory_edit_plan
+    original_build_context = server.build_edit_context
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="gemma4",
+            model_alias="gemma4",
+            files=[
+                server.ProjectFile(path="README.md", size=readme.stat().st_size, language="Markdown"),
+                server.ProjectFile(path="Form1.cs", size=source.stat().st_size, language="C#"),
+            ],
+            tree=["README.md", "Form1.cs"],
+            ui_state="ready",
+        )
+
+        def fail_if_precise_called(*args, **kwargs):
+            raise AssertionError("down key direct edit should not call the model-backed precise planner")
+
+        def fail_if_advisory_called(*args, **kwargs):
+            raise AssertionError("down key direct edit should not call advisory model fallback")
+
+        server.create_precise_edit_plan = fail_if_precise_called
+        server.create_advisory_edit_plan = fail_if_advisory_called
+        server.build_edit_context = lambda *args, **kwargs: ("可編輯候選檔案:\nREADME.md", ["README.md"])
+        plan = server.create_edit_plan(
+            root,
+            state,
+            "幫我修改按方向鑑的下不要直接掉到底，改成按ctrl掉到底。",
+        )
+        assert_true(plan["mode"] == "precise", "down key request should create a precise direct edit plan")
+        assert_true(len(plan.get("actions", [])) == 1, "down key request should create one patch action")
+        assert_true(plan["actions"][0]["kind"] == "patch_file", "down key action should be patch_file")
+        assert_true("Form1_KeyDown" in plan["edits"][0]["target"], "down key edit should target Form1_KeyDown")
+        assert_true("case Keys.Down" in plan["edits"][0]["beforeSnippet"], "review snippet should include existing Down case")
+        assert_true("case Keys.ControlKey" in plan["edits"][0]["afterSnippet"], "replacement should support ControlKey")
+        server.apply_single_edit_action(root, plan["actions"][0])
+        updated = source.read_text(encoding="utf-8")
+        assert_true("case Keys.Down:\n                case Keys.S:" in updated, "Down should share soft-drop behavior with S")
+        assert_true("case Keys.Control:\n                case Keys.ControlKey:" in updated, "Ctrl should own hard drop behavior")
+        assert_true("case Keys.Down:\n                case Keys.Control:\n                    HardDrop();" not in updated, "Down must no longer trigger HardDrop")
+        repeated_plan = server.create_edit_plan(
+            root,
+            state,
+            "幫我修改按方向鑑的下不要直接掉到底，改成按ctrl掉到底。",
+        )
+        assert_true(not repeated_plan.get("actions"), "repeated down key request should not create another action after it is fixed")
+        assert_true("已符合" in repeated_plan["summary"], "repeated down key request should report the project already matches")
+    finally:
+        server.create_precise_edit_plan = original_precise
+        server.create_advisory_edit_plan = original_advisory
+        server.build_edit_context = original_build_context
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_generation_prompt_infers_multiple_documents_from_previous_answer():
     history = [
         {"role": "user", "content": "請說明功能流程與使用場景"},
@@ -1637,15 +2201,22 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     html = (ROOT / "webui" / "static" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "webui" / "static" / "styles.css").read_text(encoding="utf-8")
     js = "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "webui" / "static" / "js").glob("app-*.js")))
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    launch = (ROOT / "scripts" / "launch-webui.cmd").read_text(encoding="utf-8")
+    assert_true(server.APP_VERSION == version, "server should read the Web UI version from VERSION")
+    assert_true(server.get_status_payload()["appVersion"] == version, "/api/status should expose the running app version")
+    assert_true("WEBUI_EXPECTED_VERSION" in launch and "/api/status" in launch and "?v=" in launch, "launch-webui should verify version and open a cache-busted URL")
     assert_true('id="sidebarStatusDetails"' in html, "secondary model and hardware details should be grouped in a disclosure")
     assert_true('id="fileTreeCount"' in html, "file tree should expose a result count")
     assert_true('id="aiActivity"' in html and 'id="chatBusyBar"' in html, "chat UI should include a visible busy indicator")
     assert_true('id="editPlanBtn"' in html and 'id="gitDiffBtn"' in html and 'id="gitCheckpointBtn"' in html, "chat UI should expose edit plan and Git safety actions")
     assert_true(".sidebar" in css and "grid-template-rows" in css, "sidebar layout should reserve flexible space for the file tree")
     assert_true(".ai-spinner" in css and "@keyframes aiBusyBar" in css, "busy indicator should have spinner/bar animation styles")
-    assert_true(".diff-block" in css and ".edit-action-card" in css, "edit plan UI should style diff and action cards")
+    assert_true(".diff-block" in css and ".edit-action-card" in css and ".edit-snippet-block" in css, "edit plan UI should style diff, snippets, and action cards")
     assert_true("function setAiBusy" in js, "app should control the AI busy indicator from JS")
     assert_true("setAiBusy(true" in js and "setAiBusy(false" in js, "chat/analyze flows should toggle the AI busy indicator")
+    assert_true("AI 正在產生修改建議" in js and "finally" in js, "edit plan generation should show and clear the AI busy indicator")
+    assert_true("function renderEditDetailHtml" in js and "建議替換前片段" in js and "建議替換後片段" in js, "edit plan UI should show location and before/after snippets")
     assert_true("function applyEditPlan" in js and "/api/edit/apply" in js, "UI should apply confirmed edit plans")
     assert_true("/api/git/diff" in js and "/api/git/restore" in js, "UI should expose Git diff and restore workflows")
     assert_true("rawDownload && downloadPercent !== null" in js, "download progress should display the current file percentage from task payloads")
@@ -1714,6 +2285,15 @@ def main():
         test_edit_actions_apply_with_git_checkpoint_and_restore,
         test_edit_action_security_rejects_unsafe_paths_and_stale_patches,
         test_edit_action_supports_create_replace_delete_rename_and_command,
+        test_edit_apply_returns_validation_command_suggestions,
+        test_advisory_edit_plan_keeps_local_context_when_model_patch_is_unsafe,
+        test_model_precise_patch_creates_applyable_action_without_hardcoded_rule,
+        test_malformed_model_patch_is_salvaged_when_search_replace_are_unique,
+        test_fallback_advisory_uses_pending_target_to_locate_real_method,
+        test_fallback_advisory_salvages_partial_json_without_noisy_failure_text,
+        test_edit_plan_timeout_short_circuits_to_local_fallback,
+        test_timeout_fallback_can_create_applyable_tetris_clear_effect_patch,
+        test_local_direct_edit_changes_down_key_to_soft_drop_and_ctrl_to_hard_drop,
         test_generation_prompt_infers_multiple_documents_from_previous_answer,
         test_generation_prompt_infers_excel,
         test_generation_word_prompt_uses_previous_answer,

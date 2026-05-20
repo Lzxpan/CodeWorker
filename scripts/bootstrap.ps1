@@ -598,6 +598,9 @@ if (-not (Test-Path -LiteralPath $manifestPath)) {
     throw "Manifest not found: $manifestPath"
 }
 
+$runtimeDir = Join-Path $rootDir "runtime"
+Stop-CodeWorkerProcessesUsingRuntime -RootDir $rootDir -RuntimeDir $runtimeDir
+
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $hfToken = $env:HF_TOKEN
 $selectedModels = @()

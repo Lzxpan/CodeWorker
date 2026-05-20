@@ -26,6 +26,10 @@
 - 多對話串：右側 `240px` thread panel 可新增、切換、重新命名、刪除對話串，每個 thread 保留自己的 history、memory 與 transcript。
 - 模型主導檔案生成：在一般對話中要求產生文件即可，模型會先產生內容與標題，CodeWorker 依模型標題自動命名並建立 pending preview；確認後才寫入 `.txt/.md/.py/.js/.ts/.json/.html/.css/.yaml/.sql/.cs/.docx/.pdf/.pptx/.xlsx`。
 - Agent 安全機制：寫檔、patch、刪檔、rename 與執行 command 前都會建立 pending action，使用者確認後才執行；套用前會建立 Git checkpoint，套用後若有檔案變更會建立 post checkpoint，可查看 diff 並復原這次修改。
+- 直接修改專案檔案：`產生修改計畫` 會優先產生可審查、可套用的 `patch_file`，模型只要能提供唯一命中的 `search/replace`，CodeWorker 就能轉成真正的檔案修改 action，而不是只輸出文字建議。
+- 模型 patch 容錯：若本地模型回傳的 JSON 不完整，但仍能抽出 `path`、`search`、`replace`，且 `search` 在目標檔案中唯一命中，CodeWorker 會救回為可確認套用的 patch；如果無法安全定位才降級為保守文字建議。
+- 套用後驗證建議：修改完成後會依專案型態建議下一步驗證指令，例如 `.sln/.csproj` 專案會提示 `dotnet build`，`package.json` 會提示 `npm test` / `npm run build`，但不會自動執行有副作用的 command。
+- 版本來源與啟動驗證：版本由根目錄 `VERSION` 統一管理，`/api/status` 會回傳 `appVersion`、`appName`、`rootDir` 與 `serverPath`，`scripts\launch-webui.cmd` 會檢查實際啟動版本並用 cache-busting URL 開啟頁面。
 
 ---
 
@@ -40,6 +44,11 @@
 - 影片不是直接把 MP4 binary 丟給模型，而是先用 `FFmpeg` 抽 keyframes；音訊與影片音軌會嘗試 `whisper.cpp` speech-to-text。
 - 檔案生成與 Agent 寫入都必須確認後才會落到 project root；生成完成後 UI 會顯示實際檔案路徑與檔名。
 - `產生修改計畫` 會先建立可審查的檔案操作清單；`確認套用` 前會建立 Git checkpoint，套用後若有檔案變更會建立 post checkpoint，`查看 Git diff` 可比對變更，必要時可 `復原這次修改`。
+- `產生修改計畫` 的速度不代表功能完成度。CodeWorker 的判準是：必須有可定位的檔案、可審查的 diff、可確認套用的 action，以及套用後能透過 Git diff / build / test 驗證；如果只能產生文字建議，UI 會標示為保守建議，不會假裝已能改 code。
+- 對於已知且可安全判斷的局部修改，CodeWorker 可能使用本地 deterministic patch 直接產生 `patch_file`。這不是單純加速，而是先確認原始片段唯一命中，再交給相同的 pending action / Git checkpoint / restore 流程套用。
+- 對於一般修改需求，CodeWorker 會要求本地模型輸出 `search/replace`。只要 `search` 在本機檔案唯一命中，且安全檢查通過，就會變成真正可套用的 `patch_file`；若命中 0 次、多次、越界、保護目錄或高風險操作未確認，都會被拒絕。
+- `scripts\bootstrap.cmd` 不是 `git pull` 的替代品。更新另一台電腦時必須先拉到最新 repo，再執行 bootstrap 補 runtime / packages。新版 bootstrap 會先停止同一個 CodeWorker root/runtime 下的舊 process，避免舊 WebUI 還在 port 上繼續服務。
+- 如果更新後 Web UI 仍顯示舊版，請先檢查 `/api/status` 的 `appVersion`、`rootDir`、`serverPath`，以及 `logs\webui-*.log` 開頭三行；這比只看瀏覽器畫面更可靠，因為瀏覽器可能有舊快取或捷徑可能指向另一個舊資料夾。
 - CodeGraph 功能參考 `colbymchenry/codegraph` 的本機語意索引做法；出處、作者與授權資訊列於 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
@@ -74,8 +83,51 @@ scripts\launch-webui.cmd
 
 1. Web UI 左上角應顯示 `CodeWorker V1.01.002`。
 2. `scripts\bootstrap.cmd` 會補齊 runtime、Python packages、模型 manifest 與既有下載項目，不會重複下載已存在且校驗通過的檔案。
-3. `scripts\launch-webui.cmd` 會重新啟動 `http://127.0.0.1:8764`；若 port 上已有舊的 CodeWorker Web UI，會先回收舊 process。
-4. 開啟專案後可執行 `分析專案檔案結構`、`用目前輸入查 CodeGraph`、`重新掃描索引` 與一般聊天，結果都會出現在同一個 transcript。
+3. bootstrap 一開始會停止同一個 CodeWorker root/runtime 下的舊 process，避免舊 WebUI server 繼續佔用 port。
+4. `scripts\launch-webui.cmd` 會重新啟動 `http://127.0.0.1:8764`；若 port 上已有舊的 CodeWorker Web UI，會先回收舊 process。
+5. launch 會讀取根目錄 `VERSION`，並呼叫 `/api/status` 檢查實際回傳的 `appVersion` 是否符合預期；若版本不一致，啟動等待會失敗，不會讓你誤以為新版已開啟。
+6. launch 開啟瀏覽器時會使用 `?v=版本-時間戳`，降低瀏覽器載入舊 `index.html` 或舊 JavaScript 快取的機率。
+7. 開啟專案後可執行 `分析專案檔案結構`、`用目前輸入查 CodeGraph`、`重新掃描索引`、`產生修改計畫` 與一般聊天，結果都會出現在同一個 transcript。
+
+### 更新後仍看到舊版本時的檢查方式
+
+如果另一台電腦更新後仍看到 `V1.00.000` 或其他舊版，不要只看瀏覽器畫面，請依序檢查：
+
+```cmd
+git pull
+type VERSION
+scripts\bootstrap.cmd
+scripts\launch-webui.cmd
+```
+
+然後在 PowerShell 查 `/api/status`：
+
+```powershell
+(Invoke-RestMethod -Uri "http://127.0.0.1:8764/api/status").data |
+  Select-Object appVersion,appName,rootDir,serverPath |
+  ConvertTo-Json
+```
+
+正確結果應類似：
+
+```json
+{
+  "appVersion": "V1.01.002",
+  "appName": "CodeWorker V1.01.002",
+  "rootDir": "D:\\CodeWorker",
+  "serverPath": "D:\\CodeWorker\\webui\\server.py"
+}
+```
+
+如果 `appVersion` 是舊版，代表實際跑的 server source 還是舊的；如果 `rootDir` 或 `serverPath` 指到不同資料夾，代表你啟動的是另一份 CodeWorker。新版 `logs\webui-*.log` 開頭也會列出：
+
+```text
+CodeWorker V1.01.002 Web UI running at http://127.0.0.1:8764
+RootDir: D:\CodeWorker
+ServerPath: D:\CodeWorker\webui\server.py
+```
+
+log 中若只看到 `ConnectionAbortedError` / `WinError 10053`，通常只是瀏覽器或啟動探測連線中途關閉；新版已忽略這類中斷，避免它蓋過真正的版本資訊。
 
 ### 啟動 Web UI
 
@@ -140,6 +192,77 @@ CodeGraph 適合在「還不知道要釘選哪些檔案」或「修改前想確�
 - 可在修改前檢查 callers/callees/imports/extends，避免漏掉受影響位置。
 - 全程本機 SQLite 與本機模型，不需要 API key，也不會把專案送到雲端。
 - 與 `分析專案檔案結構` 搭配時，先用檔案分類縮小範圍，再用 CodeGraph 查 symbol 關聯。
+
+### 直接修改專案檔案
+
+CodeWorker 的目標不是只回答「你應該怎麼改」，而是能在使用者確認後真正修改專案檔案。這個流程目前分成「產生計畫」與「確認套用」兩段，目的是讓本地模型可以協助開發，同時避免失控寫檔。
+
+操作方式：
+
+1. 開啟專案。
+2. 建議先用 `分析專案檔案結構` 或 CodeGraph 查詢找出要修改的檔案，再釘選相關檔案；小型專案也可以不釘選，讓 RAG / CodeGraph 自動找候選。
+3. 在對話輸入框輸入修改需求，例如：「幫我修改按方向鍵的下不要直接掉到底，改成按 ctrl 掉到底。」
+4. 按 `產生修改計畫`。
+5. transcript 會顯示修改位置、命中函式 / 區塊、修改原因、before snippet、after snippet、diff 與 pending action。
+6. 檢查 diff 正確後按 `確認套用`。
+7. CodeWorker 會建立 pre-edit Git checkpoint，套用 `patch_file` / `create_file` / `replace_file` / `delete_file` / `rename_file` / `run_command`，若檔案有變更再建立 post-edit checkpoint。
+8. 套用後可以按 `查看 Git diff` 檢查變更；若有問題可按 `復原這次修改` 回到 pre-edit checkpoint。
+
+直接修改的安全規則：
+
+- 所有寫入都限制在 project root 內。
+- `.git/`、`runtime/`、`models/`、`data/indexes/` 等保護路徑會被拒絕。
+- `patch_file` 的 `search` 片段必須在當前檔案中剛好命中 1 次；命中 0 次代表模型看的是舊內容，命中多次代表風險太高，都不會套用。
+- `delete_file`、`rename_file`、`replace_file`、`run_command` 屬於高風險操作，必須明確確認。
+- 套用前後使用 Git checkpoint，不另外複製整個資料夾，避免大量專案造成備份爆量。
+- 如果使用者原本已有 dirty working tree，pre-edit checkpoint 會包含既有變更，UI 會顯示 Git 狀態與 diff。
+
+模型 patch 如何落地：
+
+- 對於一般需求，本地模型會被要求輸出 JSON 結構，內含 `path`、`target`、`reason`、`operations.search` 與 `operations.replace`。
+- CodeWorker 不會直接相信模型輸出，而是讀取本機檔案，確認 `search` 唯一命中後才建立 `patch_file` action。
+- 如果模型 JSON 不完整，但仍能抽出 `path`、`search`、`replace`，CodeWorker 會嘗試 salvage；只要本機驗證安全，仍可產生真正 action。
+- 如果模型只輸出文字建議、片段無法定位、或引入明顯不安全內容，就會保留為 advisory，不會假裝可以套用。
+- 對於少數非常明確且可驗證的情境，CodeWorker 會使用本地 deterministic patch 產生 action；這仍然走相同的 diff、確認、Git checkpoint 與 restore 流程。
+
+套用後驗證：
+
+- CodeWorker 會依專案檔案推斷建議驗證命令。
+- `.sln` / `.csproj`：建議 `dotnet build`。
+- `package.json`：建議 `npm test` 或 `npm run build`。
+- `pyproject.toml` / `pytest.ini` / `tests/`：建議 `pytest`。
+- `Cargo.toml`：建議 `cargo test`。
+- `go.mod`：建議 `go test ./...`。
+- 這些命令目前是建議，不會自動執行，因為 build/test script 可能有副作用或耗時很長。
+
+### 實際功能修正範例
+
+在 `C:\Games` Tetris 專案中，需求「按方向鍵的下不要直接掉到底，改成按 Ctrl 掉到底」會被產生為真正的 `patch_file`。修改後 `Form1_KeyDown` 類似：
+
+```csharp
+case Keys.Down:
+case Keys.S:
+    if (MovePiece(0, 1))
+    {
+        score += 1;
+    }
+
+    break;
+case Keys.Control:
+case Keys.ControlKey:
+case Keys.LControlKey:
+case Keys.RControlKey:
+    HardDrop();
+    break;
+```
+
+這代表：
+
+- `Down`：只下降一格。
+- `S`：只下降一格。
+- `Ctrl` / `ControlKey` / `LControlKey` / `RControlKey`：直接掉到底。
+- 舊的 `Down + Control -> HardDrop()` 區塊會被移除。
+- 如果同一句需求在已完成後再次送出，CodeWorker 會回覆「目前專案已符合這次修改需求，沒有需要套用的檔案操作」，避免再丟給模型浪費時間或產生重複 patch。
 
 ### 單一訊息流與 streaming 閱讀
 
@@ -226,6 +349,7 @@ CodeWorker/
 ├─ webui/         # Python 後端、RAG/Agent 模組與前端資源
 ├─ plugins/       # Codex plugin，例如 codeworker-codegraph
 ├─ THIRD_PARTY_NOTICES.md
+├─ VERSION
 ├─ README.md
 ├─ README.zh-TW.md
 └─ README.en.md
@@ -245,6 +369,7 @@ CodeWorker/
 - `webui\agent\runtime.py`：ReAct-style Agent、tool calls、pending actions 與 audit log。
 - `webui\static\js\app-*.js`：前端 state、API、UI、檔案樹、threads、chat、CodeGraph 與初始化流程。
 - `webui\static\styles.css`：450px sidebar、單一 transcript chat、輸入區與 240px thread panel。
+- `VERSION`：Web UI 與 `/api/status` 使用的單一版本來源；`scripts\launch-webui.cmd` 也會用它驗證實際啟動版本。
 - `plugins\codeworker-codegraph`：repo-local Codex plugin，內含 `codeworker-codegraph` skill 與 `query_codeworker_graph.py` 查詢工具。
 - `THIRD_PARTY_NOTICES.md`：第三方出處、作者與授權註記。
 
@@ -263,16 +388,23 @@ flowchart LR
     W --> P["Pinned files"]
     W --> F["Attachments"]
     W --> G["Model decides file generation"]
+    W --> E["Generate edit plan"]
     I --> S["webui/server.py"]
     P --> S
     F --> S
     T --> S
     K --> S
     G --> A["Auto pending preview"]
+    E --> V["Validate unique search/replace"]
+    V --> B["Pending edit action"]
     O --> H["Transcript tool card"]
     X --> H
     A --> Q["User confirmation"]
     Q --> D["Write generated file"]
+    B --> Q2["User confirmation"]
+    Q2 --> C1["Git pre-edit checkpoint"]
+    C1 --> C2["Apply file operation"]
+    C2 --> C3["Git post-edit checkpoint / diff / restore"]
     S --> C["Assemble memory / RAG / pinned context / attachments"]
     C --> M["llama.cpp local model server"]
     M --> R["Streaming reply"]
@@ -287,6 +419,9 @@ flowchart LR
 - 有 pinned files 時，會優先使用 pinned context。
 - 長回答續寫使用上一段回答 tail，不再重送大型 `PROJECT RAG CONTEXT`。
 - 檔案生成由一般聊天觸發；模型先產生內容與標題，CodeWorker 再建立 pending preview。同一句多格式需求會建立多個 preview，文件輸出會清理 Markdown 標記並使用可顯示中文的 PDF 字型。
+- 直接修改由 `產生修改計畫` 觸發；模型或本地 deterministic rule 產生 `search/replace`，後端驗證唯一命中後才建立 pending action。
+- `確認套用` 前建立 Git pre-edit checkpoint；套用後如果 working tree 變 dirty，建立 post-edit checkpoint，並回傳 diff、changed files、diff stat 與建議驗證指令。
+- `VERSION`、`/api/status.appVersion`、`logs\webui-*.log` 開頭的 `RootDir` / `ServerPath` 是更新與部署問題的主要排查來源。
 
 CodeGraph 出處：
 
@@ -302,9 +437,19 @@ CodeGraph 出處：
 ### V1.01.002
 
 - 將 Web UI 版本更新為 `CodeWorker V1.01.002`。
+- 新增根目錄 `VERSION` 作為單一版本來源；`webui/server.py` 啟動時讀取此檔，`/api/status` 回傳 `appVersion`、`appName`、`rootDir` 與 `serverPath`。
+- `scripts\launch-webui.cmd` 會讀取 `VERSION`、等待 `/api/status` 回傳相同版本，並用 `?v=版本-時間戳` 開啟頁面，避免瀏覽器或舊 process 造成更新後仍看到舊版。
+- `scripts\bootstrap.ps1` 啟動時會停止同一個 CodeWorker root/runtime 下的舊 process，降低更新 runtime 或 source 後舊 WebUI 仍佔用 port 的機率。
+- WebUI log 開頭會印出實際 `RootDir` 與 `ServerPath`；這可用來判斷另一台電腦是否啟動到舊資料夾或舊捷徑。
+- `json_response()` 與 `text_response()` 會忽略瀏覽器中途斷線造成的 `BrokenPipeError`、`ConnectionAbortedError`、`ConnectionResetError`，避免 `WinError 10053` 混淆版本問題判讀。
 - 新增本地檔案修改工作流：`產生修改計畫`、pending action card、`確認套用`、`查看 Git diff`、`建立 checkpoint` 與 `復原這次修改`。
 - 新增 Git safety layer，檔案修改套用前建立 pre-edit checkpoint，套用後若有檔案變更建立 post-edit checkpoint，並限制 restore 只能回到 CodeWorker 建立的 pre-edit checkpoint。
 - 新增 `/api/edit/apply`、`/api/edit/status`、`/api/git/diff`、`/api/git/checkpoint`、`/api/git/restore`，支援 `create_file`、`patch_file`、`replace_file`、`delete_file`、`rename_file`、`run_command` pending actions。
+- `patch_file` 通用化：本地模型輸出合法 JSON patch 時，CodeWorker 會驗證 `search` 是否唯一命中本機檔案，通過後才建立可套用 action。
+- 新增模型 patch salvage：若模型 JSON 不完整，但仍可抽出 `path/search/replace`，且本機驗證安全，仍會建立真正 `patch_file`；無法安全定位時才降級為 advisory。
+- 修正安全檢查：程式碼字串 literal 內的新文字不會被誤判為未知 identifier，但真正引入未宣告 identifier 仍會被攔截。
+- 套用修改後新增 validation command suggestions，例如 `.sln/.csproj` 建議 `dotnet build`，`package.json` 建議 `npm test` / `npm run build`，但不自動執行任意 build/test script。
+- 新增 Tetris 鍵盤行為 deterministic patch 範例：`Down/S` 軟降一格，`Ctrl/ControlKey/LControlKey/RControlKey` 執行 `HardDrop()`；已符合需求時會回覆無需修改，避免重複 patch 或模型逾時。
 - 將對話、AI streaming、專案結構分析、CodeGraph 查詢 / 重建、context coverage 與檔案生成確認整合到單一 transcript scroll container。
 - 新增 persisted `transcriptVersion: 1` 與 `transcript` thread data；舊 thread 會從既有 `history` fallback 顯示。
 - 保留 `history` 作為模型上下文來源，工具卡與狀態卡只進 `transcript`，避免 CodeGraph / 分析結果被誤送進 LLM。
