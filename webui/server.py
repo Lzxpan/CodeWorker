@@ -1035,7 +1035,22 @@ def build_model_download_progress_payload(
     }
 
 
-def validate_model_file(model_path: Path) -> None:
+def get_model_minimum_size_bytes(model_key: str) -> int:
+    try:
+        estimated_gb = float(get_model_manifest(model_key).get("estimatedModelSizeGb") or 0)
+    except (TypeError, ValueError):
+        estimated_gb = 0
+    if estimated_gb <= 0:
+        return 0
+    return int(estimated_gb * (1024 ** 3) * 0.5)
+
+
+def is_primary_model_filename(model_key: str, filename: str) -> bool:
+    pattern = get_model_file_pattern(model_key)
+    return fnmatch.fnmatch(filename.lower(), pattern.lower())
+
+
+def validate_model_file(model_path: Path, minimum_bytes: int = 0) -> None:
     if not model_path.exists():
         raise ValueError(f"Model file not found: {model_path}")
     if not model_path.is_file():
@@ -1043,6 +1058,11 @@ def validate_model_file(model_path: Path) -> None:
     size = model_path.stat().st_size
     if size <= 0:
         raise ValueError(f"Model file is empty: {model_path}")
+    if minimum_bytes > 0 and size < minimum_bytes:
+        raise ValueError(
+            f"Model file appears incomplete: {model_path}; "
+            f"size={human_size(size)}, expected at least {human_size(minimum_bytes)}"
+        )
 
 
 def check_minimum_memory() -> Optional[str]:
@@ -2299,7 +2319,28 @@ def ensure_runtime_and_model(model_key: str, runtime_backend: str = "cpu", task_
                     )
                 )
             )
-    validate_model_file(model_file)
+    minimum_model_bytes = get_model_minimum_size_bytes(model_key)
+    try:
+        validate_model_file(model_file, minimum_model_bytes)
+    except ValueError:
+        model_file.unlink(missing_ok=True)
+        if task_id:
+            model_file, _ = download_model_with_progress(task_id, model_key, force=False)
+        else:
+            bootstrap = run_script("bootstrap.cmd", "-SkipRuntime", "-Models", model_key, timeout_seconds=1800)
+            model_file = find_model_file(model_dir, get_model_file_pattern(model_key))
+            if bootstrap.returncode != 0 or model_file is None:
+                raise RuntimeError(
+                    json.dumps(
+                        make_error(
+                            "MODEL_MISSING",
+                            "Failed to replace incomplete model.",
+                            bootstrap.stdout + bootstrap.stderr,
+                            extra={"modelKey": model_key},
+                        )
+                    )
+                )
+        validate_model_file(model_file, minimum_model_bytes)
     mmproj_file: Optional[Path] = None
     mmproj_patterns = get_model_mmproj_patterns(model_key)
     if mmproj_patterns:
@@ -2588,14 +2629,24 @@ def download_model_with_progress(task_id: str, model_key: str, force: bool = Tru
             if last_mmproj_error:
                 raise last_mmproj_error
     if not force:
-        resolved_filenames = [
-            filename
-            for filename in resolved_filenames
-            if not (target_dir / Path(filename).name).exists()
-        ]
+        remaining_filenames: List[str] = []
+        minimum_model_bytes = get_model_minimum_size_bytes(model_key)
+        for filename in resolved_filenames:
+            final_path = target_dir / Path(filename).name
+            if not final_path.exists():
+                remaining_filenames.append(filename)
+                continue
+            minimum_bytes = minimum_model_bytes if is_primary_model_filename(model_key, final_path.name) else 1
+            try:
+                validate_model_file(final_path, minimum_bytes)
+            except ValueError:
+                final_path.unlink(missing_ok=True)
+                remaining_filenames.append(filename)
+        resolved_filenames = remaining_filenames
         if not resolved_filenames:
             primary_path = target_dir / Path(resolve_huggingface_filename(repo, get_model_file_pattern(model_key))).name
             if primary_path.exists():
+                validate_model_file(primary_path, get_model_minimum_size_bytes(model_key))
                 return primary_path, 0
     total_model_bytes = 0
     downloaded_paths: List[Path] = []

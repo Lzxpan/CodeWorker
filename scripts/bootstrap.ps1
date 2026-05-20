@@ -122,14 +122,19 @@ function Download-File {
     )
 
     Ensure-Directory -Path (Split-Path -Parent $Destination)
+    $partDestination = "$Destination.part"
+    if (Test-Path -LiteralPath $partDestination) {
+        Remove-Item -LiteralPath $partDestination -Force
+    }
     try {
-        Invoke-WebRequest -Uri $Url -Headers $Headers -OutFile $Destination
+        Invoke-WebRequest -Uri $Url -Headers $Headers -OutFile $partDestination
+        Move-Item -LiteralPath $partDestination -Destination $Destination -Force
         return
     } catch {
         $curlError = $_
         $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
         if ($curl) {
-            $arguments = @("-L", "--fail", "--silent", "--show-error", "--ssl-no-revoke", "-o", $Destination)
+            $arguments = @("-L", "--fail", "--show-error", "--ssl-no-revoke", "--progress-bar", "-o", $partDestination)
             foreach ($entry in $Headers.GetEnumerator()) {
                 $arguments += @("-H", "$($entry.Key): $($entry.Value)")
             }
@@ -137,6 +142,7 @@ function Download-File {
 
             & $curl.Source @arguments
             if ($LASTEXITCODE -eq 0) {
+                Move-Item -LiteralPath $partDestination -Destination $Destination -Force
                 return
             }
         }
@@ -159,15 +165,30 @@ destination = sys.argv[2]
 headers = json.loads(base64.b64decode(sys.argv[3]).decode('utf-8'))
 request = urllib.request.Request(url, headers=headers)
 with urllib.request.urlopen(request, timeout=300) as response, open(destination, 'wb') as handle:
+    total = int(response.headers.get('Content-Length') or 0)
+    written = 0
     while True:
         chunk = response.read(1024 * 1024)
         if not chunk:
             break
         handle.write(chunk)
+        written += len(chunk)
+        if total > 0:
+            percent = (written / total) * 100
+            sys.stderr.write(f"\r[DOWNLOAD] {percent:6.2f}% ({written / (1024 ** 3):.2f} GB / {total / (1024 ** 3):.2f} GB)")
+        else:
+            sys.stderr.write(f"\r[DOWNLOAD] {written / (1024 ** 3):.2f} GB")
+        sys.stderr.flush()
+    sys.stderr.write("\n")
 '@
-        & $pythonExe -c $pythonCode $Url $Destination $headersBase64
+        & $pythonExe -c $pythonCode $Url $partDestination $headersBase64
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to download file with portable Python: $Url"
+        }
+        Move-Item -LiteralPath $partDestination -Destination $Destination -Force
+    } finally {
+        if (Test-Path -LiteralPath $partDestination) {
+            Remove-Item -LiteralPath $partDestination -Force
         }
     }
 }
@@ -325,12 +346,22 @@ function Download-HuggingFaceModel {
 
     $existing = Get-ChildItem -LiteralPath $targetDir -Filter *.gguf -ErrorAction SilentlyContinue
     $healthyExisting = $existing | Where-Object { $_.Length -gt 0 }
+    $minimumModelBytes = 0
+    if ($Config.PSObject.Properties.Name -contains "estimatedModelSizeGb" -and $Config.estimatedModelSizeGb) {
+        $minimumModelBytes = [int64]([double]$Config.estimatedModelSizeGb * 1GB * 0.5)
+    }
     $allRequiredPresent = $false
     if ($healthyExisting -and $healthyExisting.Count -eq $existing.Count) {
         $allRequiredPresent = $true
         foreach ($pattern in $requiredPatterns) {
             $wildcard = [System.Management.Automation.WildcardPattern]::new($pattern, [System.Management.Automation.WildcardOptions]::IgnoreCase)
-            if (-not ($healthyExisting | Where-Object { $wildcard.IsMatch($_.Name) } | Select-Object -First 1)) {
+            $matchedExisting = $healthyExisting | Where-Object { $wildcard.IsMatch($_.Name) } | Select-Object -First 1
+            if (-not $matchedExisting) {
+                $allRequiredPresent = $false
+                break
+            }
+            if ($minimumModelBytes -gt 0 -and $matchedExisting.Length -lt $minimumModelBytes) {
+                Write-Step "Existing model file '$($matchedExisting.Name)' looks incomplete ($([math]::Round($matchedExisting.Length / 1GB, 2)) GB). Expected at least $([math]::Round($minimumModelBytes / 1GB, 2)) GB; downloading again."
                 $allRequiredPresent = $false
                 break
             }
@@ -373,6 +404,9 @@ function Download-HuggingFaceModel {
             $downloaded = Get-Item -LiteralPath $destination -ErrorAction Stop
             if ($downloaded.Length -le 0) {
                 throw "Downloaded model file is empty: $destination"
+            }
+            if ($minimumModelBytes -gt 0 -and $downloaded.Length -lt $minimumModelBytes) {
+                throw "Downloaded model file appears incomplete: $destination size=$([math]::Round($downloaded.Length / 1GB, 2)) GB expectedAtLeast=$([math]::Round($minimumModelBytes / 1GB, 2)) GB"
             }
         }
     }

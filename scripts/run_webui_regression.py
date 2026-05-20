@@ -197,6 +197,42 @@ def test_model_download_progress_payload_reports_file_percent():
         "download_model_with_progress(task_id, model_key, force=False)" in source and "if not force:" in source,
         "open-project model preparation should only download missing model files while manual redownload can still force refresh",
     )
+    assert_true(
+        "get_model_minimum_size_bytes(model_key)" in source and "Model file appears incomplete" in source,
+        "webui model preparation should reject obvious partial GGUF downloads instead of treating them as ready",
+    )
+
+    bootstrap_source = (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")
+    assert_true(
+        "$partDestination = \"$Destination.part\"" in bootstrap_source and "Move-Item -LiteralPath $partDestination -Destination $Destination -Force" in bootstrap_source,
+        "bootstrap should download to a .part file before replacing the final GGUF",
+    )
+    assert_true(
+        "--progress-bar" in bootstrap_source or "[DOWNLOAD]" in bootstrap_source,
+        "bootstrap should show visible download progress for large model files",
+    )
+    assert_true(
+        "estimatedModelSizeGb" in bootstrap_source and "looks incomplete" in bootstrap_source,
+        "bootstrap should reject partial model files based on the manifest estimated size",
+    )
+
+
+def test_partial_model_file_is_rejected_by_size_guard():
+    minimum = server.get_model_minimum_size_bytes("qwen25coder14b")
+    assert_true(minimum > 4 * 1024 ** 3, "qwen25coder14b should have a useful minimum size guard")
+    root = ROOT / ".tmp" / f"regression-partial-model-{uuid.uuid4().hex}"
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        partial = root / "qwen2.5-coder-14b-instruct-q4_k_m.gguf"
+        partial.write_bytes(b"GGUF")
+        try:
+            server.validate_model_file(partial, minimum)
+        except ValueError as exc:
+            assert_true("appears incomplete" in str(exc), "partial GGUF should produce a clear incomplete-file error")
+        else:
+            raise AssertionError("partial GGUF should not pass model validation")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_hardware_optimization_log_entry_contains_diagnostics():
@@ -2269,6 +2305,7 @@ def main():
         test_launch_webui_restarts_stale_codeworker_server,
         test_bootstrap_stops_codeworker_runtime_users_before_winpython_update,
         test_model_download_progress_payload_reports_file_percent,
+        test_partial_model_file_is_rejected_by_size_guard,
         test_hardware_optimization_log_entry_contains_diagnostics,
         test_model_file_matching_does_not_fallback_on_pattern_miss,
         test_project_structure_classifies_multi_language_files,
