@@ -20,6 +20,32 @@
 
 * { box-sizing: border-box; }
 
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(13, 92, 99, 0.42) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(13, 92, 99, 0.42);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(13, 92, 99, 0.58);
+  background-clip: content-box;
+}
+
 body {
   margin: 0;
   height: 100vh;
@@ -47,6 +73,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
   height: calc(100vh - 28px);
   min-height: calc(100vh - 28px);
   overflow: visible;
