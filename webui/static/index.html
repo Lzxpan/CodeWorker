@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CodeWorker V1.01.002 Web UI</title>
+  <title>CodeWorker V1.01.003 Web UI</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -13,7 +14,7 @@
         <div class="brand-main">
           <div class="brand-mark">CW</div>
           <div class="brand-copy">
-            <h1 id="brandTitle">CodeWorker V1.01.002</h1>
+            <h1 id="brandTitle">CodeWorker V1.01.003</h1>
             <p id="brandSubtitle">本地離線專案分析與對話</p>
           </div>
         </div>
@@ -23,48 +24,54 @@
         </div>
       </div>
 
-      <section class="panel control-panel">
-        <div class="compact-field">
-          <div class="inline-label">
-            <label id="projectPathLabel" for="projectPath">專案路徑</label>
-            <button type="button" class="help-trigger" data-help="project-path" aria-label="專案路徑說明">?</button>
-          </div>
-          <input id="projectPath" class="picker-input" type="text" readonly placeholder="點擊這裡選擇專案資料夾">
-        </div>
-
-        <div class="compact-field compact-field-tight">
-          <div class="inline-label">
-            <label id="modelKeyLabel" for="modelKey">模型</label>
-            <button type="button" class="help-trigger" data-help="model-key" aria-label="模型說明">?</button>
-          </div>
-          <select id="modelKey">
-            <option value="gemma4" selected>Gemma 4 26B</option>
-            <option value="qwen35">Qwen 3.5 9B Vision</option>
-          </select>
-        </div>
-
-        <div id="progressPanel" class="progress-panel hidden">
-          <div class="panel-title-row compact">
-            <div class="title-with-help">
-              <strong id="progressTitle">正在開啟專案</strong>
-              <button type="button" class="help-trigger" data-help="progress-panel" aria-label="進度條說明">?</button>
+      <details id="projectControlDetails" class="panel control-panel">
+        <summary class="project-control-summary">
+          <span id="projectControlSummaryTitle">專案控制</span>
+          <span id="projectControlSummaryMeta" class="meta">路徑、模型、開啟與分析</span>
+        </summary>
+        <div class="project-control-body">
+          <div class="compact-field">
+            <div class="inline-label">
+              <label id="projectPathLabel" for="projectPath">專案路徑</label>
+              <button type="button" class="help-trigger" data-help="project-path" aria-label="專案路徑說明">?</button>
             </div>
-            <span id="progressPercent">0%</span>
+            <input id="projectPath" class="picker-input" type="text" readonly placeholder="點擊這裡選擇專案資料夾">
           </div>
-          <div class="progress-track">
-            <div id="progressBar" class="progress-bar"></div>
-          </div>
-          <div id="progressStep" class="hint">等待中</div>
-        </div>
 
-        <div class="actions">
-          <div class="action-item">
-            <button id="openProjectBtn" class="primary">開啟專案</button>
-            <button type="button" class="help-trigger" data-help="open-project" aria-label="開啟專案說明">?</button>
+          <div class="compact-field compact-field-tight">
+            <div class="inline-label">
+              <label id="modelKeyLabel" for="modelKey">模型</label>
+              <button type="button" class="help-trigger" data-help="model-key" aria-label="模型說明">?</button>
+            </div>
+            <select id="modelKey">
+              <option value="gemma4" selected>Gemma 4 26B</option>
+              <option value="qwen35">Qwen 3.5 9B Vision</option>
+            </select>
           </div>
-          <div class="action-item">
-            <button id="analyzeBtn">分析專案檔案結構</button>
-            <button type="button" class="help-trigger" data-help="analyze-project" aria-label="分析專案檔案結構說明">?</button>
+
+          <div id="progressPanel" class="progress-panel hidden">
+            <div class="panel-title-row compact">
+              <div class="title-with-help">
+                <strong id="progressTitle">正在開啟專案</strong>
+                <button type="button" class="help-trigger" data-help="progress-panel" aria-label="進度條說明">?</button>
+              </div>
+              <span id="progressPercent">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="progressBar" class="progress-bar"></div>
+            </div>
+            <div id="progressStep" class="hint">等待中</div>
+          </div>
+
+          <div class="actions">
+            <div class="action-item">
+              <button id="openProjectBtn" class="primary">開啟專案</button>
+              <button type="button" class="help-trigger" data-help="open-project" aria-label="開啟專案說明">?</button>
+            </div>
+            <div class="action-item">
+              <button id="analyzeBtn">分析專案檔案結構</button>
+              <button type="button" class="help-trigger" data-help="analyze-project" aria-label="分析專案檔案結構說明">?</button>
+            </div>
           </div>
         </div>
 
@@ -74,7 +81,7 @@
           <div id="modelStatus" class="model-status meta">模型狀態：尚未檢查</div>
           <div id="hardwareStatus" class="hardware-status meta" role="status">硬體偵測：尚未檢查</div>
         </details>
-      </section>
+      </details>
 
       <section id="errorPanel" class="panel error-panel hidden">
         <div class="panel-title-row compact">
@@ -148,27 +155,17 @@
           <div id="agentPanel" class="agent-panel hidden"></div>
           <div id="pendingActionPanel" class="pending-action-panel hidden"></div>
           <div id="structurePanel" class="structure-panel hidden" aria-live="polite"></div>
-          <div id="codeGraphToolbar" class="codegraph-toolbar" aria-label="CodeGraph">
-            <div class="codegraph-copy">
-              <strong>CodeGraph</strong>
-              <span id="codeGraphHint" class="meta">在下方對話框輸入 symbol、檔名或問題，再查 callers/callees/imports。</span>
-            </div>
-            <div class="codegraph-controls">
-              <button id="codeGraphUsePromptBtn" type="button">查詢關聯</button>
-              <button id="codeGraphRebuildBtn" type="button" class="ghost">重建索引</button>
-              <button id="codeGraphPinBtn" type="button" class="ghost" disabled>釘選命中文件</button>
-              <button type="button" class="help-trigger" data-help="codegraph" aria-label="CodeGraph 說明">?</button>
-            </div>
-          </div>
           <div id="codeGraphResults" class="codegraph-results hidden" aria-live="polite">尚未查詢 CodeGraph。</div>
           <form id="chatForm" class="chat-form">
-            <div class="field-label-row">
-              <label id="chatInputLabel" for="chatInput" class="meta">對話輸入</label>
-              <button type="button" class="help-trigger" data-help="chat-input" aria-label="對話輸入說明">?</button>
+            <div class="chat-input-wrap">
+              <textarea id="chatInput" rows="4" placeholder="輸入問題、修改需求或 CodeGraph 查詢，例如：Form1、AudioManager、Program.cs、誰呼叫 build_project_rag_context？"></textarea>
+              <div class="field-label-row composer-input-label">
+                <label id="chatInputLabel" for="chatInput" class="meta">對話輸入</label>
+                <button type="button" class="help-trigger" data-help="chat-input" aria-label="對話輸入說明">?</button>
+              </div>
             </div>
-            <textarea id="chatInput" rows="4" placeholder="輸入問題、修改需求或 CodeGraph 查詢，例如：Form1、AudioManager、Program.cs、誰呼叫 build_project_rag_context？"></textarea>
             <div id="chatImagePreview" class="chat-image-preview hidden"></div>
-            <div class="chat-footer-row">
+            <div class="composer-meta-row">
               <div class="chat-footer-meta">
                 <span id="chatImageLabel" class="meta">檔案附件</span>
                 <span id="chatImagePasteHint" class="meta">可貼上截圖或上傳可分析檔案。</span>
@@ -178,18 +175,20 @@
                   <button id="removeChatImageBtn" type="button" class="ghost hidden">移除附件</button>
                 </div>
               </div>
-              <div class="context-picker">
-                <label id="contextWindowLabel" for="contextWindowSelect">Context</label>
-                <select id="contextWindowSelect">
-                  <option value="4096">4k</option>
-                  <option value="8192">8k</option>
-                  <option value="16384">16k</option>
-                  <option value="32768">32k</option>
-                  <option value="65536">64k</option>
-                  <option value="131072">128k</option>
-                  <option value="262144" selected>256k</option>
-                </select>
+            </div>
+            <div id="codeGraphToolbar" class="codegraph-toolbar" aria-label="CodeGraph">
+              <div class="codegraph-copy">
+                <strong>CodeGraph</strong>
+                <span id="codeGraphHint" class="meta">在對話框輸入 symbol、檔名或問題，再查 callers/callees/imports。</span>
               </div>
+              <div class="codegraph-controls">
+                <button id="codeGraphUsePromptBtn" type="button">查詢關聯</button>
+                <button id="codeGraphRebuildBtn" type="button" class="ghost">重建索引</button>
+                <button id="codeGraphPinBtn" type="button" class="ghost" disabled>釘選命中文件</button>
+                <button type="button" class="help-trigger" data-help="codegraph" aria-label="CodeGraph 說明">?</button>
+              </div>
+            </div>
+            <div class="chat-footer-row">
               <div class="actions chat-actions">
                 <div class="action-item">
                   <button type="button" id="editPlanBtn">產生修改計畫</button>
@@ -208,6 +207,20 @@
                 <div class="action-item">
                   <button type="button" id="clearChatBtn">清空對話</button>
                   <button type="button" class="help-trigger" data-help="clear-chat" aria-label="清空對話說明">?</button>
+                </div>
+              </div>
+              <div class="chat-context-tools">
+                <div class="context-picker">
+                  <label id="contextWindowLabel" for="contextWindowSelect">Context</label>
+                  <select id="contextWindowSelect">
+                    <option value="4096">4k</option>
+                    <option value="8192">8k</option>
+                    <option value="16384">16k</option>
+                    <option value="32768">32k</option>
+                    <option value="65536">64k</option>
+                    <option value="131072">128k</option>
+                    <option value="262144" selected>256k</option>
+                  </select>
                 </div>
               </div>
             </div>

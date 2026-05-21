@@ -1612,6 +1612,21 @@ def test_timeout_fallback_can_create_applyable_tetris_clear_effect_patch():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_edit_plan_timeout_is_scaled_for_local_coding_models():
+    assert_true(
+        server.get_edit_plan_timeout_seconds("qwen25coder14b") >= 420,
+        "Qwen2.5-Coder 14B edit planning should allow slow local generation to finish",
+    )
+    assert_true(
+        server.get_edit_plan_timeout_seconds("qwen3coder30b") >= 600,
+        "larger coding models should get a longer edit planning timeout",
+    )
+    assert_true(
+        server.get_edit_plan_timeout_seconds("unknown-model") == server.EDIT_PLAN_TIMEOUT_SECONDS,
+        "unknown models should keep the default edit planning timeout",
+    )
+
+
 def test_local_direct_edit_changes_down_key_to_soft_drop_and_ctrl_to_hard_drop():
     root = ROOT / ".tmp" / f"regression-edit-direct-keys-{uuid.uuid4().hex}"
     shutil.rmtree(root, ignore_errors=True)
@@ -2027,6 +2042,93 @@ def test_thread_save_updates_default_title_and_restores_project_context():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_missing_thread_project_path_is_cleared_instead_of_restored():
+    old_state = (
+        server.STATE.project_path,
+        server.STATE.summary,
+        list(server.STATE.tree),
+        list(server.STATE.files),
+        list(server.STATE.pinned_files),
+        server.STATE.pending_edit,
+        server.STATE.ui_state,
+    )
+    missing = ROOT / ".tmp" / f"missing-project-{uuid.uuid4().hex}"
+    shutil.rmtree(missing, ignore_errors=True)
+    try:
+        with server.STATE_LOCK:
+            server.apply_thread_to_state_locked(
+                {
+                    "id": "missing-path-thread",
+                    "title": "Missing path",
+                    "modelKey": "qwen25coder14b",
+                    "projectPath": str(missing),
+                    "summary": "stale summary",
+                    "tree": ["Form1.cs"],
+                    "files": [{"path": "Form1.cs", "size": 10, "language": "C#"}],
+                    "pinnedFiles": ["Form1.cs"],
+                    "pendingEdit": {"id": "stale"},
+                    "uiState": "ready",
+                    "history": [],
+                }
+            )
+            assert_true(server.STATE.project_path is None, "missing project path should not be restored")
+            assert_true(server.STATE.ui_state == "idle", "missing project path should return UI state to idle")
+            assert_true(server.STATE.tree == [], "missing project path should clear stale file tree")
+            assert_true(server.STATE.pinned_files == [], "missing project path should clear stale pinned files")
+            assert_true(server.STATE.pending_edit is None, "missing project path should clear stale pending edit")
+    finally:
+        with server.STATE_LOCK:
+            (
+                server.STATE.project_path,
+                server.STATE.summary,
+                server.STATE.tree,
+                server.STATE.files,
+                server.STATE.pinned_files,
+                server.STATE.pending_edit,
+                server.STATE.ui_state,
+            ) = old_state
+
+
+def test_invalid_open_project_path_leaves_server_idle():
+    old_state = (
+        server.STATE.project_path,
+        server.STATE.model_key,
+        server.STATE.model_alias,
+        server.STATE.summary,
+        list(server.STATE.tree),
+        list(server.STATE.files),
+        server.STATE.ui_state,
+    )
+    missing = ROOT / ".tmp" / f"invalid-open-{uuid.uuid4().hex}"
+    shutil.rmtree(missing, ignore_errors=True)
+    task = server.create_task("open-project")
+    try:
+        with server.STATE_LOCK:
+            server.STATE.project_path = "C:/stale-project"
+            server.STATE.summary = "stale"
+            server.STATE.tree = ["stale.cs"]
+            server.STATE.files = [server.ProjectFile(path="stale.cs", size=1, language="C#")]
+            server.STATE.ui_state = "ready"
+        server.open_project_worker(task.id, str(missing), "qwen25coder14b")
+        result = server.get_task(task.id)
+        assert_true(result is not None and result.status == "failed", "missing path should fail the open-project task")
+        assert_true(result.error and result.error.get("code") == "PROJECT_PATH_INVALID", "missing path should report PROJECT_PATH_INVALID")
+        assert_true(server.STATE.project_path is None, "failed missing path should clear stale project path")
+        assert_true(server.STATE.ui_state == "idle", "failed missing path should leave server idle, not stuck in error with stale path")
+        assert_true(server.STATE.tree == [], "failed missing path should clear stale tree")
+    finally:
+        with server.STATE_LOCK:
+            (
+                server.STATE.project_path,
+                server.STATE.model_key,
+                server.STATE.model_alias,
+                server.STATE.summary,
+                server.STATE.tree,
+                server.STATE.files,
+                server.STATE.ui_state,
+            ) = old_state
+
+
 def test_cleanup_empty_threads_only_removes_e2e_threads():
     old_threads_dir = server.THREADS_DIR
     old_active_thread_id = server.ACTIVE_THREAD_ID
@@ -2246,8 +2348,20 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true('id="fileTreeCount"' in html, "file tree should expose a result count")
     assert_true('id="aiActivity"' in html and 'id="chatBusyBar"' in html, "chat UI should include a visible busy indicator")
     assert_true('id="editPlanBtn"' in html and 'id="gitDiffBtn"' in html and 'id="gitCheckpointBtn"' in html, "chat UI should expose edit plan and Git safety actions")
-    assert_true(".sidebar" in css and "grid-template-rows" in css, "sidebar layout should reserve flexible space for the file tree")
+    assert_true('id="projectControlDetails"' in html and 'class="project-control-summary"' in html, "project controls should be collapsible")
+    assert_true('class="composer-meta-row"' in html, "composer should keep attachments in a compact metadata row")
+    assert_true(html.find('id="chatInput"') < html.find('id="codeGraphToolbar"') < html.find('class="chat-footer-row"'), "CodeGraph toolbar should sit below the input and above primary actions")
+    assert_true(html.find('class="chat-footer-row"') < html.find('id="contextWindowSelect"'), "Context selector should live in the bottom action row")
+    assert_true('class="chat-input-wrap"' in html, "chat input should have a dedicated wrapper for its inline label/help")
+    assert_true(html.find('class="chat-input-wrap"') < html.find('id="chatInputLabel"') < html.find('id="chatImagePreview"'), "chat input label/help should sit with the textarea instead of the bottom context controls")
+    assert_true(".sidebar" in css and "flex-direction: column;" in css, "sidebar should use flex layout so hidden panels do not reserve extra row gaps")
+    assert_true(".summary-panel" in css and "flex: 0 1 190px;" in css, "sidebar should reserve useful summary height without adding phantom spacing")
     assert_true(".ai-spinner" in css and "@keyframes aiBusyBar" in css, "busy indicator should have spinner/bar animation styles")
+    assert_true(".project-control-summary" in css and ".control-panel[open]" in css, "CSS should style collapsible project controls with bounded open height")
+    assert_true(".chat-input-wrap" in css and ".composer-input-label" in css, "CSS should place the chat input label near the textarea")
+    assert_true("input, select, textarea, button { font: inherit; font-size: 0.9rem; }" in css, "general controls should use the smaller UI text size")
+    assert_true("padding: 7px 10px;" in css and "padding: 8px 10px;" in css, "smaller text should be paired with smaller button and input boxes")
+    assert_true(".chat-content { white-space: pre-wrap; font-size: 0.9rem;" in css, "chat message text should use the smaller transcript size")
     assert_true(".diff-block" in css and ".edit-action-card" in css and ".edit-snippet-block" in css, "edit plan UI should style diff, snippets, and action cards")
     assert_true("function setAiBusy" in js, "app should control the AI busy indicator from JS")
     assert_true("setAiBusy(true" in js and "setAiBusy(false" in js, "chat/analyze flows should toggle the AI busy indicator")
@@ -2257,6 +2371,9 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true("/api/git/diff" in js and "/api/git/restore" in js, "UI should expose Git diff and restore workflows")
     assert_true("rawDownload && downloadPercent !== null" in js, "download progress should display the current file percentage from task payloads")
     assert_true("downloadedSize" in js and "totalSize" in js, "download progress should show downloaded and total file size")
+    assert_true("function clearInvalidProjectPath" in js, "UI should clear invalid project paths after open-project failure")
+    assert_true('code !== "PROJECT_PATH_INVALID"' in js, "invalid-path cleanup should only run for PROJECT_PATH_INVALID")
+    assert_true("elements.projectPath.value = \"\"" in js, "invalid project path should be removed from the input")
 
 
 def test_static_ui_exposes_codegraph_tools_split_scripts_and_virtual_tree():
@@ -2330,6 +2447,7 @@ def main():
         test_fallback_advisory_salvages_partial_json_without_noisy_failure_text,
         test_edit_plan_timeout_short_circuits_to_local_fallback,
         test_timeout_fallback_can_create_applyable_tetris_clear_effect_patch,
+        test_edit_plan_timeout_is_scaled_for_local_coding_models,
         test_local_direct_edit_changes_down_key_to_soft_drop_and_ctrl_to_hard_drop,
         test_generation_prompt_infers_multiple_documents_from_previous_answer,
         test_generation_prompt_infers_excel,
@@ -2341,6 +2459,8 @@ def main():
         test_previous_answer_docx_generation_uses_history_without_model,
         test_thread_continuation_generation_loads_requested_thread_history,
         test_thread_save_updates_default_title_and_restores_project_context,
+        test_missing_thread_project_path_is_cleared_instead_of_restored,
+        test_invalid_open_project_path_leaves_server_idle,
         test_cleanup_empty_threads_only_removes_e2e_threads,
         test_tool_transcript_items_do_not_enter_model_history,
         test_generic_previous_answer_file_generation_defaults_to_markdown,

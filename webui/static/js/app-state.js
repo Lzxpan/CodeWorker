@@ -60,8 +60,8 @@ const state = {
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V1.01.002 Web UI",
-    brandTitle: "CodeWorker V1.01.002",
+    pageTitle: "CodeWorker V1.01.003 Web UI",
+    brandTitle: "CodeWorker V1.01.003",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -73,6 +73,8 @@ const I18N = {
       modelStatus: "模型狀態",
       hardwareStatus: "硬體偵測",
       statusDetails: "狀態與設定",
+      projectControl: "專案控制",
+      projectControlMeta: "路徑、模型、開啟與分析",
       aiBusy: "AI 正在回覆",
       codeGraph: "CodeGraph",
     },
@@ -242,8 +244,8 @@ const I18N = {
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V1.01.002 Web UI",
-    brandTitle: "CodeWorker V1.01.002",
+    pageTitle: "CodeWorker V1.01.003 Web UI",
+    brandTitle: "CodeWorker V1.01.003",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -255,6 +257,8 @@ const I18N = {
       modelStatus: "Model status",
       hardwareStatus: "Hardware",
       statusDetails: "Status and settings",
+      projectControl: "Project controls",
+      projectControlMeta: "Path, model, open, and analysis",
       aiBusy: "AI is replying",
       codeGraph: "CodeGraph",
     },

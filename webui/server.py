@@ -80,7 +80,7 @@ ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
 DEFAULT_MODEL_KEY = "gemma4"
 DEFAULT_MODEL_ALIAS = "gemma4-local"
-DEFAULT_APP_VERSION = "V1.01.002"
+DEFAULT_APP_VERSION = "V1.01.003"
 
 
 def read_app_version() -> str:
@@ -279,6 +279,14 @@ MAX_EDIT_TOTAL_CHARS = 14000
 MAX_EDIT_SINGLE_FILE_CHARS = 22000
 MAX_ADVISORY_FILE_CHARS = 18000
 EDIT_PLAN_TIMEOUT_SECONDS = 180
+EDIT_PLAN_MODEL_TIMEOUT_SECONDS = {
+    "deepseekcoderlite": 300,
+    "qwen25coder14b": 420,
+    "qwen35": 420,
+    "gemma4": 240,
+    "qwen3coder30b": 600,
+    "glm46": 600,
+}
 EDIT_ACTION_KINDS = {"create_file", "patch_file", "replace_file", "delete_file", "rename_file", "run_command"}
 HIGH_RISK_EDIT_ACTIONS = {"replace_file", "delete_file", "rename_file", "run_command"}
 PROTECTED_EDIT_PATH_PARTS = {".git", "runtime", "models"}
@@ -288,6 +296,11 @@ class EditApplyError(RuntimeError):
     def __init__(self, message: str, result: Dict[str, object]):
         super().__init__(message)
         self.result = result
+
+
+def get_edit_plan_timeout_seconds(model_key: str) -> int:
+    key = str(model_key or "").strip().lower()
+    return max(EDIT_PLAN_TIMEOUT_SECONDS, EDIT_PLAN_MODEL_TIMEOUT_SECONDS.get(key, EDIT_PLAN_TIMEOUT_SECONDS))
 GEMMA4_LOCATOR_MAX_TOKENS = 320
 GEMMA4_PATCH_MAX_TOKENS = 700
 GEMMA4_PRECISE_MAX_TOKENS = 720
@@ -5037,20 +5050,27 @@ def apply_thread_to_state_locked(thread: Dict[str, object]) -> None:
     STATE.memory_summary = str(thread.get("memorySummary", ""))
     STATE.memory_compacted_count = int(thread.get("memoryCompactedCount", 0) or 0)
     project_path = str(thread.get("projectPath") or "").strip()
-    STATE.project_path = project_path or None
-    STATE.summary = str(thread.get("summary") or "")
-    STATE.tree = string_list(thread.get("tree"))
-    STATE.files = deserialize_project_files(thread.get("files"))
-    STATE.entrypoints = string_list(thread.get("entrypoints"))
-    STATE.tests = string_list(thread.get("tests"))
-    STATE.pinned_files = string_list(thread.get("pinnedFiles"))
-    current_preview_path = str(thread.get("currentPreviewPath") or "").strip()
-    STATE.current_preview_path = current_preview_path or None
-    pending_edit = thread.get("pendingEdit")
-    STATE.pending_edit = pending_edit if isinstance(pending_edit, dict) else None
-    requested_ui_state = str(thread.get("uiState") or "").strip()
-    STATE.ui_state = requested_ui_state or ("ready" if STATE.project_path else "idle")
-    if not STATE.project_path:
+    project_exists = False
+    if project_path:
+        try:
+            project_exists = Path(project_path).expanduser().resolve().is_dir()
+        except (OSError, RuntimeError):
+            project_exists = False
+    STATE.project_path = project_path if project_exists else None
+    if STATE.project_path:
+        STATE.summary = str(thread.get("summary") or "")
+        STATE.tree = string_list(thread.get("tree"))
+        STATE.files = deserialize_project_files(thread.get("files"))
+        STATE.entrypoints = string_list(thread.get("entrypoints"))
+        STATE.tests = string_list(thread.get("tests"))
+        STATE.pinned_files = string_list(thread.get("pinnedFiles"))
+        current_preview_path = str(thread.get("currentPreviewPath") or "").strip()
+        STATE.current_preview_path = current_preview_path or None
+        pending_edit = thread.get("pendingEdit")
+        STATE.pending_edit = pending_edit if isinstance(pending_edit, dict) else None
+        requested_ui_state = str(thread.get("uiState") or "").strip()
+        STATE.ui_state = requested_ui_state or "ready"
+    else:
         STATE.summary = ""
         STATE.tree = []
         STATE.files = []
@@ -6275,7 +6295,7 @@ def create_gemma_locator(
             pending_edit=pending_edit,
             refine_mode=refine_mode,
         ),
-        timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+        timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
         max_tokens=GEMMA4_LOCATOR_MAX_TOKENS,
     )
     try:
@@ -7960,7 +7980,7 @@ def create_precise_edit_plan(
                 pending_edit=pending_edit,
                 refine_mode=refine_mode,
             ),
-            timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+            timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
             max_tokens=GEMMA4_PATCH_MAX_TOKENS,
         )
         try:
@@ -7988,7 +8008,7 @@ def create_precise_edit_plan(
                 refine_mode=refine_mode,
                 model_key=state.model_key,
             ),
-            timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+            timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
             max_tokens=900,
         )
         try:
@@ -8198,7 +8218,7 @@ def create_advisory_edit_plan(
             refine_mode=refine_mode,
             model_key=state.model_key,
         ),
-        timeout_seconds=EDIT_PLAN_TIMEOUT_SECONDS,
+        timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
         max_tokens=GEMMA4_ADVISORY_MAX_TOKENS if is_gemma4_state(state) else 1200,
     )
     try:
@@ -8704,7 +8724,7 @@ def open_project_worker(task_id: str, project_path: str, model_key: str) -> None
         result = build_session_payload(project_root, model_key)
         update_task(task_id, status="completed", progress=100, step="完成", message="專案已開啟", result=result)
     except ValueError as exc:
-        clear_session(ui_state="error")
+        clear_session(ui_state="idle")
         update_task(
             task_id,
             status="failed",

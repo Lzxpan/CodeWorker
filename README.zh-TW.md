@@ -1,4 +1,4 @@
-# CodeWorker V1.01.002
+# CodeWorker V1.01.003
 
 > 離線、可攜、以隱私與資安為優先的 Windows 本地 LLM 程式碼助理。
 
@@ -13,6 +13,7 @@
 主要能力：
 
 - 本機模型服務：預設使用 `Gemma 4 26B`，由 bundled `llama.cpp` service 啟動，不需要 Ollama。
+- 模型下載進度：大型 GGUF 下載會顯示百分比、已下載大小與總大小，讓使用者知道模型仍在下載。
 - 多模型選擇：保留 `Gemma 4 26B` 與 `Qwen 3.5 9B Vision`，並新增 `Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite`。
 - 硬體自動最佳化：Web UI 會偵測 RAM、CPU、GPU vendor、VRAM、`nvidia-smi` 與 Vulkan 可用性，推薦模型並套用 backend、context、threads 與 GPU layers。
 - Context 下拉選單：每個模型可獨立選擇自己的 context options，支援 `4k` 到 `256k`，`GLM-4.6` 另支援 `200k` 選項。
@@ -20,6 +21,7 @@
 - CodeGraph 式語意索引：RAG 重建時會同步建立 `code_nodes`、`code_edges` 與 `code_unresolved_refs`，提供 symbol entry points、imports、calls、extends 與 impact navigation。
 - 分析專案檔案結構：以 deterministic 多語言分類找出入口、核心程式、專案設定、UI、資源、測試與可忽略產物，作為釘選前的篩選工具。
 - 單一訊息流：AI 回答、專案結構分析、CodeGraph 查詢、context coverage 與檔案生成確認都保存在同一個 transcript，可以在同一個區塊上下捲動回看。
+- 忙碌狀態提示：AI 回答、streaming 與 `產生修改計畫` 期間會顯示 spinner / busy bar，讓使用者知道模型仍在工作。
 - Codex plugin：新增 `plugins\codeworker-codegraph`，可安裝到 Codex 後用 skill/script 查 CodeWorker 本機 graph，再決定要讀哪些檔案。
 - 聚焦上下文：在 `檔案樹` 勾選檔案時，pinned files 會優先於全專案 RAG。
 - 附件分析：支援程式碼、設定、文件、圖片、音訊與影片；可抽文字、keyframes 或 transcript 時會送入模型，否則送 metadata fallback。
@@ -72,7 +74,7 @@ scripts\launch-webui.cmd
 
 更新檢查重點：
 
-1. Web UI 左上角應顯示 `CodeWorker V1.01.002`。
+1. Web UI 左上角應顯示 `CodeWorker V1.01.003`。
 2. `scripts\bootstrap.cmd` 會補齊 runtime、Python packages、模型 manifest 與既有下載項目，不會重複下載已存在且校驗通過的檔案。
 3. `scripts\launch-webui.cmd` 會重新啟動 `http://127.0.0.1:8764`；若 port 上已有舊的 CodeWorker Web UI，會先回收舊 process。
 4. 開啟專案後可執行 `分析專案檔案結構`、`用目前輸入查 CodeGraph`、`重新掃描索引` 與一般聊天，結果都會出現在同一個 transcript。
@@ -101,7 +103,9 @@ scripts\install-aider.cmd
 
 ### 畫面範例
 
-![CodeWorker V1.01.002 繁中 Web UI 畫面](docs/screenshots/webui-overview-zh-v101002.png)
+![CodeWorker V1.01.003 繁中 Web UI 註解畫面](docs/screenshots/webui-overview-zh-v101003.png)
+
+圖中的註解標出目前主要工作區：專案控制入口、專案摘要與虛擬化檔案樹、單一對話流與 AI 忙碌狀態、輸入區 / CodeGraph / Git 修改操作，以及右側對話串管理。
 
 ### 一般問答
 
@@ -298,6 +302,18 @@ CodeGraph 出處：
 ---
 
 ## 7. 版本歷程
+
+### V1.01.003
+
+- 將 Web UI 與啟動檢查版本推進到 `CodeWorker V1.01.003`，同步更新 `VERSION`、`/api/status`、`scripts\launch-webui.cmd` 與前端顯示文字。
+- 更新 README 與中英文註解截圖，標出專案控制入口、專案摘要、虛擬化檔案樹、單一對話流、AI 忙碌指示、CodeGraph、Git 修改與對話串管理。
+- 重新整理 Web UI 版面密度：`專案控制` 改為可折疊區塊，sidebar 改成 flex layout，修正隱藏錯誤區造成的多餘間距，並縮小按鈕、輸入框、label、標題與對話訊息卡片。
+- 將 `對話輸入` 說明移到 textarea 右下角，讓 `Context` 下拉與主要 action buttons 不再擠在同一個 label row。
+- 模型下載進度會依實際檔案大小顯示百分比、已下載大小與總大小，例如 `38% (3.4 GB / 9.0 GB)`，避免大型 GGUF 下載時看起來像程式卡住。
+- AI 回答、streaming 與 `產生修改計畫` 期間會顯示 spinner / busy bar，結束後自動清除，並保留可由 E2E 檢查的 busy state。
+- 修正不存在的 project/thread path 造成舊路徑殘留或 UI 卡住的問題；失敗時會清空 stale project state 並回到 idle。
+- 針對本地 coding models 放寬 `產生修改計畫` timeout，避免低速 PC 上還在正常推理就被過早中斷。
+- 補強 regression 與 browser E2E，覆蓋版本顯示、模型下載進度、AI busy indicator、CodeGraph、Git 修改 action 與 responsive layout。
 
 ### V1.01.002
 

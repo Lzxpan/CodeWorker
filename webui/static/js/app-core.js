@@ -7,6 +7,8 @@ const elements = {
   projectPath: document.getElementById("projectPath"),
   modelKeyLabel: document.getElementById("modelKeyLabel"),
   modelKey: document.getElementById("modelKey"),
+  projectControlSummaryTitle: document.getElementById("projectControlSummaryTitle"),
+  projectControlSummaryMeta: document.getElementById("projectControlSummaryMeta"),
   openProjectBtn: document.getElementById("openProjectBtn"),
   analyzeBtn: document.getElementById("analyzeBtn"),
   firstRunHint: document.getElementById("firstRunHint"),

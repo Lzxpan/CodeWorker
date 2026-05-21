@@ -1,4 +1,4 @@
-# CodeWorker V1.01.002
+# CodeWorker V1.01.003
 
 > A privacy-first offline Windows code assistant built around local LLM workflows.
 
@@ -13,6 +13,7 @@
 Core capabilities:
 
 - Local model service: `Gemma 4 26B` is the default model and is served by CodeWorker's bundled `llama.cpp` service. Ollama is not required.
+- Model download progress: large GGUF downloads show percent, downloaded size, and total size so users can tell that the model is still downloading.
 - Model catalog: `Gemma 4 26B` and `Qwen 3.5 9B Vision` remain available, with new options for `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite`.
 - Hardware auto-optimization: the Web UI detects RAM, CPU, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability, then recommends a model and applies backend, context, threads, and GPU layer settings.
 - Context selector: each model remembers its own context options from `4k` to `256k`; `GLM-4.6` also exposes a `200k` option.
@@ -20,6 +21,7 @@ Core capabilities:
 - CodeGraph-style semantic index: every RAG rebuild also writes `code_nodes`, `code_edges`, and `code_unresolved_refs` for symbol entry points, imports, calls, extends, and impact navigation.
 - File-structure analysis: deterministic multi-language classification finds entrypoints, core source, project config, UI, assets, tests, and ignored outputs before pinning files.
 - Single transcript stream: AI replies, file-structure analysis, CodeGraph queries, context coverage, and generated-file confirmations are kept in one scrollable transcript.
+- Busy indicators: AI replies, streaming, and edit-plan generation show a spinner / busy bar while the model is still working.
 - Codex plugin: `plugins\codeworker-codegraph` can be installed in Codex so agents query the local CodeWorker graph before deciding which files to read.
 - Focused context: checked files in the `File tree` become pinned context and take priority over broad RAG.
 - Attachments: code, config, documents, images, audio, and video can be attached. CodeWorker sends extracted text, keyframes, or transcripts when available, otherwise metadata fallback.
@@ -72,7 +74,7 @@ scripts\launch-webui.cmd
 
 Update checks:
 
-1. The Web UI brand should show `CodeWorker V1.01.002`.
+1. The Web UI brand should show `CodeWorker V1.01.003`.
 2. `scripts\bootstrap.cmd` fills missing runtimes, Python packages, model manifest data, and already downloaded assets without redownloading files that still pass validation.
 3. `scripts\launch-webui.cmd` starts `http://127.0.0.1:8764`; if an older CodeWorker Web UI owns the port, it reclaims that process first.
 4. After opening a project, `Analyze file structure`, `Query CodeGraph from input`, `Rescan index`, and normal chat should all append results into the same transcript.
@@ -101,7 +103,9 @@ scripts\install-aider.cmd
 
 ### Screenshot
 
-![CodeWorker V1.01.002 English Web UI overview](docs/screenshots/webui-overview-en-v101002.png)
+![CodeWorker V1.01.003 English Web UI overview with callouts](docs/screenshots/webui-overview-en-v101003.png)
+
+The callouts mark the current workflow areas: project controls entry, project summary and virtual file tree, the single transcript with AI busy state, input / CodeGraph / Git edit actions, and thread management.
 
 ### General Q&A
 
@@ -298,6 +302,18 @@ CodeGraph attribution:
 ---
 
 ## 7. Version History
+
+### V1.01.003
+
+- advanced the Web UI and launch checks to `CodeWorker V1.01.003`, updating `VERSION`, `/api/status`, `scripts\launch-webui.cmd`, and frontend display strings.
+- updated README documentation and annotated Traditional Chinese / English screenshots that label project controls entry, project summary, virtual file tree, single transcript, AI busy indicator, CodeGraph, Git edit actions, and thread management.
+- tightened the Web UI layout density: `Project controls` is collapsible, the sidebar uses a flex layout, hidden error-state gaps are removed, and buttons, inputs, labels, headings, and chat cards are smaller.
+- moved the `Chat input` help label to the textarea corner so the `Context` dropdown and main action buttons no longer crowd the same label row.
+- model downloads now show file-size based percent, downloaded size, and total size, for example `38% (3.4 GB / 9.0 GB)`, so large GGUF downloads do not look stalled.
+- AI replies, streaming, and `Create edit plan` show a spinner / busy bar while work is still running, then clear it when the operation finishes; E2E can verify the busy state.
+- fixed stale project/thread paths when the stored path no longer exists; failures now clear stale project state and return the UI to idle.
+- relaxed `Create edit plan` timeouts for local coding models so slower PCs are not interrupted while the model is still legitimately thinking.
+- expanded regression and browser E2E coverage for version display, model download progress, AI busy indicator, CodeGraph, Git edit actions, and responsive layout.
 
 ### V1.01.002
 

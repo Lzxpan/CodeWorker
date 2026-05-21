@@ -585,6 +585,8 @@ function applyTranslations() {
   elements.projectPathLabel.textContent = t("labels.projectPath");
   elements.projectPath.placeholder = t("placeholders.projectPath");
   elements.modelKeyLabel.textContent = t("labels.model");
+  if (elements.projectControlSummaryTitle) elements.projectControlSummaryTitle.textContent = t("labels.projectControl");
+  if (elements.projectControlSummaryMeta) elements.projectControlSummaryMeta.textContent = t("labels.projectControlMeta");
   elements.openProjectBtn.textContent = t("buttons.openProject");
   elements.analyzeBtn.textContent = t("buttons.analyzeProject");
   if (elements.sidebarStatusSummary) elements.sidebarStatusSummary.textContent = t("labels.statusDetails");

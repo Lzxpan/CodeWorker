@@ -142,6 +142,18 @@ async function pickFolder() {
   }
 }
 
+function clearInvalidProjectPath(error = null) {
+  const code = error?.code || "";
+  if (code !== "PROJECT_PATH_INVALID") return false;
+  state.projectPath = "";
+  elements.projectPath.value = "";
+  resetProjectViews(t("statuses.idle"));
+  setUiState("idle");
+  setStatus(t("statuses.idle"));
+  renderProgress(0, "", t("progress.openTitle"));
+  return true;
+}
+
 async function pollTask(taskId, kind) {
   state.currentTaskId = taskId;
   state.currentTaskKind = kind;
@@ -176,8 +188,11 @@ async function pollTask(taskId, kind) {
     if (task.status === "failed") {
       state.currentTaskId = null;
       state.currentTaskKind = null;
-      setUiState("error");
-      setStatus(kind === "redownload-model" ? "模型重新下載失敗" : "開啟失敗");
+      const invalidProjectPath = kind === "open-project" && clearInvalidProjectPath(task.error || null);
+      if (!invalidProjectPath) {
+        setUiState("error");
+        setStatus(kind === "redownload-model" ? "模型重新下載失敗" : "開啟失敗");
+      }
       showError(task.error || { code: "TASK_FAILED", message: "Task failed.", details: "" });
       renderProgress(task.progress || 100, buildProgressLabel(task), title);
       return;
@@ -212,9 +227,12 @@ async function openProject() {
     state.modelKey = modelKey;
     await pollTask(data.taskId, "open-project");
   } catch (error) {
-    setUiState("error");
-    setStatus(t("statuses.openFailed"));
-    showError(normalizeError(error, "OPEN_PROJECT_FAILED", t("errors.openProjectFailed")));
+    const normalized = normalizeError(error, "OPEN_PROJECT_FAILED", t("errors.openProjectFailed"));
+    if (!clearInvalidProjectPath(normalized)) {
+      setUiState("error");
+      setStatus(t("statuses.openFailed"));
+    }
+    showError(normalized);
   }
 }
 
