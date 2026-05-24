@@ -39,7 +39,7 @@
 - 第一次執行需要網路下載 runtime 與模型；完成後可離線使用。
 - `Qwen3.6-35B-A3B Vision`、`Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite` 不會在第一次 bootstrap 時自動下載，需由使用者選定模型後再下載。
 - `Qwen3.6-35B-A3B Vision` 的 8GB NVIDIA profile 需要足夠 system RAM；目前設定會依硬體在 `32k` / `64k` context 間選擇，使用 `q4_0` KV cache、`--n-cpu-moe=999`、`--flash-attn`、`--jinja`、`--batch-size=512`、`--ubatch-size=128` 與必要的 GPU offload 參數，將 MoE weights 留在 CPU/RAM 並以 CUDA offload 非 MoE layers。
-- 沒有獨立顯卡也可以用 `Qwen3.6-35B-A3B Vision` 的 CPU-only 模式，但需要更高 system RAM、較小 context 與較長等待時間；詳細設定見「Qwen3.6-35B-A3B CPU-only llama.cpp 設定」。
+- 沒有獨立顯卡也可以用 `Qwen3.6-35B-A3B Vision` 的 CPU-only 模式，但需要更高 system RAM、較小 context 與較長等待時間；詳細設定在 [docs\qwen36a3b-cpu-only-llamacpp.md](docs/qwen36a3b-cpu-only-llamacpp.md)，README 摘要見第 4 節的 [Qwen3.6-35B-A3B CPU-only llama.cpp 設定](#qwen36-35b-a3b-cpu-only-llamacpp-設定)。
 - `256k` context 是可選上限，不代表每台機器都能穩定跑滿；若模型啟動失敗，UI 會顯示錯誤與 log path，不會自動降級。
 - 建議至少 `32GB RAM` 等級；大型 context、圖片、影片 keyframes 與長回答都會增加記憶體壓力。
 - 高階模型與 GPU backend 尚需在高階硬體實機驗證；測試時請保留 `logs\hardware-optimization.jsonl` 與對應的 `logs\llama-server-<model>-*.log` / `.err.log`。
@@ -194,6 +194,8 @@ runtime\WinPython\python\python.exe C:\Users\Admin\.codex\skills\codeworker-code
 6. 若 `256k` 或大 context 在本機失敗，請看左側錯誤區與 `logs/llama-server-*.err.log`。
 
 ### Qwen3.6-35B-A3B CPU-only llama.cpp 設定
+
+完整設定文件位置：[docs\qwen36a3b-cpu-only-llamacpp.md](docs/qwen36a3b-cpu-only-llamacpp.md)。本節只列最常用的 CPU-only 啟動方式；需要 CodeWorker 自動啟動方式、低記憶體調整與排錯位置時，請看該文件。
 
 `Qwen3.6-35B-A3B Vision` 可在無獨立顯卡或不想使用 GPU 時以 CPU-only 方式啟動，但這不是 8GB 顯卡最佳化模式；它會更慢，也更依賴 system RAM。建議先用 `16k` 或 `32k` context 測試，穩定後再提高。
 

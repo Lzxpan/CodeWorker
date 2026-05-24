@@ -39,7 +39,7 @@ Core capabilities:
 - The first run needs internet access to download runtimes and models; later use can be offline.
 - `Qwen3.6-35B-A3B Vision`, `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite` are not downloaded during the first bootstrap. They are downloaded only when explicitly selected.
 - The `Qwen3.6-35B-A3B Vision` 8GB NVIDIA profile still needs enough system RAM. It chooses `32k` / `64k` context by hardware, uses `q4_0` KV cache, `--n-cpu-moe=999`, `--flash-attn`, `--jinja`, `--batch-size=512`, `--ubatch-size=128`, and the required GPU offload settings, keeping MoE weights in CPU/RAM while CUDA offloads non-MoE layers.
-- `Qwen3.6-35B-A3B Vision` can also run in CPU-only mode when no discrete GPU is available, but it needs more system RAM, smaller context, and longer wait times. See `Qwen3.6-35B-A3B CPU-only llama.cpp settings`.
+- `Qwen3.6-35B-A3B Vision` can also run in CPU-only mode when no discrete GPU is available, but it needs more system RAM, smaller context, and longer wait times. The full setup guide is [docs\qwen36a3b-cpu-only-llamacpp.md](docs/qwen36a3b-cpu-only-llamacpp.md); the README summary is in [Qwen3.6-35B-A3B CPU-only llama.cpp Settings](#qwen36-35b-a3b-cpu-only-llamacpp-settings).
 - `256k` context is an available upper option, not a guarantee that every machine can run it stably. If startup fails, the UI shows the error and log path instead of silently downgrading.
 - `32GB RAM` class memory is recommended. Large context, images, video keyframes, and long answers increase memory pressure.
 - High-end models and GPU backends still need validation on high-end PCs. When testing, keep `logs\hardware-optimization.jsonl` and the matching `logs\llama-server-<model>-*.log` / `.err.log` files.
@@ -194,6 +194,8 @@ Suggested prompts:
 6. If `256k` or another large context fails locally, inspect the left error panel and `logs/llama-server-*.err.log`.
 
 ### Qwen3.6-35B-A3B CPU-only llama.cpp Settings
+
+Full setup guide: [docs\qwen36a3b-cpu-only-llamacpp.md](docs/qwen36a3b-cpu-only-llamacpp.md). This README section only lists the common CPU-only startup command; use the guide for CodeWorker auto-start behavior, low-memory adjustments, and troubleshooting paths.
 
 `Qwen3.6-35B-A3B Vision` can start in CPU-only mode when there is no discrete GPU, or when GPU offload should be disabled. This is not the 8GB GPU-optimized path: it is slower and depends heavily on system RAM. Start with `16k` or `32k` context, then raise it only after the machine is stable.
 
