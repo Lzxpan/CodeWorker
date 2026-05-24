@@ -9,12 +9,14 @@ Purpose:
 Primary outputs:
 - logs/model-context-bench.json
 - logs/model-context-summary.md
+- data/model-context-calibration.json
 
 This script is for internal benchmarking and regression tracking.
 It is not part of the normal end-user workflow.
 """
 
 import argparse
+import datetime as dt
 import json
 import re
 import subprocess
@@ -30,12 +32,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 START_SERVER = ROOT_DIR / "scripts" / "start-server.cmd"
 GAME_DIR = Path(r"C:\Games")
-MODELS = ("qwen35", "gemma4")
+try:
+    from webui import server as web_server  # type: ignore
+    MODELS = tuple(sorted(web_server.SUPPORTED_MODEL_KEYS))
+except Exception:
+    web_server = None  # type: ignore
+    MODELS = ("qwen35", "gemma4", "qwen36a3b")
 CONTEXTS = (4096, 8192, 16384, 32768, 65536, 131072, 262144)
-PORT_BASE = {
-    "qwen35": 18080,
-    "gemma4": 18180,
-}
+PORT_BASE = {model: 18080 + (index * 20) for index, model in enumerate(MODELS)}
 
 
 def read_text(path: Path) -> str:
@@ -127,7 +131,7 @@ def request_chat(port: int, model: str, messages, max_tokens: int, timeout: int 
             "temperature": 0.2,
             "stream": False,
             "max_tokens": max_tokens,
-            **({"chat_template_kwargs": {"enable_thinking": False}} if model == "qwen35-local" else {}),
+            **({"chat_template_kwargs": {"enable_thinking": False}} if str(model).startswith("qwen") else {}),
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -166,37 +170,65 @@ def request_json(port: int, path: str, timeout: int = 30):
         return {"ok": False, "error": str(exc)}
 
 
-def probe_model(model_key: str, context_size: int, port: int, include_structured: bool = True):
-    kill_bench_ports()
-    start = subprocess.run(
-        ["cmd", "/c", str(START_SERVER), model_key, str(port), str(context_size)],
-        cwd=str(ROOT_DIR),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        timeout=420,
-    )
-    startup_output = (start.stdout + start.stderr).strip()
-    startup_ok = start.returncode == 0 and "[ERROR_CODE]" not in startup_output
-    result = {
-        "startup_ok": startup_ok,
-        "startup_output": startup_output,
-        "port": port,
-        "context": context_size,
-        "tests": {},
-    }
-    if not startup_ok:
-        return result
+def get_model_alias(model_key: str) -> str:
+    if web_server is not None:
+        return web_server.get_model_alias(model_key)
+    return {"qwen35": "qwen35-local", "gemma4": "gemma4-local", "qwen36a3b": "qwen36a3b-local"}.get(model_key, f"{model_key}-local")
 
-    result["models_endpoint"] = request_json(port, "/v1/models")
-    props = request_json(port, "/props")
-    result["props"] = props
-    if props.get("ok"):
-        settings = props.get("data", {}).get("default_generation_settings", {})
-        result["reported_n_ctx"] = settings.get("n_ctx")
 
+def get_default_model_port(model_key: str) -> int:
+    if web_server is not None:
+        return int(web_server.get_model_port(model_key))
+    return {"gemma4": 8081, "qwen35": 8082, "qwen36a3b": 8087}.get(model_key, 8080)
+
+
+def response_contains_model(payload, model_alias: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    candidates = []
+    for key in ("data", "models"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        names = [
+            str(item.get("id", "")),
+            str(item.get("model", "")),
+            str(item.get("name", "")),
+        ]
+        aliases = item.get("aliases")
+        if isinstance(aliases, list):
+            names.extend(str(alias) for alias in aliases)
+        if model_alias in names:
+            return True
+    return False
+
+
+def extract_reported_context(props) -> int:
+    if not isinstance(props, dict) or not props.get("ok"):
+        return 0
+    settings = props.get("data", {}).get("default_generation_settings", {})
+    try:
+        return int(settings.get("n_ctx") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def existing_server_port_for_context(model_key: str, context_size: int) -> int:
+    model_alias = get_model_alias(model_key)
+    port = get_default_model_port(model_key)
+    models = request_json(port, "/v1/models", timeout=5)
+    if not models.get("ok") or not response_contains_model(models.get("data"), model_alias):
+        return 0
+    reported_context = extract_reported_context(request_json(port, "/props", timeout=5))
+    if reported_context and reported_context >= int(context_size):
+        return port
+    return 0
+
+
+def build_tests(include_structured: bool = True):
     tests = {
         "entry": {
             "messages": [
@@ -234,16 +266,63 @@ def probe_model(model_key: str, context_size: int, port: int, include_structured
                     ),
                 },
             ],
-            "max_tokens": 900,
-            "timeout": 180,
+            "max_tokens": 360,
+            "timeout": 90,
         }
-    
+    return tests
 
-    model_alias = {"qwen35": "qwen35-local", "gemma4": "gemma4-local"}[model_key]
-    for name, spec in tests.items():
+
+def run_probe_tests(result, model_key: str, port: int, include_structured: bool = True):
+    result["models_endpoint"] = request_json(port, "/v1/models")
+    props = request_json(port, "/props")
+    result["props"] = props
+    reported_context = extract_reported_context(props)
+    if reported_context:
+        result["reported_n_ctx"] = reported_context
+    model_alias = get_model_alias(model_key)
+    for name, spec in build_tests(include_structured=include_structured).items():
         reply = request_chat(port, model_alias, spec["messages"], spec["max_tokens"], timeout=spec.get("timeout", 180))
         result["tests"][name] = reply
     return result
+
+
+def probe_model(model_key: str, context_size: int, port: int, include_structured: bool = True):
+    existing_port = existing_server_port_for_context(model_key, context_size)
+    if existing_port:
+        result = {
+            "startup_ok": True,
+            "startup_output": f"Reused existing {model_key} server on port {existing_port}.",
+            "port": existing_port,
+            "context": context_size,
+            "tests": {},
+            "reused_existing_server": True,
+        }
+        return run_probe_tests(result, model_key, existing_port, include_structured=include_structured)
+
+    kill_bench_ports()
+    start = subprocess.run(
+        ["cmd", "/c", str(START_SERVER), model_key, str(port), str(context_size)],
+        cwd=str(ROOT_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=420,
+    )
+    startup_output = (start.stdout + start.stderr).strip()
+    startup_ok = start.returncode == 0 and "[ERROR_CODE]" not in startup_output
+    result = {
+        "startup_ok": startup_ok,
+        "startup_output": startup_output,
+        "port": port,
+        "context": context_size,
+        "tests": {},
+    }
+    if not startup_ok:
+        return result
+
+    return run_probe_tests(result, model_key, port, include_structured=include_structured)
 
 
 def build_summary(results, selected_models=None):
@@ -267,11 +346,43 @@ def build_summary(results, selected_models=None):
     return "\n".join(lines).strip() + "\n"
 
 
+def build_calibration(results, selected_models=None):
+    measured_at = dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+    calibration = {}
+    selected = list(selected_models or MODELS)
+    for model_key in selected:
+        model_results = [item for item in results if item["model"] == model_key]
+        successful = [item for item in model_results if item["startup_ok"] and all(test.get("ok") for test in item["tests"].values())]
+        if not successful:
+            continue
+        best = max(successful, key=lambda item: item["context"])
+        context = int(best["context"])
+        response_reserve = max(2048, context // 8)
+        input_tokens = max(512, context - response_reserve)
+        max_input_chars = max(3500, int(input_tokens * 2.2))
+        calibration[model_key] = {
+            "contextWindow": context,
+            "maxInputChars": max_input_chars,
+            "structuredEditChars": max(3500, int(max_input_chars * 0.82)),
+            "measuredAt": measured_at,
+        }
+    return calibration
+
+
+def load_existing_calibration(path: Path):
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", default=list(MODELS))
     parser.add_argument("--contexts", nargs="+", type=int, default=list(CONTEXTS))
     parser.add_argument("--skip-structured", action="store_true")
+    parser.add_argument("--stop-after-first-success", action="store_true")
     args = parser.parse_args()
 
     selected_models = [model for model in args.models if model in MODELS]
@@ -288,10 +399,19 @@ def main():
             item = probe_model(model_key, context_size, port, include_structured=not args.skip_structured)
             item["model"] = model_key
             results.append(item)
+            tests = item.get("tests") if isinstance(item.get("tests"), dict) else {}
+            if args.stop_after_first_success and item.get("startup_ok") and tests and all(test.get("ok") for test in tests.values()):
+                break
     logs_dir = ROOT_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     (logs_dir / "model-context-bench.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     (logs_dir / "model-context-summary.md").write_text(build_summary(results, selected_models=selected_models), encoding="utf-8")
+    data_dir = ROOT_DIR / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    calibration_path = data_dir / "model-context-calibration.json"
+    calibration = load_existing_calibration(calibration_path)
+    calibration.update(build_calibration(results, selected_models=selected_models))
+    calibration_path.write_text(json.dumps(calibration, ensure_ascii=False, indent=2), encoding="utf-8")
     print("ok")
 
 

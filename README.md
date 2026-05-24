@@ -1,4 +1,4 @@
-# CodeWorker V1.01.003
+# CodeWorker V1.02.000
 
 > 離線、可攜、以隱私與資安為優先的 Windows 本地 LLM 程式碼助理。
 
@@ -12,11 +12,14 @@
 
 主要能力：
 
-- 本機模型服務：預設使用 `Gemma 4 26B`，由 bundled `llama.cpp` service 啟動，不需要 Ollama。
+- 本機模型服務：初始 fallback 為 `Gemma 4 26B`，之後會把最後一次成功使用的模型作為預設模型；所有模型都由 bundled `llama.cpp` service 啟動，不需要 Ollama。
 - 模型下載進度：大型 GGUF 下載會顯示百分比、已下載大小與總大小，讓使用者知道模型仍在下載。
-- 多模型選擇：保留 `Gemma 4 26B` 與 `Qwen 3.5 9B Vision`，並新增 `Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite`。
-- 硬體自動最佳化：Web UI 會偵測 RAM、CPU、GPU vendor、VRAM、`nvidia-smi` 與 Vulkan 可用性，推薦模型並套用 backend、context、threads 與 GPU layers。
+- 多模型選擇：保留 `Gemma 4 26B` 與 `Qwen 3.5 9B Vision`，並新增 `Qwen3.6-35B-A3B Vision`、`Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite`。
+- 硬體自動最佳化：Web UI 會偵測 RAM、CPU、GPU vendor、VRAM、`nvidia-smi` 與 Vulkan 可用性，推薦模型並套用 backend、context、threads、GPU layers 與 8GB NVIDIA MoE offload 參數。
 - Context 下拉選單：每個模型可獨立選擇自己的 context options，支援 `4k` 到 `256k`，`GLM-4.6` 另支援 `200k` 選項。
+- Context 容量實測：可針對目前模型測試可送出的 KB 上限，結果寫入本機 `data\model-context-calibration.json`，後續修改計畫會優先使用實測 `structuredEditChars`。
+- 完整檔案上下文：pinned files 與 resolver 鎖定檔案若低於模型實測容量，會以完整檔案送出；放不下時才逐步降為完整函式 / class region，再降為 line windows。
+- 修改計畫診斷：每次 `產生修改計畫` 會顯示 context coverage；無法安全產生 patch 時會降級為 `未驗證參考片段`，不顯示可直接套用 action。
 - 全專案檢索：開啟專案後，即使沒有 pinned files，也會使用本機 RAG index 搜尋相關檔案、symbols、summary 與 chunks。
 - CodeGraph 式語意索引：RAG 重建時會同步建立 `code_nodes`、`code_edges` 與 `code_unresolved_refs`，提供 symbol entry points、imports、calls、extends 與 impact navigation。
 - 分析專案檔案結構：以 deterministic 多語言分類找出入口、核心程式、專案設定、UI、資源、測試與可忽略產物，作為釘選前的篩選工具。
@@ -38,7 +41,9 @@
 ## 2. 重點注意事項
 
 - 第一次執行需要網路下載 runtime 與模型；完成後可離線使用。
-- `Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite` 不會在第一次 bootstrap 時自動下載，需由使用者選定模型後再下載。
+- `Qwen3.6-35B-A3B Vision`、`Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite` 不會在第一次 bootstrap 時自動下載，需由使用者選定模型後再下載。
+- `Qwen3.6-35B-A3B Vision` 的 8GB NVIDIA profile 需要足夠 system RAM；目前設定會依硬體在 `32k` / `64k` context 間選擇，使用 `q4_0` KV cache、`--n-cpu-moe=999`、`--flash-attn`、`--jinja`、`--batch-size=512`、`--ubatch-size=128` 與必要的 GPU offload 參數，將 MoE weights 留在 CPU/RAM 並以 CUDA offload 非 MoE layers。
+- 沒有獨立顯卡也可以用 `Qwen3.6-35B-A3B Vision` 的 CPU-only 模式，但需要更高 system RAM、較小 context 與較長等待時間；詳細設定見「Qwen3.6-35B-A3B CPU-only llama.cpp 設定」。
 - `256k` context 是可選上限，不代表每台機器都能穩定跑滿；若模型啟動失敗，UI 會顯示錯誤與 log path，不會自動降級。
 - 建議至少 `32GB RAM` 等級；大型 context、圖片、影片 keyframes 與長回答都會增加記憶體壓力。
 - 高階模型與 GPU backend 尚需在高階硬體實機驗證；測試時請保留 `logs\hardware-optimization.jsonl` 與對應的 `logs\llama-server-<model>-*.log` / `.err.log`。
@@ -83,7 +88,7 @@ scripts\launch-webui.cmd
 
 更新檢查重點：
 
-1. Web UI 左上角應顯示 `CodeWorker V1.01.003`。
+1. Web UI 左上角應顯示 `CodeWorker V1.02.000`。
 2. `scripts\bootstrap.cmd` 會補齊 runtime、Python packages、模型 manifest 與既有下載項目，不會重複下載已存在且校驗通過的檔案。
 3. bootstrap 一開始會停止同一個 CodeWorker root/runtime 下的舊 process，避免舊 WebUI server 繼續佔用 port。
 4. `scripts\launch-webui.cmd` 會重新啟動 `http://127.0.0.1:8764`；若 port 上已有舊的 CodeWorker Web UI，會先回收舊 process。
@@ -114,8 +119,8 @@ scripts\launch-webui.cmd
 
 ```json
 {
-  "appVersion": "V1.01.003",
-  "appName": "CodeWorker V1.01.003",
+  "appVersion": "V1.02.000",
+  "appName": "CodeWorker V1.02.000",
   "rootDir": "D:\\CodeWorker",
   "serverPath": "D:\\CodeWorker\\webui\\server.py"
 }
@@ -124,7 +129,7 @@ scripts\launch-webui.cmd
 如果 `appVersion` 是舊版，代表實際跑的 server source 還是舊的；如果 `rootDir` 或 `serverPath` 指到不同資料夾，代表你啟動的是另一份 CodeWorker。新版 `logs\webui-*.log` 開頭也會列出：
 
 ```text
-CodeWorker V1.01.003 Web UI running at http://127.0.0.1:8764
+CodeWorker V1.02.000 Web UI running at http://127.0.0.1:8764
 RootDir: D:\CodeWorker
 ServerPath: D:\CodeWorker\webui\server.py
 ```
@@ -155,7 +160,7 @@ scripts\install-aider.cmd
 
 ### 畫面範例
 
-![CodeWorker V1.01.003 繁中 Web UI 註解畫面](docs/screenshots/webui-overview-zh-v101003.png)
+![CodeWorker V1.02.000 繁中 Web UI 註解畫面](docs/screenshots/webui-overview-zh-v102000.png)
 
 圖中的註解標出目前主要工作區：專案控制入口、專案摘要與虛擬化檔案樹、單一對話流與 AI 忙碌狀態、輸入區 / CodeGraph / Git 修改操作，以及右側對話串管理。
 
@@ -307,7 +312,57 @@ runtime\WinPython\python\python.exe C:\Users\Admin\.codex\skills\codeworker-code
 1. 在聊天輸入區底部的 `Context` 下拉選單選擇 `4k` 到 `256k`。
 2. 每個模型會記住自己的選擇。
 3. 如果現有 `llama-server` context 低於目前選擇，下一次啟動模型時會用新 context 重啟。
-4. 若 `256k` 在本機失敗，請看左側錯誤區與 `logs/llama-server-*.err.log`。
+4. 按 `測試此模型可送出 KB` 可實測目前模型與 context 的輸入上限；成功後會寫入本機 `data\model-context-calibration.json`，Web UI 不會提交這個本機校準檔。
+5. `產生修改計畫` 會優先使用實測 `structuredEditChars`；若沒有校準資料，才使用保守估算。
+6. 若 `256k` 或大 context 在本機失敗，請看左側錯誤區與 `logs/llama-server-*.err.log`。
+
+### Qwen3.6-35B-A3B CPU-only llama.cpp 設定
+
+`Qwen3.6-35B-A3B Vision` 可在無獨立顯卡或不想使用 GPU 時以 CPU-only 方式啟動，但這不是 8GB 顯卡最佳化模式；它會更慢，也更依賴 system RAM。建議先用 `16k` 或 `32k` context 測試，穩定後再提高。
+
+範例命令：
+
+```cmd
+runtime\llama.cpp\llama-server.exe ^
+  -m models\qwen3.6-35b-a3b-ud-q4-k-m\Qwen3.6-35B-A3B-UD-Q4_K_M.gguf ^
+  --mmproj models\qwen3.6-35b-a3b-ud-q4-k-m\mmproj-BF16.gguf ^
+  --host 127.0.0.1 ^
+  --port 8087 ^
+  --ctx-size 32768 ^
+  --cache-type-k q4_0 ^
+  --cache-type-v q4_0 ^
+  --threads 12 ^
+  --n-gpu-layers 0 ^
+  --n-cpu-moe 999 ^
+  --batch-size 256 ^
+  --ubatch-size 64 ^
+  --jinja
+```
+
+設定重點：
+
+- `--n-gpu-layers 0`：明確禁止 GPU offload，避免沒有顯卡或顯存不足時仍嘗試把 layers 放進 GPU。
+- `--n-cpu-moe=999`：MoE layers 保留在 CPU/RAM；CPU-only 時這與 `--n-gpu-layers 0` 搭配可避免 MoE offload 誤判。
+- `--ctx-size 32768`：先用 `32k`；若 RAM 不足可降到 `16384` 或 `8192`。
+- `--cache-type-k q4_0 --cache-type-v q4_0`：降低 KV cache 記憶體需求。
+- `--batch-size 256 --ubatch-size 64`：比 8GB NVIDIA profile 更保守，適合低記憶體或 CPU-only 測試。
+- `--mmproj`：需要圖片理解時才保留；只做純文字 / 程式碼修改可先省略，降低啟動與記憶體壓力。
+- 不建議 CPU-only 預設加 `--mlock`；除非 RAM 很充足，否則可能讓 Windows 更難回收記憶體。
+
+注意事項：
+
+- `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` 約 21GB 等級，CPU-only 建議至少 `64GB RAM`；`32GB RAM` 可能非常慢或直接失敗。
+- Context 越大，KV cache 越大；如果回答不穩、啟動失敗或系統開始大量 paging，先降低 `--ctx-size`。
+- CPU-only 推理延遲會明顯高於 CUDA / Vulkan offload；產生修改計畫時要允許較長時間，不要用很短 timeout 判定失敗。
+- 啟動失敗時優先看 `logs\llama-server-qwen36a3b-*.err.log` 與 `logs\hardware-optimization.jsonl`，確認實際 command、context、threads 與 offload 參數。
+
+### 產生修改計畫與完整檔案上下文
+
+1. 優先在 `檔案樹` 勾選明確相關檔案；多個 pinned files 只要總量低於目前模型的實測容量，就會完整送出。
+2. 未釘選或釘選不足時，CodeWorker 會用 project structure、RAG 與 CodeGraph 鎖定候選檔案與 symbol。
+3. 若完整檔案放不下，才退到完整函式 / class region；再放不下才使用 line windows。
+4. transcript 的 `本次上下文` / `修改計畫上下文` 會列出每個檔案是 `完整`、`區域` 或 `片段`，也會顯示送出大小與是否截斷。
+5. 若模型輸出不能被本機唯一定位，UI 會顯示 `未驗證參考片段` 並禁用套用；只有後端驗證成功的 `actions` 才能 `確認套用`。
 
 ### 對話串
 
@@ -438,6 +493,21 @@ CodeGraph 出處：
 
 ## 7. 版本歷程
 
+### V1.02.000
+
+- 將 Web UI 與啟動檢查版本推進到 `CodeWorker V1.02.000`，同步更新 `VERSION`、`/api/status`、`scripts\launch-webui.cmd`、前端顯示文字與 README 截圖。
+- 新增 last-used model preference：模型成功用於開啟專案、chat、model ensure、context 校準或 `產生修改計畫` 後，會寫入本機 `data\model-preferences.json`，下次啟動與新專案預設使用最後一次模型；無效或缺檔時 fallback 到 `gemma4`。
+- `產生修改計畫` 前端會送出目前下拉選到的 `modelKey`，後端會用該模型建立 edit context、必要時啟動模型，成功後同步更新 last-used default。
+- 新增 `scripts\measure_context_limits.py` runtime calibration 工作流，支援 enabled models 與 `qwen36a3b`，校準結果寫入 `data\model-context-calibration.json`；`/api/models` 會回傳 `calibrated`、`structuredEditChars` 與 `measuredAt`。
+- `estimate_input_char_budget()` / `get_context_limits()` 優先使用 calibration；無校準資料時才回到保守估算，避免硬把修改計畫容量固定成單一 KB。
+- 重寫 edit target resolver 與 context assembly：pinned files 優先，可納入多檔；無 pinned 時用 project structure、RAG 與 CodeGraph 鎖定候選；容量允許時送完整檔案，否則依序退到完整 member region 與 line windows。
+- 每次修改計畫都產生 context coverage，顯示送出檔案、`full/region/window` 模式、送出大小、總大小、是否截斷與漏掉候選。
+- precise patch validation 失敗也會寫入 raw reply log；advisory suggestion 會標記 `verified=false`、`source="model-unverified"`、`failureReason` 與 `missingSearchSnippet`，UI 以 `未驗證參考片段` 呈現並禁用 apply。
+- `call_local_model()` 支援 streaming collection，修改計畫與 advisory fallback 可保留 partial reply log，降低長推理被 timeout 誤判成無內容的機率。
+- 新增 Qwen 模型請求選項，`qwen36a3b` 預設送出 `enable_thinking=false`，避免 visible answer 混入模型 thinking template。
+- 補充 `Qwen3.6-35B-A3B Vision` CPU-only `llama.cpp` 設定教學，說明 `--n-gpu-layers 0`、`--n-cpu-moe=999`、低 batch、KV cache、context 降級與 `--mlock` 注意事項。
+- 擴充 regression，覆蓋 last-used default、edit plan 指定模型、完整 pinned file context、多 pinned files、RAG/CodeGraph resolver、calibration budget、advisory UI、raw reply log 與 timeout streaming fallback。
+
 ### V1.01.003
 
 - 將 Web UI 與啟動檢查版本推進到 `CodeWorker V1.01.003`，同步更新 `VERSION`、`/api/status`、`scripts\launch-webui.cmd` 與前端顯示文字。
@@ -446,6 +516,8 @@ CodeGraph 出處：
 - 將 `對話輸入` 說明移到 textarea 右下角，讓 `Context` 下拉與主要 action buttons 不再擠在同一個 label row。
 - 模型下載進度會依實際檔案大小顯示百分比、已下載大小與總大小，例如 `38% (3.4 GB / 9.0 GB)`，避免大型 GGUF 下載時看起來像程式卡住。
 - AI 回答、streaming 與 `產生修改計畫` 期間會顯示 spinner / busy bar，結束後自動清除，並保留可由 E2E 檢查的 busy state。
+- 新增 `Qwen3.6-35B-A3B Vision` 模型選項，使用 `unsloth/Qwen3.6-35B-A3B-GGUF` 的 `UD-Q4_K_M` 與 `mmproj-BF16.gguf`，並在 64GB RAM + RTX 3070 8GB 等級硬體上推薦。
+- `scripts\launch_llama_server.py` 與 Web UI 啟動流程新增 `--n-cpu-moe`、`--batch-size`、`--ubatch-size`、`--mlock` 白名單，讓 manifest 可套用 8GB NVIDIA MoE offload 啟動參數。
 - 修正不存在的 project/thread path 造成舊路徑殘留或 UI 卡住的問題；失敗時會清空 stale project state 並回到 idle。
 - 針對本地 coding models 放寬 `產生修改計畫` timeout，避免低速 PC 上還在正常推理就被過早中斷。
 - 補強 regression 與 browser E2E，覆蓋版本顯示、模型下載進度、AI busy indicator、CodeGraph、Git 修改 action 與 responsive layout。

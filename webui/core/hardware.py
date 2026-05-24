@@ -192,6 +192,7 @@ def _model_context_options(model_config: Dict[str, object]) -> List[int]:
 def recommend_model_settings(profile: Dict[str, object], model_config: Dict[str, object]) -> Dict[str, object]:
     context_options = _model_context_options(model_config)
     profile_name = str(profile.get("profile") or "low")
+    max_vram_gb = float(profile.get("maxVramGb") or 0)
     if profile_name == "extreme":
         context = context_options[-1]
     elif profile_name == "high":
@@ -200,10 +201,18 @@ def recommend_model_settings(profile: Dict[str, object], model_config: Dict[str,
         context = max([value for value in context_options if value <= 65536] or [context_options[0]])
     else:
         context = max([value for value in context_options if value <= 32768] or [context_options[0]])
+    try:
+        low_vram_context = int(model_config.get("lowVramContextWindow") or 0)
+    except (TypeError, ValueError):
+        low_vram_context = 0
+    if 0 < max_vram_gb <= 8 and low_vram_context > 0:
+        context = min(context, low_vram_context)
 
     backend = select_runtime_backend(profile)
     cpu_threads = int(profile.get("cpuThreads") or os.cpu_count() or 4)
     if backend == "cpu":
+        gpu_layers = 0
+    elif backend == "vulkan" and 0 <= max_vram_gb < 4 and float(model_config.get("minRamGb") or 0) >= 48:
         gpu_layers = 0
     elif profile_name == "extreme":
         gpu_layers = -1
@@ -224,8 +233,8 @@ def recommend_model_settings(profile: Dict[str, object], model_config: Dict[str,
 
 def choose_recommended_model_key(profile: Dict[str, object], model_configs: Dict[str, Dict[str, object]]) -> str:
     priority_by_profile = {
-        "extreme": ("glm46", "qwen3coder30b", "gemma4", "qwen25coder14b", "deepseekcoderlite"),
-        "high": ("qwen3coder30b", "glm46", "gemma4", "qwen25coder14b", "deepseekcoderlite"),
+        "extreme": ("glm46", "qwen36a3b", "qwen3coder30b", "gemma4", "qwen25coder14b", "deepseekcoderlite"),
+        "high": ("qwen36a3b", "qwen3coder30b", "glm46", "gemma4", "qwen25coder14b", "deepseekcoderlite"),
         "standard": ("qwen25coder14b", "deepseekcoderlite", "gemma4", "qwen35"),
         "low": ("deepseekcoderlite", "qwen25coder14b", "qwen35", "gemma4"),
     }

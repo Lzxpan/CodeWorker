@@ -1,4 +1,4 @@
-# CodeWorker V1.01.003
+# CodeWorker V1.02.000
 
 > A privacy-first offline Windows code assistant built around local LLM workflows.
 
@@ -12,11 +12,14 @@
 
 Core capabilities:
 
-- Local model service: `Gemma 4 26B` is the default model and is served by CodeWorker's bundled `llama.cpp` service. Ollama is not required.
+- Local model service: `Gemma 4 26B` is the initial fallback model, then CodeWorker uses the last successfully used model as the next default. All models are served by the bundled `llama.cpp` service. Ollama is not required.
 - Model download progress: large GGUF downloads show percent, downloaded size, and total size so users can tell that the model is still downloading.
-- Model catalog: `Gemma 4 26B` and `Qwen 3.5 9B Vision` remain available, with new options for `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite`.
-- Hardware auto-optimization: the Web UI detects RAM, CPU, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability, then recommends a model and applies backend, context, threads, and GPU layer settings.
+- Model catalog: `Gemma 4 26B` and `Qwen 3.5 9B Vision` remain available, with new options for `Qwen3.6-35B-A3B Vision`, `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite`.
+- Hardware auto-optimization: the Web UI detects RAM, CPU, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability, then recommends a model and applies backend, context, threads, GPU layers, and 8GB NVIDIA MoE offload settings.
 - Context selector: each model remembers its own context options from `4k` to `256k`; `GLM-4.6` also exposes a `200k` option.
+- Context capacity measurement: the current model can be benchmarked for the KB it can actually receive. Results are stored locally in `data\model-context-calibration.json`, and edit plans prefer the measured `structuredEditChars`.
+- Full-file edit context: pinned files and resolver-selected files are sent as complete files when they fit within the measured budget; only then does CodeWorker fall back to full function / class regions and line windows.
+- Edit-plan diagnostics: every edit plan reports context coverage. Unsafe model suggestions are shown as `unverified reference snippets` and do not expose apply controls.
 - Full-project retrieval: once a project is opened, chat can use the local RAG index to search paths, symbols, summaries, and chunks even when no files are pinned.
 - CodeGraph-style semantic index: every RAG rebuild also writes `code_nodes`, `code_edges`, and `code_unresolved_refs` for symbol entry points, imports, calls, extends, and impact navigation.
 - File-structure analysis: deterministic multi-language classification finds entrypoints, core source, project config, UI, assets, tests, and ignored outputs before pinning files.
@@ -34,7 +37,9 @@ Core capabilities:
 ## 2. Important Notes
 
 - The first run needs internet access to download runtimes and models; later use can be offline.
-- `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite` are not downloaded during the first bootstrap. They are downloaded only when explicitly selected.
+- `Qwen3.6-35B-A3B Vision`, `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite` are not downloaded during the first bootstrap. They are downloaded only when explicitly selected.
+- The `Qwen3.6-35B-A3B Vision` 8GB NVIDIA profile still needs enough system RAM. It chooses `32k` / `64k` context by hardware, uses `q4_0` KV cache, `--n-cpu-moe=999`, `--flash-attn`, `--jinja`, `--batch-size=512`, `--ubatch-size=128`, and the required GPU offload settings, keeping MoE weights in CPU/RAM while CUDA offloads non-MoE layers.
+- `Qwen3.6-35B-A3B Vision` can also run in CPU-only mode when no discrete GPU is available, but it needs more system RAM, smaller context, and longer wait times. See `Qwen3.6-35B-A3B CPU-only llama.cpp settings`.
 - `256k` context is an available upper option, not a guarantee that every machine can run it stably. If startup fails, the UI shows the error and log path instead of silently downgrading.
 - `32GB RAM` class memory is recommended. Large context, images, video keyframes, and long answers increase memory pressure.
 - High-end models and GPU backends still need validation on high-end PCs. When testing, keep `logs\hardware-optimization.jsonl` and the matching `logs\llama-server-<model>-*.log` / `.err.log` files.
@@ -74,7 +79,7 @@ scripts\launch-webui.cmd
 
 Update checks:
 
-1. The Web UI brand should show `CodeWorker V1.01.003`.
+1. The Web UI brand should show `CodeWorker V1.02.000`.
 2. `scripts\bootstrap.cmd` fills missing runtimes, Python packages, model manifest data, and already downloaded assets without redownloading files that still pass validation.
 3. `scripts\launch-webui.cmd` starts `http://127.0.0.1:8764`; if an older CodeWorker Web UI owns the port, it reclaims that process first.
 4. After opening a project, `Analyze file structure`, `Query CodeGraph from input`, `Rescan index`, and normal chat should all append results into the same transcript.
@@ -103,7 +108,7 @@ scripts\install-aider.cmd
 
 ### Screenshot
 
-![CodeWorker V1.01.003 English Web UI overview with callouts](docs/screenshots/webui-overview-en-v101003.png)
+![CodeWorker V1.02.000 English Web UI overview with callouts](docs/screenshots/webui-overview-en-v102000.png)
 
 The callouts mark the current workflow areas: project controls entry, project summary and virtual file tree, the single transcript with AI busy state, input / CodeGraph / Git edit actions, and thread management.
 
@@ -184,7 +189,50 @@ Suggested prompts:
 1. Use the `Context` dropdown at the bottom of the chat input.
 2. Each model remembers its own selected context.
 3. If the running `llama-server` context is lower than the selected value, the next model startup uses the new context.
-4. If `256k` fails locally, inspect the left error panel and `logs/llama-server-*.err.log`.
+4. Click `Measure model KB capacity` to benchmark the current model and context. Successful results are stored locally in `data\model-context-calibration.json`; this local calibration file is not committed.
+5. `Create edit plan` prefers the measured `structuredEditChars`; without calibration data it falls back to conservative estimates.
+6. If `256k` or another large context fails locally, inspect the left error panel and `logs/llama-server-*.err.log`.
+
+### Qwen3.6-35B-A3B CPU-only llama.cpp Settings
+
+`Qwen3.6-35B-A3B Vision` can start in CPU-only mode when there is no discrete GPU, or when GPU offload should be disabled. This is not the 8GB GPU-optimized path: it is slower and depends heavily on system RAM. Start with `16k` or `32k` context, then raise it only after the machine is stable.
+
+```cmd
+runtime\llama.cpp\llama-server.exe ^
+  -m models\qwen3.6-35b-a3b-ud-q4-k-m\Qwen3.6-35B-A3B-UD-Q4_K_M.gguf ^
+  --mmproj models\qwen3.6-35b-a3b-ud-q4-k-m\mmproj-BF16.gguf ^
+  --host 127.0.0.1 ^
+  --port 8087 ^
+  --ctx-size 32768 ^
+  --cache-type-k q4_0 ^
+  --cache-type-v q4_0 ^
+  --threads 12 ^
+  --n-gpu-layers 0 ^
+  --n-cpu-moe 999 ^
+  --batch-size 256 ^
+  --ubatch-size 64 ^
+  --jinja
+```
+
+Settings and notes:
+
+- `--n-gpu-layers 0`: disables GPU offload explicitly.
+- `--n-cpu-moe=999`: keeps MoE layers on CPU/RAM.
+- `--ctx-size 32768`: start at `32k`; reduce to `16384` or `8192` if RAM is tight.
+- `--cache-type-k q4_0 --cache-type-v q4_0`: lowers KV cache memory use.
+- `--batch-size 256 --ubatch-size 64`: more conservative than the 8GB NVIDIA profile and better for CPU-only testing.
+- Keep `--mmproj` only when image understanding is needed. For pure text or code edits, omit it first to reduce startup and memory pressure.
+- Do not enable `--mlock` by default in CPU-only mode. Unless RAM is abundant, it can make Windows memory pressure worse.
+- The GGUF file is roughly 21GB-class, so CPU-only use is best with at least `64GB RAM`; `32GB RAM` can be very slow or fail outright.
+- On failure, inspect `logs\llama-server-qwen36a3b-*.err.log` and `logs\hardware-optimization.jsonl` first.
+
+### Edit Plans And Full-File Context
+
+1. Prefer checking explicit related files in the `File tree`; multiple pinned files are sent in full when their total size fits the measured model budget.
+2. Without pins, or when pins are insufficient, CodeWorker uses project structure, RAG, and CodeGraph to locate candidate files and symbols.
+3. If full files do not fit, CodeWorker falls back to full function / class regions, then to line windows.
+4. The transcript `Context` / `Edit plan context` card reports whether each file was sent as `full`, `region`, or `window`, plus sent size and truncation state.
+5. If model output cannot be uniquely located in local files, the UI marks it as an `unverified reference snippet` and disables apply. Only backend-validated `actions` can be applied.
 
 ### Threads
 
@@ -303,6 +351,20 @@ CodeGraph attribution:
 
 ## 7. Version History
 
+### V1.02.000
+
+- advanced the Web UI and launch checks to `CodeWorker V1.02.000`, updating `VERSION`, `/api/status`, `scripts\launch-webui.cmd`, frontend display strings, and README screenshots.
+- added last-used model preferences: after a model is successfully used for opening a project, chat, model ensure, context calibration, or `Create edit plan`, CodeWorker writes `data\model-preferences.json` and uses that model as the next startup / new-project default. Invalid or missing preferences fall back to `gemma4`.
+- `Create edit plan` now sends the currently selected `modelKey` from the frontend; the backend builds edit context for that model, starts it when needed, and persists it as the last-used default after success.
+- added context calibration for enabled models including `qwen36a3b`; results are stored in `data\model-context-calibration.json`, and `/api/models` exposes `calibrated`, `structuredEditChars`, and `measuredAt`.
+- rewrote edit target resolution and context assembly: pinned files are first priority and can include multiple files; without pins, project structure, RAG, and CodeGraph locate candidates; when budget allows, complete files are sent before falling back to member regions and line windows.
+- every edit plan now reports context coverage, including file paths, `full/region/window` mode, sent size, total size, truncation, and omitted candidates.
+- precise patch validation failures now write raw reply logs; advisory suggestions include `verified=false`, `source="model-unverified"`, `failureReason`, and `missingSearchSnippet`, and the UI renders them as unverified reference snippets with apply disabled.
+- `call_local_model()` can collect streaming replies so edit plans and advisory fallback can preserve partial reply logs and avoid treating long local inference as empty output too early.
+- added Qwen request options: `qwen36a3b` sends `enable_thinking=false` by default so visible CodeWorker answers do not include thinking-template output.
+- documented CPU-only `llama.cpp` settings for `Qwen3.6-35B-A3B Vision`, including `--n-gpu-layers 0`, `--n-cpu-moe=999`, conservative batch sizes, KV cache, context reduction, and `--mlock` cautions.
+- expanded regression coverage for last-used defaults, edit-plan selected model, full pinned-file context, multiple pinned files, RAG/CodeGraph resolver behavior, calibration budgets, advisory UI, raw reply logging, and streaming timeout fallback.
+
 ### V1.01.003
 
 - advanced the Web UI and launch checks to `CodeWorker V1.01.003`, updating `VERSION`, `/api/status`, `scripts\launch-webui.cmd`, and frontend display strings.
@@ -311,6 +373,8 @@ CodeGraph attribution:
 - moved the `Chat input` help label to the textarea corner so the `Context` dropdown and main action buttons no longer crowd the same label row.
 - model downloads now show file-size based percent, downloaded size, and total size, for example `38% (3.4 GB / 9.0 GB)`, so large GGUF downloads do not look stalled.
 - AI replies, streaming, and `Create edit plan` show a spinner / busy bar while work is still running, then clear it when the operation finishes; E2E can verify the busy state.
+- added `Qwen3.6-35B-A3B Vision`, using `UD-Q4_K_M` and `mmproj-BF16.gguf` from `unsloth/Qwen3.6-35B-A3B-GGUF`, and recommend it on 64GB RAM + RTX 3070 8GB class hardware.
+- `scripts\launch_llama_server.py` and the Web UI launch path now whitelist `--n-cpu-moe`, `--batch-size`, `--ubatch-size`, and `--mlock`, allowing manifest-controlled 8GB NVIDIA MoE offload launches.
 - fixed stale project/thread paths when the stored path no longer exists; failures now clear stale project state and return the UI to idle.
 - relaxed `Create edit plan` timeouts for local coding models so slower PCs are not interrupted while the model is still legitimately thinking.
 - expanded regression and browser E2E coverage for version display, model download progress, AI busy indicator, CodeGraph, Git edit actions, and responsive layout.

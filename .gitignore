@@ -6,6 +6,8 @@ runtime/
 data/indexes/
 data/chat-threads/
 data/model-contexts.json
+data/model-context-calibration.json
+data/model-preferences.json
 data/agent-actions.jsonl
 logs/*.json
 logs/*.jsonl

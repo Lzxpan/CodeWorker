@@ -24,8 +24,12 @@ def main() -> int:
     parser.add_argument("--cache-type-v")
     parser.add_argument("--threads", default=str(os.cpu_count() or 4))
     parser.add_argument("--n-gpu-layers", default="0")
+    parser.add_argument("--n-cpu-moe")
+    parser.add_argument("--batch-size")
+    parser.add_argument("--ubatch-size")
     parser.add_argument("--flash-attn", action="store_true")
     parser.add_argument("--jinja", action="store_true")
+    parser.add_argument("--mlock", action="store_true")
     parser.add_argument("--log", required=True)
     parser.add_argument("--err", required=True)
     args = parser.parse_args()
@@ -68,9 +72,17 @@ def main() -> int:
         if args.cache_type_v:
             command.extend(["--cache-type-v", str(args.cache_type_v)])
         if args.flash_attn:
-            command.append("--flash-attn")
+            command.extend(["--flash-attn", "on"])
         if args.jinja:
             command.append("--jinja")
+        if args.mlock:
+            command.append("--mlock")
+        if args.n_cpu_moe:
+            command.extend(["--n-cpu-moe", str(args.n_cpu_moe)])
+        if args.batch_size:
+            command.extend(["--batch-size", str(args.batch_size)])
+        if args.ubatch_size:
+            command.extend(["--ubatch-size", str(args.ubatch_size)])
         command.extend([
             "-c",
             str(args.context),
@@ -98,8 +110,12 @@ def main() -> int:
             "context": str(args.context),
             "threads": str(args.threads),
             "nGpuLayers": str(args.n_gpu_layers),
+            "nCpuMoe": str(args.n_cpu_moe or ""),
+            "batchSize": str(args.batch_size or ""),
+            "ubatchSize": str(args.ubatch_size or ""),
             "flashAttn": bool(args.flash_attn),
             "jinja": bool(args.jinja),
+            "mlock": bool(args.mlock),
             "cacheTypeK": str(args.cache_type_k or ""),
             "cacheTypeV": str(args.cache_type_v or ""),
             "command": command,

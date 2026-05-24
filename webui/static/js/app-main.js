@@ -24,6 +24,7 @@ elements.modelKey.addEventListener("change", () => {
   refreshModelStatus().catch(() => {});
 });
 elements.contextWindowSelect?.addEventListener("change", updateSelectedContext);
+elements.contextCalibrateBtn?.addEventListener("click", calibrateSelectedModelContext);
 elements.analyzeBtn.addEventListener("click", analyzeProject);
 elements.refreshStatusBtn.addEventListener("click", refreshStatus);
 elements.codeGraphUsePromptBtn?.addEventListener("click", () => queryCodeGraph());

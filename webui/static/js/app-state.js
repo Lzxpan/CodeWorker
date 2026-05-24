@@ -36,6 +36,7 @@ const state = {
   lastContextCoverage: null,
   summaryRaw: "",
   tree: [],
+  fileMetaByPath: {},
   openHelpKey: null,
   chatAttachments: [],
   aiBusy: false,
@@ -60,8 +61,8 @@ const state = {
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V1.01.003 Web UI",
-    brandTitle: "CodeWorker V1.01.003",
+    pageTitle: "CodeWorker V1.02.000 Web UI",
+    brandTitle: "CodeWorker V1.02.000",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -244,8 +245,8 @@ const I18N = {
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V1.01.003 Web UI",
-    brandTitle: "CodeWorker V1.01.003",
+    pageTitle: "CodeWorker V1.02.000 Web UI",
+    brandTitle: "CodeWorker V1.02.000",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -452,11 +453,11 @@ const HELP_CONTENT = {
   "model-key": {
     "zh-Hant": {
       title: "模型",
-      description: "選擇本次要用的本地模型。預設與主力模型是 Gemma 4 26B；它由 CodeWorker 內建 llama.cpp service 啟動，不依賴 Ollama。",
+      description: "選擇本次要用的本地模型。初始 fallback 是 Gemma 4 26B；之後 CodeWorker 會把最後一次成功使用的模型作為預設。所有模型都由內建 llama.cpp service 啟動，不依賴 Ollama。",
       usage: [
-        "一般建議直接使用 Gemma 4 26B。",
+        "一般建議使用硬體狀態區推薦的模型，或沿用上次已成功使用的模型。",
         "Gemma 4 26B 支援文字與圖片，影片會由 CodeWorker 先抽 keyframes 再交給模型分析。",
-        "Qwen 3.5 9B Vision 仍保留為可選備用模型。",
+        "Qwen 3.5 9B Vision、Qwen3.6-35B-A3B Vision 與其他程式碼模型可依硬體與需求選用。",
         "所有模型都會先嘗試目前功能；若模型或後端做不到，會以回覆說明限制。",
         "一般聊天可直接使用；開啟專案後才會加入 pinned files 或 RAG 上下文。",
       ],
@@ -467,11 +468,11 @@ const HELP_CONTENT = {
     },
     en: {
       title: "Model",
-      description: "Select the local model for this session. Gemma 4 26B is the primary default and is served by CodeWorker's bundled llama.cpp service without Ollama.",
+      description: "Select the local model for this session. Gemma 4 26B is the initial fallback; after that, CodeWorker uses the last successfully used model as the default. All models are served by the bundled llama.cpp service without Ollama.",
       usage: [
-        "Gemma 4 26B is the recommended default.",
+        "Use the hardware recommendation or keep the last model that worked well on this machine.",
         "Gemma 4 26B handles text and image input; videos are converted to keyframes before analysis.",
-        "Qwen 3.5 9B Vision remains available as a backup model.",
+        "Qwen 3.5 9B Vision, Qwen3.6-35B-A3B Vision, and the coding models can be selected based on hardware and task needs.",
         "Every feature is attempted with the selected model first; if the model or backend cannot do it, the reply should explain the limitation.",
         "General chat works immediately; project context is added after opening a project and using pinned files or RAG.",
       ],

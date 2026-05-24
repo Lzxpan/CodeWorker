@@ -74,8 +74,13 @@ function formatProjectSummary(summary, pinnedFiles = []) {
   const base = translateSummaryBase(summary || t("hints.initialSummary"));
   const pinned = Array.isArray(pinnedFiles) ? pinnedFiles.filter(Boolean) : [];
   const previewList = pinned.slice(0, 6);
+  const formatPinned = (path) => {
+    const meta = state.fileMetaByPath?.[path] || {};
+    const size = Number(meta.size || meta.sizeBytes || 0);
+    return size > 0 ? `${path} (${formatBytes(size)})` : path;
+  };
   const pinnedBlock = pinned.length
-    ? `\n${t("summary.pinned")} (${pinned.length}):\n- ${previewList.join("\n- ")}${pinned.length > previewList.length ? `\n- ${t("summary.moreCount", pinned.length - previewList.length)}` : ""}`
+    ? `\n${t("summary.pinned")} (${pinned.length}):\n- ${previewList.map(formatPinned).join("\n- ")}${pinned.length > previewList.length ? `\n- ${t("summary.moreCount", pinned.length - previewList.length)}` : ""}`
     : `\n${t("summary.pinned")}: ${t("summary.noPins")}`;
   return `${base}${pinnedBlock}`;
 }
@@ -90,6 +95,14 @@ function formatContextWindow(value) {
   const numeric = Number(value || 0);
   if (!numeric) return "-";
   return numeric % 1024 === 0 ? `${numeric / 1024}k` : String(numeric);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!bytes) return "-";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function formatModelTier(tier, compact = false) {

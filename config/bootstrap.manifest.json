@@ -129,6 +129,61 @@
       "compactImageContext": true,
       "note": "Qwen 3.5 multimodal GGUF with BF16 mmproj for llama.cpp OpenAI-compatible /v1."
     },
+    "qwen36a3b": {
+      "enabled": true,
+      "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
+      "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+      "modelId": "Qwen3.6-35B-A3B",
+      "alias": "qwen36a3b-local",
+      "displayName": "Qwen3.6-35B-A3B Vision",
+      "port": 8087,
+      "contextWindow": 32768,
+      "cacheTypeK": "q4_0",
+      "cacheTypeV": "q4_0",
+      "nGpuLayers": 999,
+      "defaultQuant": "UD-Q4_K_M",
+      "filePattern": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "filePatterns": [
+        "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+      ],
+      "mmprojPatterns": [
+        "mmproj-BF16.gguf"
+      ],
+      "targetDir": "models/qwen3.6-35b-a3b-ud-q4-k-m",
+      "tier": "high",
+      "estimatedModelSizeGb": 21.2,
+      "minRamGb": 64,
+      "recommendedRamGb": 64,
+      "lowVramContextWindow": 32768,
+      "contextOptions": [
+        32768,
+        65536,
+        131072
+      ],
+      "llamaArgs": [
+        "--flash-attn",
+        "--jinja",
+        "--n-cpu-moe=999",
+        "--batch-size=512",
+        "--ubatch-size=128",
+        "--mlock"
+      ],
+      "lowMemoryLlamaArgs": [
+        "--flash-attn",
+        "--jinja",
+        "--n-cpu-moe=999",
+        "--batch-size=256",
+        "--ubatch-size=64"
+      ],
+      "autoDownload": false,
+      "supportsImages": true,
+      "compactImageContext": true,
+      "temperature": 0.2,
+      "topP": 0.95,
+      "topK": 40,
+      "note": "Qwen3.6 35B A3B multimodal GGUF tuned for 8GB NVIDIA GPUs by keeping MoE weights on CPU/RAM while offloading non-MoE layers with CUDA."
+    },
     "qwen3coder30b": {
       "enabled": true,
       "provider": "huggingface",

@@ -16,6 +16,7 @@ async function refreshStatus() {
   state.threads = data.threads || [];
   state.uiState = data.uiState || (data.projectPath ? "ready" : "idle");
   state.summaryRaw = data.summary || "";
+  state.fileMetaByPath = data.fileMeta || state.fileMetaByPath || {};
   clearTimeout(state.pinSyncTimer);
   state.pinSyncTimer = null;
   state.pinSyncRollback = null;
@@ -91,6 +92,51 @@ async function updateSelectedContext() {
   } catch (error) {
     showError(normalizeError(error, "MODEL_CONTEXT_FAILED", t("errors.contextUpdateFailed")));
     renderContextSelector();
+  }
+}
+
+async function calibrateSelectedModelContext() {
+  const modelKey = elements.modelKey.value || state.modelKey || "gemma4";
+  const contextWindow = Number(elements.contextWindowSelect?.value || state.modelContextByKey[modelKey] || 32768);
+  const button = elements.contextCalibrateBtn;
+  if (button) button.disabled = true;
+  setStatus(state.language === "en" ? "Measuring context capacity" : "正在測試 context 可送出 KB", true);
+  setAiBusy(true, state.language === "en" ? "Measuring model context capacity" : "正在實測模型 context 容量");
+  try {
+    const data = await requestJson("/api/models/context-calibration", {
+      method: "POST",
+      body: JSON.stringify({ modelKey, contexts: [contextWindow] }),
+    });
+    state.modelCapabilities = data.models || state.modelCapabilities;
+    const structured = Number(data.structuredEditChars || data.calibration?.structuredEditChars || 0);
+    const maxInput = Number(data.maxInputChars || data.calibration?.maxInputChars || 0);
+    const measuredAt = String(data.measuredAt || data.calibration?.measuredAt || "");
+    appendToolCard({
+      kind: "status-context",
+      title: state.language === "en" ? "Context capacity measured" : "Context 容量實測",
+      html: `
+        <section class="transcript-tool-section">
+          <div class="tool-card-head">
+            <strong>${escapeHtml(state.language === "en" ? "Context capacity measured" : "Context 容量實測")}</strong>
+            <span class="badge">${escapeHtml(modelKey)}</span>
+          </div>
+          <div class="tool-card-body">
+            <div>${escapeHtml(state.language === "en" ? "Structured edit budget" : "修改計畫可送出上限")}：${escapeHtml(structured ? `${Math.round(structured / 1024)}KB (${structured} chars)` : "-")}</div>
+            <div>${escapeHtml(state.language === "en" ? "Max input budget" : "一般輸入上限")}：${escapeHtml(maxInput ? `${Math.round(maxInput / 1024)}KB (${maxInput} chars)` : "-")}</div>
+            <div>${escapeHtml(state.language === "en" ? "Context tested" : "測試 context")}：${escapeHtml(formatContextWindow(contextWindow))}</div>
+            ${measuredAt ? `<div>${escapeHtml(state.language === "en" ? "Measured at" : "測試時間")}：${escapeHtml(measuredAt)}</div>` : ""}
+          </div>
+        </section>
+      `,
+    });
+    renderModelOptions(state.modelCapabilities);
+    setStatus(state.language === "en" ? "Context capacity measured" : "Context 容量實測完成");
+  } catch (error) {
+    showError(normalizeError(error, "MODEL_CONTEXT_CALIBRATION_FAILED", state.language === "en" ? "Context capacity measurement failed." : "Context 容量實測失敗。"));
+    setStatus(state.language === "en" ? "Context measurement failed" : "Context 實測失敗");
+  } finally {
+    if (button) button.disabled = false;
+    setAiBusy(false);
   }
 }
 

@@ -384,15 +384,29 @@ function renderEditDetailHtml(detail, fallbackAction = null) {
   const after = detail?.afterSnippet || detail?.after || "";
   const diff = detail?.diffWindow || detail?.diff || fallbackAction?.diffWindow || fallbackAction?.diff || "";
   const notes = Array.isArray(detail?.notes) ? detail.notes.filter(Boolean) : [];
+  const unverified = detail?.verified === false || detail?.source === "model-unverified";
+  const beforeLabel = unverified
+    ? (state.language === "en" ? "Unverified original reference" : "未驗證參考原始片段")
+    : (state.language === "en" ? "Original snippet" : "建議替換前片段");
+  const afterLabel = unverified
+    ? (state.language === "en" ? "Unverified modified reference" : "未驗證參考修改片段")
+    : (state.language === "en" ? "Modified snippet" : "建議替換後片段");
+  const diffLabel = unverified
+    ? (state.language === "en" ? "Unverified reference snippet" : "未驗證參考片段")
+    : "Diff";
+  const validationMeta = unverified
+    ? `<div class="meta">${escapeHtml(state.language === "en" ? "This suggestion was not matched exactly in the current file and is for manual review only." : "這段建議未在目前檔案中精準匹配，只能作為人工檢查參考。")}</div>`
+    : "";
   return `
     <div class="edit-detail-grid">
       <div><strong>${escapeHtml(state.language === "en" ? "Location" : "修改位置")}：</strong>${escapeHtml(detail?.location || (state.language === "en" ? "Not provided" : "未提供"))}</div>
       <div><strong>${escapeHtml(state.language === "en" ? "Target" : "命中函式/區塊")}：</strong>${escapeHtml(detail?.target || (state.language === "en" ? "Not provided" : "未提供"))}</div>
       <div><strong>${escapeHtml(state.language === "en" ? "Reason" : "原因")}：</strong>${escapeHtml(detail?.reason || detail?.whyHere || fallbackAction?.summary || (state.language === "en" ? "Not provided" : "未提供"))}</div>
     </div>
-    ${renderEditSnippetBlock(state.language === "en" ? "Original snippet" : "建議替換前片段", before)}
-    ${renderEditSnippetBlock(state.language === "en" ? "Modified snippet" : "建議替換後片段", after)}
-    ${renderEditSnippetBlock("Diff", diff)}
+    ${validationMeta}
+    ${renderEditSnippetBlock(beforeLabel, before)}
+    ${renderEditSnippetBlock(afterLabel, after)}
+    ${renderEditSnippetBlock(diffLabel, diff)}
     ${notes.length ? `<div class="meta">${escapeHtml(state.language === "en" ? "Notes" : "補充說明")}：${escapeHtml(notes.join("；"))}</div>` : ""}
   `;
 }
@@ -423,16 +437,16 @@ function renderEditPlanHtml(plan) {
         <section class="edit-action-card">
           <div class="tool-card-head">
             <strong>${escapeHtml(state.language === "en" ? "Manual suggestion" : "手動修改建議")}</strong>
-            <span class="badge">${escapeHtml(state.language === "en" ? "advisory" : "文字模式")}</span>
+            <span class="badge">${escapeHtml(item?.source === "model-unverified" ? (state.language === "en" ? "unverified" : "未驗證參考") : (state.language === "en" ? "advisory" : "文字模式"))}</span>
           </div>
           <div class="tool-card-body">
             <div><strong>${escapeHtml(state.language === "en" ? "Path" : "檔案")}：</strong>${escapeHtml(item.path || "")}</div>
             ${renderEditDetailHtml(item, null)}
-          </div>
-        </section>
-      `).join("")
+      </div>
+    </section>
+  `).join("")
       : `<div class="tool-card-body">${escapeHtml(state.language === "en" ? "No directly applicable file actions. Review the advisory text and refine the request." : "沒有可直接套用的檔案操作。請查看文字建議後補充需求。")}</div>`;
-  const canApply = actions.some((action) => action.status === "pending");
+  const canApply = plan?.mode !== "advisory" && actions.some((action) => action.status === "pending");
   return `
     <section class="transcript-tool-section edit-plan-status">
       <div class="tool-card-head">
@@ -508,10 +522,12 @@ async function generateEditPlan() {
   setStatus(state.language === "en" ? "Generating edit suggestion" : "正在產生修改建議", true);
   setAiBusy(true, state.language === "en" ? "AI is generating an edit plan" : "AI 正在產生修改建議");
   try {
+    const modelKey = elements.modelKey.value || state.modelKey;
     const data = await requestJson("/api/edit/plan", {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, modelKey }),
     });
+    renderContextCoverage(data.plan?.contextCoverage || null, { appendToTranscript: true });
     renderEditPlan(data.plan, { append: true });
     const modeLabel = data.plan.mode === "advisory" ? (state.language === "en" ? "advisory" : "文字模式") : (state.language === "en" ? "precise" : "精準模式");
     appendMessage("assistant", `${state.language === "en" ? "Edit suggestion generated" : "已產生修改建議"} (${modeLabel})\n\n${buildPendingEditText(data.plan)}`);

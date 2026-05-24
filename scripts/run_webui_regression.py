@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "webui"))
 
 import server  # noqa: E402
+import measure_context_limits  # noqa: E402
 from rag.index import build_code_graph_context, code_graph_status, index_is_stale, rebuild_index, search_code_graph, search_index  # noqa: E402
 
 
@@ -37,9 +38,83 @@ def test_request_max_tokens_clamps_to_default():
     assert_true(server.get_request_max_tokens({"maxTokens": "bad"}, 128) == 128, "invalid maxTokens should use default")
 
 
-def test_default_model_is_gemma4():
-    assert_true(server.DEFAULT_MODEL_KEY == "gemma4", "default model should be gemma4")
-    assert_true(server.get_models_payload()["defaultModelKey"] == "gemma4", "/api/models defaultModelKey should be gemma4")
+def test_qwen_request_options_disable_thinking():
+    assert_true(
+        server.get_model_request_options("qwen36a3b") == {"chat_template_kwargs": {"enable_thinking": False}},
+        "qwen36a3b requests should disable thinking for visible CodeWorker answers",
+    )
+    assert_true(
+        server.get_model_request_options("gemma4") == {},
+        "non-Qwen requests should not get Qwen chat template options",
+    )
+
+
+def test_default_model_uses_last_used_preference():
+    old_path = server.MODEL_PREFERENCES_PATH
+    old_model_key = server.STATE.model_key
+    old_model_alias = server.STATE.model_alias
+    temp_dir = ROOT / ".tmp" / f"regression-model-preferences-{uuid.uuid4().hex}"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.MODEL_PREFERENCES_PATH = temp_dir / "model-preferences.json"
+        assert_true(server.DEFAULT_MODEL_KEY == "gemma4", "static fallback model should remain gemma4")
+        assert_true(server.get_default_model_key() == "gemma4", "missing preference should fall back to gemma4")
+        assert_true(server.get_models_payload()["defaultModelKey"] == "gemma4", "/api/models should expose fallback default")
+
+        server.save_last_used_model_key("qwen36a3b")
+        assert_true(server.get_default_model_key() == "qwen36a3b", "last-used preference should become runtime default")
+        assert_true(server.get_models_payload()["defaultModelKey"] == "qwen36a3b", "/api/models should expose last-used default")
+        assert_true(server.get_models_payload()["lastUsedModelKey"] == "qwen36a3b", "/api/models should expose last-used model")
+
+        server.clear_session()
+        assert_true(server.STATE.model_key == "qwen36a3b", "clear_session should reset to last-used model")
+        assert_true(server.STATE.model_alias == server.get_model_alias("qwen36a3b"), "clear_session should update last-used alias")
+
+        server.MODEL_PREFERENCES_PATH.write_text(json.dumps({"lastUsedModelKey": "not-a-model"}, ensure_ascii=False), encoding="utf-8")
+        assert_true(server.get_default_model_key() == "gemma4", "invalid preference should fall back to static default")
+    finally:
+        server.MODEL_PREFERENCES_PATH = old_path
+        server.STATE.model_key = old_model_key
+        server.STATE.model_alias = old_model_alias
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_chat_exchange_persists_last_used_model_preference():
+    old_path = server.MODEL_PREFERENCES_PATH
+    old_threads_dir = server.THREADS_DIR
+    old_active_thread_id = server.ACTIVE_THREAD_ID
+    old_model_key = server.STATE.model_key
+    old_model_alias = server.STATE.model_alias
+    old_history = list(server.STATE.history)
+    old_transcript = list(server.STATE.transcript)
+    temp_dir = ROOT / ".tmp" / f"regression-chat-model-preference-{uuid.uuid4().hex}"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.MODEL_PREFERENCES_PATH = temp_dir / "model-preferences.json"
+        server.THREADS_DIR = temp_dir / "chat-threads"
+        server.ACTIVE_THREAD_ID = None
+        with server.STATE_LOCK:
+            server.append_chat_exchange_locked("qwen36a3b", "ping", [], "", "pong")
+        assert_true(server.get_default_model_key() == "qwen36a3b", "successful chat exchange should persist last-used model")
+    finally:
+        server.MODEL_PREFERENCES_PATH = old_path
+        server.THREADS_DIR = old_threads_dir
+        server.ACTIVE_THREAD_ID = old_active_thread_id
+        server.STATE.model_key = old_model_key
+        server.STATE.model_alias = old_model_alias
+        server.STATE.history = old_history
+        server.STATE.transcript = old_transcript
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_edit_plan_flow_uses_requested_model_key():
+    source = inspect.getsource(server.WebUIHandler.handle_edit_plan)
+    assert_true('requested_model_key = str(payload.get("modelKey", "")).strip().lower()' in source, "edit plan should read the selected model from the request")
+    assert_true("model_key = requested_model_key or STATE.model_key" in source, "edit plan should prefer the requested model over stale server state")
+    assert_true("ensure_local_model_server(model_key" in source, "edit plan should ensure a newly selected model before planning")
+    assert_true("remember_last_used_model_key(snapshot.model_key)" in source, "edit plan should persist the model it actually used")
 
 
 def test_gemma_context_window_matches_local_bench():
@@ -49,6 +124,220 @@ def test_gemma_context_window_matches_local_bench():
     assert_true(server.get_chat_max_tokens("gemma4") <= 4096, "gemma4 response budget should leave room for input context")
     limits = server.get_context_limits("gemma4", single_file_focus=False)
     assert_true(limits["total_chars"] >= 20000, "gemma4 RAG char budget should use the selected context window")
+
+
+def test_context_calibration_overrides_input_budget_and_model_payload():
+    old_path = server.MODEL_CONTEXT_CALIBRATION_PATH
+    old_context = server.MODEL_CONTEXT_SELECTIONS_PATH
+    temp_dir = ROOT / ".tmp" / f"regression-context-calibration-{uuid.uuid4().hex}"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.MODEL_CONTEXT_CALIBRATION_PATH = temp_dir / "model-context-calibration.json"
+        server.MODEL_CONTEXT_SELECTIONS_PATH = temp_dir / "model-contexts.json"
+        server.MODEL_CONTEXT_CALIBRATION_PATH.write_text(
+            json.dumps(
+                {
+                    "qwen36a3b": {
+                        "contextWindow": 32768,
+                        "maxInputChars": 41000,
+                        "structuredEditChars": 37000,
+                        "measuredAt": "2026-05-23T20:00:00+08:00",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        assert_true(
+            server.estimate_input_char_budget("qwen36a3b", 900) == 37000,
+            "structured edit calibration should override conservative context budget",
+        )
+        limits = server.get_context_limits("qwen36a3b", single_file_focus=True, max_response_tokens=900)
+        assert_true(limits["total_chars"] == 37000, "edit context should use calibrated structured edit budget")
+        assert_true(limits["full_total_chars"] == 37000, "full-file edit context should expand to calibrated capacity")
+        model_payload = server.get_models_payload()["models"]["qwen36a3b"]
+        assert_true(model_payload["calibrated"] is True, "/api/models should expose calibration state")
+        assert_true(model_payload["structuredEditChars"] == 37000, "/api/models should expose calibrated edit budget")
+        assert_true(model_payload["measuredAt"] == "2026-05-23T20:00:00+08:00", "/api/models should expose calibration timestamp")
+    finally:
+        server.MODEL_CONTEXT_CALIBRATION_PATH = old_path
+        server.MODEL_CONTEXT_SELECTIONS_PATH = old_context
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_context_calibration_runner_targets_selected_model_and_context():
+    old_calibration_path = server.MODEL_CONTEXT_CALIBRATION_PATH
+    old_selection_path = server.MODEL_CONTEXT_SELECTIONS_PATH
+    old_logs_dir = server.LOGS_DIR
+    old_runner = server.run_python_script_via_log
+    temp_dir = ROOT / ".tmp" / f"regression-context-calibration-runner-{uuid.uuid4().hex}"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    captured = {}
+
+    def fake_runner(script_name, *args, timeout_seconds=None):
+        captured["script"] = script_name
+        captured["args"] = list(args)
+        captured["timeout"] = timeout_seconds
+        server.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        (server.LOGS_DIR / "model-context-bench.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "model": "qwen36a3b",
+                        "context": 32768,
+                        "startup_ok": True,
+                        "tests": {
+                            "entry": {"ok": True},
+                            "analysis": {"ok": True},
+                            "structured": {"ok": True},
+                        },
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        server.MODEL_CONTEXT_CALIBRATION_PATH.write_text(
+            json.dumps(
+                {
+                    "qwen36a3b": {
+                        "contextWindow": 32768,
+                        "maxInputChars": 43000,
+                        "structuredEditChars": 39000,
+                        "measuredAt": "2026-05-23T21:00:00+08:00",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args=["measure"], returncode=0, stdout="ok", stderr="")
+
+    try:
+        server.MODEL_CONTEXT_CALIBRATION_PATH = temp_dir / "model-context-calibration.json"
+        server.MODEL_CONTEXT_SELECTIONS_PATH = temp_dir / "model-contexts.json"
+        server.LOGS_DIR = temp_dir / "logs"
+        server.run_python_script_via_log = fake_runner
+        result = server.run_model_context_calibration("qwen36a3b", [131072])
+        assert_true(captured["script"] == "measure_context_limits.py", "calibration should run the benchmark script")
+        assert_true(
+            captured["args"] == [
+                "--models",
+                "qwen36a3b",
+                "--contexts",
+                "131072",
+                "65536",
+                "32768",
+                "16384",
+                "8192",
+                "4096",
+                "--stop-after-first-success",
+            ],
+            "calibration should test the upper context limit downward and stop after the first success",
+        )
+        assert_true(captured["timeout"] == 3600, "calibration should allow long-running model probes")
+        assert_true(result["structuredEditChars"] == 39000, "calibration result should expose measured edit budget")
+        try:
+            server.run_model_context_calibration("invalid", [32768])
+            raise AssertionError("invalid model aliases should not fall back to the default model")
+        except ValueError:
+            pass
+
+        def failing_runner(script_name, *args, timeout_seconds=None):
+            server.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            (server.LOGS_DIR / "model-context-bench.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "model": "qwen36a3b",
+                            "context": 32768,
+                            "startup_ok": False,
+                            "startup_output": "failed to allocate buffer for kv cache",
+                            "tests": {},
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=["measure"], returncode=0, stdout="ok", stderr="")
+
+        server.run_python_script_via_log = failing_runner
+        try:
+            server.run_model_context_calibration("qwen36a3b", [32768])
+            raise AssertionError("calibration with no successful context should fail instead of showing empty results")
+        except RuntimeError as exc:
+            assert_true("No context calibration succeeded" in str(exc), "empty calibration should explain that no context succeeded")
+    finally:
+        server.MODEL_CONTEXT_CALIBRATION_PATH = old_calibration_path
+        server.MODEL_CONTEXT_SELECTIONS_PATH = old_selection_path
+        server.LOGS_DIR = old_logs_dir
+        server.run_python_script_via_log = old_runner
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_context_benchmark_reuses_existing_compatible_model_server():
+    old_request_json = measure_context_limits.request_json
+    old_request_chat = measure_context_limits.request_chat
+    old_kill = measure_context_limits.kill_bench_ports
+    old_run = measure_context_limits.subprocess.run
+    calls = {"kill": 0, "run": 0, "chat": 0}
+
+    def fake_request_json(port, path, timeout=30):
+        if port == server.get_model_port("qwen36a3b") and path == "/v1/models":
+            return {"ok": True, "data": {"data": [{"id": "qwen36a3b-local", "aliases": ["qwen36a3b-local"]}]}}
+        if port == server.get_model_port("qwen36a3b") and path == "/props":
+            return {"ok": True, "data": {"default_generation_settings": {"n_ctx": 131072}}}
+        return {"ok": False, "error": "unexpected request"}
+
+    def fake_request_chat(port, model, messages, max_tokens, timeout=180):
+        calls["chat"] += 1
+        return {"ok": True, "reply": "ok", "finish_reason": "stop", "length": 2}
+
+    def fake_kill():
+        calls["kill"] += 1
+
+    def fake_run(*args, **kwargs):
+        calls["run"] += 1
+        raise AssertionError("probe should reuse existing compatible qwen36a3b server instead of launching another copy")
+
+    try:
+        measure_context_limits.request_json = fake_request_json
+        measure_context_limits.request_chat = fake_request_chat
+        measure_context_limits.kill_bench_ports = fake_kill
+        measure_context_limits.subprocess.run = fake_run
+        result = measure_context_limits.probe_model("qwen36a3b", 131072, 18120)
+        assert_true(result["startup_ok"] is True, "reused qwen36a3b server should count as startup ok")
+        assert_true(result.get("reused_existing_server") is True, "probe should mark reused existing server")
+        assert_true(result["port"] == server.get_model_port("qwen36a3b"), "probe should use the existing model server port")
+        assert_true(calls["kill"] == 0 and calls["run"] == 0, "probe should not kill ports or start another large model")
+        assert_true(calls["chat"] >= 3, "probe should still run benchmark prompts against the existing server")
+    finally:
+        measure_context_limits.request_json = old_request_json
+        measure_context_limits.request_chat = old_request_chat
+        measure_context_limits.kill_bench_ports = old_kill
+        measure_context_limits.subprocess.run = old_run
+
+
+def test_start_server_uses_low_memory_model_env_for_qwen36_on_low_vram():
+    resolved = subprocess.run(
+        [str(ROOT / "runtime" / "WinPython" / "python" / "python.exe"), str(ROOT / "scripts" / "resolve_model_env.py"), "qwen36a3b"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=60,
+    )
+    assert_true(resolved.returncode == 0, "resolve_model_env.py should resolve qwen36a3b")
+    assert_true('MODEL_N_GPU_LAYERS=0' in resolved.stdout, "qwen36a3b should avoid GPU offload on this low-VRAM profile")
+    assert_true('--batch-size=256' in resolved.stdout and '--ubatch-size=64' in resolved.stdout, "qwen36a3b should use low-memory batch settings")
+    assert_true('--mlock' not in resolved.stdout, "qwen36a3b low-memory launch should not mlock the model")
+    start_server = (ROOT / "scripts" / "start-server.cmd").read_text(encoding="utf-8")
+    assert_true("timeout /t 2 /nobreak" in start_server and "Start-Sleep -Seconds 2" not in start_server, "start-server wait loop should avoid PowerShell sleep under OOM pressure")
 
 
 def test_gemma_manifest_uses_unsloth_with_mmproj():
@@ -65,7 +354,7 @@ def test_gemma_manifest_uses_unsloth_with_mmproj():
 def test_new_model_catalog_exposes_hardware_metadata():
     payload = server.get_models_payload()
     models = payload["models"]
-    for key in ("qwen3coder30b", "glm46", "qwen25coder14b", "deepseekcoderlite"):
+    for key in ("qwen36a3b", "qwen3coder30b", "glm46", "qwen25coder14b", "deepseekcoderlite"):
         assert_true(key in models, f"{key} should be available in the model catalog")
         assert_true(models[key].get("tier") in {"low", "standard", "high", "extreme"}, f"{key} should expose a hardware tier")
         assert_true(models[key].get("estimatedModelSizeGb", 0) > 0, f"{key} should expose estimated model size")
@@ -77,7 +366,7 @@ def test_new_model_catalog_exposes_hardware_metadata():
 
 
 def test_hardware_profile_classification_and_recommendations():
-    from core.hardware import HardwareInfo, classify_hardware, recommend_model_settings
+    from core.hardware import HardwareInfo, choose_recommended_model_key, classify_hardware, recommend_model_settings
 
     standard = HardwareInfo(
         total_ram_gb=32.0,
@@ -128,11 +417,68 @@ def test_hardware_profile_classification_and_recommendations():
     assert_true(classify_hardware(low)["profile"] == "low", "low RAM without GPU should be low")
 
 
+def test_qwen36a3b_catalog_targets_8gb_nvidia_moe_offload():
+    from core.hardware import HardwareInfo, choose_recommended_model_key, classify_hardware, recommend_model_settings
+
+    manifest = json.loads((ROOT / "config" / "bootstrap.manifest.json").read_text(encoding="utf-8"))
+    qwen36 = manifest["models"]["qwen36a3b"]
+    assert_true(qwen36["repo"] == "unsloth/Qwen3.6-35B-A3B-GGUF", "qwen36a3b should use the Unsloth GGUF repo")
+    assert_true(qwen36["defaultQuant"] == "UD-Q4_K_M", "qwen36a3b should use the 8GB-oriented UD-Q4_K_M quant")
+    assert_true("Qwen3.6-35B-A3B" in qwen36["displayName"], "qwen36a3b should expose the Qwen3.6 35B A3B model")
+    assert_true(qwen36["supportsImages"] is True, "qwen36a3b should expose multimodal support")
+    assert_true(qwen36["mmprojPatterns"], "qwen36a3b should require the vision mmproj file")
+    assert_true(qwen36["contextWindow"] == 32768, "qwen36a3b should default to the 32k 8GB launch profile")
+    assert_true(qwen36["nGpuLayers"] == 999, "qwen36a3b manual launcher should offload non-MoE layers")
+    for arg in ("--flash-attn", "--jinja", "--n-cpu-moe=999", "--batch-size=512", "--ubatch-size=128", "--mlock"):
+        assert_true(arg in qwen36["llamaArgs"], f"qwen36a3b should pass {arg} to llama.cpp")
+
+    profile = classify_hardware(HardwareInfo(
+        total_ram_gb=64.0,
+        cpu_cores=12,
+        cpu_threads=20,
+        gpus=[{"name": "NVIDIA GeForce RTX 3070", "vendor": "nvidia", "vramGb": 8.0}],
+        has_nvidia_smi=True,
+        has_vulkan=True,
+    ))
+    raw_configs = {key: server.get_model_manifest(key) for key in server.SUPPORTED_MODEL_KEYS}
+    assert_true(choose_recommended_model_key(profile, raw_configs) == "qwen36a3b", "64GB RAM plus RTX 3070 8GB should recommend qwen36a3b")
+    settings = recommend_model_settings(profile, qwen36)
+    assert_true(settings["runtimeBackend"] == "cuda", "qwen36a3b should use CUDA on NVIDIA")
+    assert_true(settings["contextWindow"] == 32768, "qwen36a3b should keep the 32k context on 8GB-class NVIDIA")
+    assert_true(settings["nGpuLayers"] == 999, "qwen36a3b should still offload non-MoE layers to GPU")
+
+    low_vram_profile = classify_hardware(HardwareInfo(
+        total_ram_gb=31.0,
+        cpu_cores=6,
+        cpu_threads=12,
+        gpus=[{"name": "AMD Radeon 760M Graphics", "vendor": "amd", "vramGb": 0.5}],
+        has_nvidia_smi=False,
+        has_vulkan=True,
+    ))
+    low_vram_settings = recommend_model_settings(low_vram_profile, qwen36)
+    assert_true(low_vram_settings["nGpuLayers"] == 0, "qwen36a3b should avoid iGPU offload on sub-4GB VRAM")
+    low_vram_args = server.get_model_llama_args("qwen36a3b", low_vram_profile)
+    assert_true("--batch-size=256" in low_vram_args, "qwen36a3b low-memory args should reduce batch size")
+    assert_true("--ubatch-size=64" in low_vram_args, "qwen36a3b low-memory args should reduce ubatch size")
+    assert_true("--mlock" not in low_vram_args, "qwen36a3b low-memory args should avoid mlock")
+
+
 def test_llama_launcher_accepts_auto_hardware_args():
     source = (ROOT / "scripts" / "launch_llama_server.py").read_text(encoding="utf-8")
     assert_true('parser.add_argument("--n-gpu-layers"' in source, "launcher should accept --n-gpu-layers")
+    assert_true('parser.add_argument("--n-cpu-moe"' in source, "launcher should accept llama.cpp MoE CPU offload")
+    assert_true('parser.add_argument("--batch-size"' in source, "launcher should accept tuned logical batch size")
+    assert_true('parser.add_argument("--ubatch-size"' in source, "launcher should accept tuned physical batch size")
+    assert_true('parser.add_argument("--mlock"' in source, "launcher should accept model RAM lock")
     assert_true('parser.add_argument("--flash-attn"' in source, "launcher should accept --flash-attn")
     assert_true('parser.add_argument("--jinja"' in source, "launcher should accept --jinja")
+    assert_true('"--flash-attn", "on"' in source, "launcher should pass an explicit Flash Attention value for current llama.cpp")
+    assert_true('"--n-cpu-moe"' in source, "launcher should forward --n-cpu-moe to llama-server")
+    assert_true('"--batch-size"' in source, "launcher should forward --batch-size to llama-server")
+    assert_true('"--ubatch-size"' in source, "launcher should forward --ubatch-size to llama-server")
+    server_source = (ROOT / "webui" / "server.py").read_text(encoding="utf-8")
+    assert_true("append_llama_manifest_args" in server_source, "web server should centrally forward manifest llamaArgs")
+    assert_true('"--n-cpu-moe"' in server_source, "web server should allow manifest MoE CPU offload args")
     assert_true('"--n-gpu-layers",\n            "0"' not in source, "launcher must not hard-code CPU-only GPU layers")
     assert_true("[CODEWORKER_LAUNCH_METADATA]" in source, "launcher should write detailed launch metadata into llama-server logs")
 
@@ -987,6 +1333,248 @@ def test_project_rag_context_without_pins():
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def test_edit_context_sends_full_pinned_file_when_budget_allows_existing_effect_changes():
+    root = ROOT / ".tmp" / f"regression-edit-full-pinned-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Form1.cs"
+    padding = "\n".join(f"    private int Padding{i}() {{ return {i}; }}" for i in range(220))
+    source.write_text(
+        "using System.Drawing;\n"
+        "public class Form1 {\n"
+        "    private readonly List<ClearParticle> clearParticles = new();\n"
+        f"{padding}\n"
+        "    private void SpawnClearParticles(int row)\n"
+        "    {\n"
+        "        for (int x = 0; x < BoardWidth; x++)\n"
+        "        {\n"
+        "            Color color = pieceColors[board[row, x]];\n"
+        "            for (int i = 0; i < 5; i++)\n"
+        "            {\n"
+        "                float speedX = (float)(random.NextDouble() * 6.0 - 3.0);\n"
+        "                float speedY = (float)(random.NextDouble() * -4.0 - 1.5);\n"
+        "                clearParticles.Add(new ClearParticle(new PointF(x, row), new PointF(speedX, speedY), color, 24, 4));\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    private void UpdateClearParticles()\n"
+        "    {\n"
+        "        for (int i = clearParticles.Count - 1; i >= 0; i--)\n"
+        "        {\n"
+        "            ClearParticle particle = clearParticles[i];\n"
+        "            particle.Velocity = new PointF(particle.Velocity.X * 0.98f, particle.Velocity.Y + 0.35f);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    private sealed class ClearParticle {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen36a3b",
+            model_alias="qwen36a3b-local",
+            files=[server.ProjectFile(path="Form1.cs", size=source.stat().st_size, language="C#")],
+            tree=["Form1.cs"],
+            pinned_files=["Form1.cs"],
+            ui_state="ready",
+        )
+        context, allowed = server.build_edit_context(
+            root,
+            state,
+            "請讓既有碎裂動畫外拋更遠、停留更久，並調整物理更新。",
+        )
+        assert_true(allowed == ["Form1.cs"], "pinned edit context should keep the pinned file as the candidate")
+        assert_true("完整內容" in context, "small enough pinned files should be sent as full content")
+        assert_true("private void SpawnClearParticles" in context, "full pinned context should include the particle spawn method")
+        assert_true("float speedX" in context and "float speedY" in context, "full pinned context should include velocity setup")
+        assert_true("private void UpdateClearParticles" in context, "full pinned context should include the physics update method")
+        coverage = server.get_last_edit_context_coverage()
+        assert_true(coverage["files"][0]["mode"] == "full", "coverage should record full file mode")
+        assert_true(coverage["files"][0]["truncated"] is False, "coverage should mark full pinned file as untruncated")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_chat_context_sends_full_line_numbered_pinned_file_for_all_models_when_budget_allows():
+    root = ROOT / ".tmp" / f"regression-chat-full-pinned-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    old_calibration_path = server.MODEL_CONTEXT_CALIBRATION_PATH
+    calibration_path = root / "model-context-calibration.json"
+    try:
+        body = "\n".join(
+            [
+                "using System;",
+                "public class Form1",
+                "{",
+                *[f"    private int filler{i};" for i in range(1, 56)],
+                "    private void SpawnClearParticles(int row)",
+                "    {",
+                "        float speedX = 1.25f;",
+                "        float speedY = -2.5f;",
+                "    }",
+                "}",
+            ]
+        )
+        (root / "Form1.cs").write_text(body, encoding="utf-8")
+        calibration_path.write_text(
+            json.dumps(
+                {
+                    "qwen36a3b": {"contextWindow": 65536, "maxInputChars": 120000, "structuredEditChars": 100000, "measuredAt": "2026-05-24T00:00:00+08:00"},
+                    "gemma4": {"contextWindow": 65536, "maxInputChars": 120000, "structuredEditChars": 100000, "measuredAt": "2026-05-24T00:00:00+08:00"},
+                    "qwen35": {"contextWindow": 65536, "maxInputChars": 120000, "structuredEditChars": 100000, "measuredAt": "2026-05-24T00:00:00+08:00"},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        server.MODEL_CONTEXT_CALIBRATION_PATH = calibration_path
+        for model_key in ("qwen36a3b", "gemma4", "qwen35"):
+            state = server.SessionState(
+                project_path=str(root),
+                model_key=model_key,
+                model_alias=f"{model_key}-local",
+                files=[server.ProjectFile(path="Form1.cs", size=len(body), language="C#")],
+                pinned_files=["Form1.cs"],
+                ui_state="ready",
+            )
+            context, coverage = server.build_project_context(root, state, "請精確列出 SpawnClearParticles 的行號與內容")
+            assert_true("檔案: Form1.cs [完整內容]" in context, f"{model_key} pinned chat context should send full content")
+            assert_true("private void SpawnClearParticles" in context and "float speedX" in context and "float speedY" in context, f"{model_key} full chat context should include the complete method")
+            assert_true("   59:     private void SpawnClearParticles(int row)" in context, f"{model_key} full chat context should include 1-based line numbers")
+            assert_true(coverage["fullCount"] == 1 and coverage["files"][0]["truncated"] is False, f"{model_key} coverage should mark the pinned file as full")
+    finally:
+        server.MODEL_CONTEXT_CALIBRATION_PATH = old_calibration_path
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_chat_context_falls_back_to_excerpt_for_all_models_when_full_file_exceeds_budget():
+    root = ROOT / ".tmp" / f"regression-chat-excerpt-pinned-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    old_calibration_path = server.MODEL_CONTEXT_CALIBRATION_PATH
+    calibration_path = root / "model-context-calibration.json"
+    try:
+        body = "\n".join(
+            [
+                "using System;",
+                "public class Form1",
+                "{",
+                *[f"    private string filler{i} = \"{i:04d}-" + ("x" * 90) + "\";" for i in range(1, 180)],
+                "    private void SpawnClearParticles(int row)",
+                "    {",
+                "        float speedX = 1.25f;",
+                "        float speedY = -2.5f;",
+                "    }",
+                "}",
+            ]
+        )
+        (root / "Form1.cs").write_text(body, encoding="utf-8")
+        calibration_path.write_text(
+            json.dumps(
+                {
+                    "qwen36a3b": {"contextWindow": 4096, "maxInputChars": 4000, "structuredEditChars": 3500, "measuredAt": "2026-05-24T00:00:00+08:00"},
+                    "gemma4": {"contextWindow": 4096, "maxInputChars": 4000, "structuredEditChars": 3500, "measuredAt": "2026-05-24T00:00:00+08:00"},
+                    "qwen35": {"contextWindow": 4096, "maxInputChars": 4000, "structuredEditChars": 3500, "measuredAt": "2026-05-24T00:00:00+08:00"},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        server.MODEL_CONTEXT_CALIBRATION_PATH = calibration_path
+        for model_key in ("qwen36a3b", "gemma4", "qwen35"):
+            state = server.SessionState(
+                project_path=str(root),
+                model_key=model_key,
+                model_alias=f"{model_key}-local",
+                files=[server.ProjectFile(path="Form1.cs", size=len(body), language="C#")],
+                pinned_files=["Form1.cs"],
+                ui_state="ready",
+            )
+            context, coverage = server.build_project_context(root, state, "請精確列出 SpawnClearParticles 的內容")
+            assert_true("檔案: Form1.cs [節錄模式]" in context, f"{model_key} should fall back to excerpt mode when full file is over budget")
+            assert_true("檔案: Form1.cs [完整內容]" not in context, f"{model_key} should not label oversized context as full")
+            assert_true("private void SpawnClearParticles" in context and "float speedX" in context, f"{model_key} excerpt should still include the relevant member")
+            assert_true(coverage["fullCount"] == 0 and coverage["excerptCount"] == 1, f"{model_key} coverage should record excerpt mode")
+            assert_true(coverage["files"][0]["truncated"] is True, f"{model_key} coverage should mark oversized file as truncated")
+    finally:
+        server.MODEL_CONTEXT_CALIBRATION_PATH = old_calibration_path
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_edit_context_includes_all_pinned_files_when_total_budget_allows():
+    root = ROOT / ".tmp" / f"regression-edit-multi-pinned-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    first = root / "Form1.cs"
+    second = root / "AudioManager.cs"
+    first.write_text("public class Form1 { private void RenderBoard() { DrawBoard(); } }\n", encoding="utf-8")
+    second.write_text("public class AudioManager { public void PlayLineClear() { } }\n", encoding="utf-8")
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="gemma4",
+            model_alias="gemma4",
+            files=[
+                server.ProjectFile(path="Form1.cs", size=first.stat().st_size, language="C#"),
+                server.ProjectFile(path="AudioManager.cs", size=second.stat().st_size, language="C#"),
+            ],
+            tree=["Form1.cs", "AudioManager.cs"],
+            pinned_files=["AudioManager.cs", "Form1.cs"],
+            ui_state="ready",
+        )
+        context, allowed = server.build_edit_context(root, state, "請調整清行音效與畫面提示")
+        assert_true(set(allowed) == {"AudioManager.cs", "Form1.cs"}, "all pinned files should remain candidates")
+        assert_true("檔案: AudioManager.cs" in context and "檔案: Form1.cs" in context, "all pinned files should be sent")
+        coverage = server.get_last_edit_context_coverage()
+        assert_true(len(coverage["files"]) == 2, "coverage should list both pinned files")
+        assert_true(all(item["mode"] == "full" for item in coverage["files"]), "small pinned files should use full mode")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_edit_candidate_resolution_uses_rag_and_codegraph_without_pins():
+    root = ROOT / ".tmp" / f"regression-edit-rag-codegraph-{uuid.uuid4().hex}"
+    data_dir = ROOT / ".tmp" / f"regression-edit-rag-codegraph-index-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "README.md").write_text("# Notes\n\nrendering notes\n", encoding="utf-8")
+    source = root / "Form1.cs"
+    source.write_text(
+        "public class Form1 {\n"
+        "    private void RenderParticles()\n"
+        "    {\n"
+        "        particleVelocity += gravity;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    old_data_dir = server.DATA_DIR
+    server.DATA_DIR = data_dir
+    try:
+        rebuild_index(root, data_dir)
+        files = server.collect_project_files(root)
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="gemma4",
+            model_alias="gemma4",
+            files=files,
+            tree=[file.path for file in files],
+            ui_state="ready",
+        )
+        context, allowed = server.build_edit_context(root, state, "調整 RenderParticles 的 gravity 影響")
+        assert_true(allowed and allowed[0] == "Form1.cs", "RAG/CodeGraph should prefer the source file without pins")
+        assert_true("RenderParticles" in context and "particleVelocity" in context, "edit context should include the matched member")
+    finally:
+        server.DATA_DIR = old_data_dir
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def test_project_rag_rebuilds_graphless_existing_index():
     root = ROOT / ".tmp" / "regression-graphless-index"
     data_dir = ROOT / ".tmp" / "regression-graphless-data"
@@ -1229,12 +1817,93 @@ def test_advisory_edit_plan_keeps_local_context_when_model_patch_is_unsafe():
             failure_reason="patch JSON invalid",
         )
         suggestion = plan["suggestions"][0]
+        assert_true(suggestion["verified"] is False, "unsafe advisory suggestions should be marked unverified")
+        assert_true(suggestion["source"] == "model-unverified", "unsafe advisory suggestions should expose their source")
         assert_true("private void ClearLines" in suggestion["before"], "advisory fallback should show the real local source region")
         assert_true("CreateExplosionEffect" in suggestion["after"], "unsafe advisory output should remain visible for manual review")
         assert_true("未建立可直接套用" in "；".join(suggestion["notes"]), "unsafe advisory output should clearly say it is not directly applicable")
     finally:
         server.call_local_model = original_call_local_model
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_precise_validation_failure_logs_raw_reply_and_returns_unverified_advisory():
+    root = ROOT / ".tmp" / f"regression-edit-raw-log-{uuid.uuid4().hex}"
+    log_dir = ROOT / ".tmp" / f"regression-edit-raw-log-output-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    source = root / "Program.cs"
+    source.write_text(
+        "public static class Program\n"
+        "{\n"
+        "    public static string Greeting() => \"Hello\";\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_call_local_model = server.call_local_model
+    original_logs_dir = server.LOGS_DIR
+    try:
+        server.LOGS_DIR = log_dir
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen35",
+            model_alias="qwen35",
+            files=[server.ProjectFile(path="Program.cs", size=source.stat().st_size, language="C#")],
+            tree=["Program.cs"],
+            pinned_files=["Program.cs"],
+            ui_state="ready",
+        )
+        calls = {"count": 0}
+
+        def fake_call_local_model(*_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return json.dumps({
+                    "summary": "更新 Greeting",
+                    "needMoreContext": [],
+                    "edits": [
+                        {
+                            "path": "Program.cs",
+                            "target": "Greeting",
+                            "reason": "測試 unsafe search",
+                            "notes": [],
+                            "operations": [
+                                {"search": "return \"Missing\";", "replace": "return \"Hi\";"}
+                            ],
+                        }
+                    ],
+                }, ensure_ascii=False)
+            return json.dumps({
+                "summary": "精準模式失敗後的文字建議",
+                "needMoreContext": [],
+                "suggestions": [
+                    {
+                        "path": "Program.cs",
+                        "target": "Greeting",
+                        "whyHere": "Greeting 產生文字",
+                        "before": "return \"Missing\";",
+                        "after": "return \"Hi\";",
+                        "notes": [],
+                    }
+                ],
+            }, ensure_ascii=False)
+
+        server.call_local_model = fake_call_local_model
+        plan = server.create_edit_plan(root, state, "把 Greeting 回傳文字改成 Hi")
+        suggestion = plan["suggestions"][0]
+        logs = list(log_dir.glob("edit-plan-raw-qwen35-*.log"))
+        assert_true(logs, "precise validation failure should write the raw model reply")
+        assert_true("return \\\"Missing\\\";" in logs[0].read_text(encoding="utf-8"), "raw log should contain the invalid search snippet")
+        assert_true(plan["mode"] == "advisory", "unsafe precise patch should return advisory mode")
+        assert_true(suggestion["verified"] is False, "advisory suggestion after validation failure should be unverified")
+        assert_true("return \"Missing\";" in suggestion["missingSearchSnippet"], "suggestion should expose the missing search snippet")
+    finally:
+        server.call_local_model = original_call_local_model
+        server.LOGS_DIR = original_logs_dir
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
 
 
 def test_model_precise_patch_creates_applyable_action_without_hardcoded_rule():
@@ -1618,13 +2287,120 @@ def test_edit_plan_timeout_is_scaled_for_local_coding_models():
         "Qwen2.5-Coder 14B edit planning should allow slow local generation to finish",
     )
     assert_true(
+        server.get_edit_plan_timeout_seconds("qwen36a3b") >= 900,
+        "Qwen3.6-35B-A3B edit planning should not use the short generic timeout",
+    )
+    assert_true(
         server.get_edit_plan_timeout_seconds("qwen3coder30b") >= 600,
         "larger coding models should get a longer edit planning timeout",
+    )
+    assert_true(
+        server.get_edit_plan_timeout_seconds("qwen36a3b", context_chars=100_000, max_tokens=1200)
+        > server.get_edit_plan_timeout_seconds("qwen36a3b"),
+        "large edit contexts should extend the edit planning timeout",
     )
     assert_true(
         server.get_edit_plan_timeout_seconds("unknown-model") == server.EDIT_PLAN_TIMEOUT_SECONDS,
         "unknown models should keep the default edit planning timeout",
     )
+
+
+def test_edit_plan_model_call_uses_streaming_and_scaled_timeout():
+    root = ROOT / ".tmp" / f"regression-edit-streaming-timeout-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Program.cs"
+    source.write_text(
+        "namespace Demo;\n\n"
+        "public static class Program\n"
+        "{\n"
+        "    public static string Greeting()\n"
+        "    {\n"
+        "        return \"Hello\";\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    original_call_local_model = server.call_local_model
+    calls = []
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen36a3b",
+            model_alias="qwen36a3b",
+            files=[server.ProjectFile(path="Program.cs", size=source.stat().st_size, language="C#")],
+            pinned_files=["Program.cs"],
+            tree=["Program.cs"],
+            ui_state="ready",
+        )
+
+        def fake_call_local_model(*_args, **kwargs):
+            calls.append(kwargs)
+            return json.dumps({
+                "summary": "更新 Greeting 回傳文字",
+                "needMoreContext": [],
+                "edits": [
+                    {
+                        "path": "Program.cs",
+                        "target": "Greeting",
+                        "reason": "依需求調整顯示文字",
+                        "notes": [],
+                        "operations": [
+                            {
+                                "search": "        return \"Hello\";",
+                                "replace": "        return \"Hi\";",
+                            }
+                        ],
+                    }
+                ],
+            }, ensure_ascii=False)
+
+        server.call_local_model = fake_call_local_model
+        plan = server.create_edit_plan(root, state, "把 Greeting 回傳文字改成 Hi")
+        assert_true(plan["mode"] == "precise", "streaming model call should still produce a precise plan")
+        assert_true(calls and calls[0].get("stream") is True, "edit plan model calls should stream so partial replies can be observed")
+        assert_true(
+            calls[0].get("timeout_seconds", 0) >= server.get_edit_plan_timeout_seconds("qwen36a3b"),
+            "edit plan model calls should use the qwen36a3b scaled timeout",
+        )
+    finally:
+        server.call_local_model = original_call_local_model
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_streaming_edit_plan_timeout_logs_partial_reply():
+    original_stream = server.stream_local_model_events
+    original_logs_dir = server.LOGS_DIR
+    log_dir = ROOT / ".tmp" / f"regression-stream-timeout-log-{uuid.uuid4().hex}"
+    shutil.rmtree(log_dir, ignore_errors=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.LOGS_DIR = log_dir
+
+        def fake_stream(*_args, **_kwargs):
+            yield {"type": "content", "text": '{"summary": "partial"'}
+            raise RuntimeError("本地模型回應已等到目前上限仍未完成。timeout=900s。")
+
+        server.stream_local_model_events = fake_stream
+        try:
+            server.call_local_model(
+                "qwen36a3b",
+                [{"role": "user", "content": "edit"}],
+                timeout_seconds=900,
+                max_tokens=900,
+                stream=True,
+            )
+            raise AssertionError("streaming timeout with partial content should raise")
+        except RuntimeError as exc:
+            details = str(exc)
+            assert_true("已收到部分模型回應" in details, "timeout reason should say partial content was captured")
+            assert_true("edit-plan-partial" in details, "timeout reason should include the partial reply log path")
+            logs = list(log_dir.glob("edit-plan-partial-qwen36a3b-*.log"))
+            assert_true(logs and '{"summary": "partial"' in logs[0].read_text(encoding="utf-8"), "partial reply should be written to a log")
+    finally:
+        server.stream_local_model_events = original_stream
+        server.LOGS_DIR = original_logs_dir
+        shutil.rmtree(log_dir, ignore_errors=True)
 
 
 def test_local_direct_edit_changes_down_key_to_soft_drop_and_ctrl_to_hard_drop():
@@ -2346,8 +3122,10 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true("WEBUI_EXPECTED_VERSION" in launch and "/api/status" in launch and "?v=" in launch, "launch-webui should verify version and open a cache-busted URL")
     assert_true('id="sidebarStatusDetails"' in html, "secondary model and hardware details should be grouped in a disclosure")
     assert_true('id="fileTreeCount"' in html, "file tree should expose a result count")
+    assert_true("fileMetaByPath" in js and "formatBytes(size)" in js, "file tree and pinned summary should show pinned file sizes")
     assert_true('id="aiActivity"' in html and 'id="chatBusyBar"' in html, "chat UI should include a visible busy indicator")
     assert_true('id="editPlanBtn"' in html and 'id="gitDiffBtn"' in html and 'id="gitCheckpointBtn"' in html, "chat UI should expose edit plan and Git safety actions")
+    assert_true('id="contextCalibrateBtn"' in html and "測試此模型可送出 KB" in html, "chat UI should expose context capacity calibration")
     assert_true('id="projectControlDetails"' in html and 'class="project-control-summary"' in html, "project controls should be collapsible")
     assert_true('class="composer-meta-row"' in html, "composer should keep attachments in a compact metadata row")
     assert_true(html.find('id="chatInput"') < html.find('id="codeGraphToolbar"') < html.find('class="chat-footer-row"'), "CodeGraph toolbar should sit below the input and above primary actions")
@@ -2367,7 +3145,12 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true("setAiBusy(true" in js and "setAiBusy(false" in js, "chat/analyze flows should toggle the AI busy indicator")
     assert_true("AI 正在產生修改建議" in js and "finally" in js, "edit plan generation should show and clear the AI busy indicator")
     assert_true("function renderEditDetailHtml" in js and "建議替換前片段" in js and "建議替換後片段" in js, "edit plan UI should show location and before/after snippets")
+    assert_true("未驗證參考片段" in js and "model-unverified" in js, "advisory edit UI should mark unverified model suggestions")
+    assert_true("data.plan?.contextCoverage" in js and "修改計畫上下文" in js, "edit plan UI should show context coverage and full/region/window details")
+    assert_true("body: JSON.stringify({ message, modelKey })" in js, "edit plan UI should send the currently selected model key")
+    assert_true("/api/models/context-calibration" in js and "structuredEditChars" in js, "UI should expose measured structured edit budget")
     assert_true("function applyEditPlan" in js and "/api/edit/apply" in js, "UI should apply confirmed edit plans")
+    assert_true("plan?.mode !== \"advisory\"" in js, "UI should only expose apply controls for non-advisory pending actions")
     assert_true("/api/git/diff" in js and "/api/git/restore" in js, "UI should expose Git diff and restore workflows")
     assert_true("rawDownload && downloadPercent !== null" in js, "download progress should display the current file percentage from task payloads")
     assert_true("downloadedSize" in js and "totalSize" in js, "download progress should show downloaded and total file size")
@@ -2413,11 +3196,19 @@ def main():
     tests = [
         test_no_context_chat_payload,
         test_request_max_tokens_clamps_to_default,
-        test_default_model_is_gemma4,
+        test_qwen_request_options_disable_thinking,
+        test_default_model_uses_last_used_preference,
+        test_chat_exchange_persists_last_used_model_preference,
+        test_edit_plan_flow_uses_requested_model_key,
         test_gemma_context_window_matches_local_bench,
+        test_context_calibration_overrides_input_budget_and_model_payload,
+        test_context_calibration_runner_targets_selected_model_and_context,
+        test_context_benchmark_reuses_existing_compatible_model_server,
+        test_start_server_uses_low_memory_model_env_for_qwen36_on_low_vram,
         test_gemma_manifest_uses_unsloth_with_mmproj,
         test_new_model_catalog_exposes_hardware_metadata,
         test_hardware_profile_classification_and_recommendations,
+        test_qwen36a3b_catalog_targets_8gb_nvidia_moe_offload,
         test_llama_launcher_accepts_auto_hardware_args,
         test_launch_webui_restarts_stale_codeworker_server,
         test_bootstrap_stops_codeworker_runtime_users_before_winpython_update,
@@ -2434,6 +3225,11 @@ def main():
         test_rag_model_loading_locator_prefers_source_chunks,
         test_rag_chinese_game_speed_query_finds_code,
         test_project_rag_context_without_pins,
+        test_chat_context_sends_full_line_numbered_pinned_file_for_all_models_when_budget_allows,
+        test_chat_context_falls_back_to_excerpt_for_all_models_when_full_file_exceeds_budget,
+        test_edit_context_sends_full_pinned_file_when_budget_allows_existing_effect_changes,
+        test_edit_context_includes_all_pinned_files_when_total_budget_allows,
+        test_edit_candidate_resolution_uses_rag_and_codegraph_without_pins,
         test_project_rag_rebuilds_graphless_existing_index,
         test_generated_text_file_requires_confirmation,
         test_edit_actions_apply_with_git_checkpoint_and_restore,
@@ -2441,6 +3237,7 @@ def main():
         test_edit_action_supports_create_replace_delete_rename_and_command,
         test_edit_apply_returns_validation_command_suggestions,
         test_advisory_edit_plan_keeps_local_context_when_model_patch_is_unsafe,
+        test_precise_validation_failure_logs_raw_reply_and_returns_unverified_advisory,
         test_model_precise_patch_creates_applyable_action_without_hardcoded_rule,
         test_malformed_model_patch_is_salvaged_when_search_replace_are_unique,
         test_fallback_advisory_uses_pending_target_to_locate_real_method,
@@ -2448,6 +3245,8 @@ def main():
         test_edit_plan_timeout_short_circuits_to_local_fallback,
         test_timeout_fallback_can_create_applyable_tetris_clear_effect_patch,
         test_edit_plan_timeout_is_scaled_for_local_coding_models,
+        test_edit_plan_model_call_uses_streaming_and_scaled_timeout,
+        test_streaming_edit_plan_timeout_logs_partial_reply,
         test_local_direct_edit_changes_down_key_to_soft_drop_and_ctrl_to_hard_drop,
         test_generation_prompt_infers_multiple_documents_from_previous_answer,
         test_generation_prompt_infers_excel,

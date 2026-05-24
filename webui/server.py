@@ -80,7 +80,7 @@ ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
 DEFAULT_MODEL_KEY = "gemma4"
 DEFAULT_MODEL_ALIAS = "gemma4-local"
-DEFAULT_APP_VERSION = "V1.01.003"
+DEFAULT_APP_VERSION = "V1.02.000"
 
 
 def read_app_version() -> str:
@@ -198,7 +198,10 @@ try:
 except Exception:
     SUPPORTED_MODEL_KEYS = set(MODEL_PORTS.keys())
 UPLOAD_DIR = ROOT_DIR / ".tmp" / "chat-uploads"
+LOGS_DIR = ROOT_DIR / "logs"
 MODEL_CONTEXT_SELECTIONS_PATH = DATA_DIR / "model-contexts.json"
+MODEL_CONTEXT_CALIBRATION_PATH = DATA_DIR / "model-context-calibration.json"
+MODEL_PREFERENCES_PATH = DATA_DIR / "model-preferences.json"
 THREADS_DIR = DATA_DIR / "chat-threads"
 GENERATED_FILES_DIR = ROOT_DIR / ".tmp" / "generated-files"
 IMAGE_UPLOAD_DIR = UPLOAD_DIR
@@ -283,6 +286,7 @@ EDIT_PLAN_MODEL_TIMEOUT_SECONDS = {
     "deepseekcoderlite": 300,
     "qwen25coder14b": 420,
     "qwen35": 420,
+    "qwen36a3b": 900,
     "gemma4": 240,
     "qwen3coder30b": 600,
     "glm46": 600,
@@ -298,9 +302,14 @@ class EditApplyError(RuntimeError):
         self.result = result
 
 
-def get_edit_plan_timeout_seconds(model_key: str) -> int:
+def get_edit_plan_timeout_seconds(model_key: str, context_chars: int = 0, max_tokens: int = 0) -> int:
     key = str(model_key or "").strip().lower()
-    return max(EDIT_PLAN_TIMEOUT_SECONDS, EDIT_PLAN_MODEL_TIMEOUT_SECONDS.get(key, EDIT_PLAN_TIMEOUT_SECONDS))
+    base_timeout = max(EDIT_PLAN_TIMEOUT_SECONDS, EDIT_PLAN_MODEL_TIMEOUT_SECONDS.get(key, EDIT_PLAN_TIMEOUT_SECONDS))
+    if key not in EDIT_PLAN_MODEL_TIMEOUT_SECONDS:
+        return base_timeout
+    context_bonus = min(420, max(0, int(context_chars or 0) - 20_000) // 180)
+    token_bonus = min(180, max(0, int(max_tokens or 0) - 900) // 2)
+    return min(1500, base_timeout + context_bonus + token_bonus)
 GEMMA4_LOCATOR_MAX_TOKENS = 320
 GEMMA4_PATCH_MAX_TOKENS = 700
 GEMMA4_PRECISE_MAX_TOKENS = 720
@@ -363,6 +372,7 @@ class TaskState:
 STATE = SessionState()
 TASKS: Dict[str, TaskState] = {}
 AGENT_RUNS: Dict[str, Dict[str, object]] = {}
+LAST_EDIT_CONTEXT_COVERAGE: Dict[str, object] = {}
 STATE_LOCK = threading.Lock()
 TASK_LOCK = threading.Lock()
 MODEL_CONTEXT_SELECTIONS_LOCK = threading.Lock()
@@ -428,6 +438,58 @@ def get_model_alias(model_key: str) -> str:
     return MODEL_ALIASES.get(model_key, MODEL_ALIASES[DEFAULT_MODEL_KEY])
 
 
+def normalize_supported_model_key(model_key: object, fallback: str = DEFAULT_MODEL_KEY) -> str:
+    resolved = get_model_key_from_alias(str(model_key or "").strip().lower())
+    return resolved if resolved in SUPPORTED_MODEL_KEYS else fallback
+
+
+def load_model_preferences() -> Dict[str, object]:
+    try:
+        if not MODEL_PREFERENCES_PATH.exists():
+            return {}
+        raw = json.loads(MODEL_PREFERENCES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def get_last_used_model_key() -> str:
+    return normalize_supported_model_key(load_model_preferences().get("lastUsedModelKey"), DEFAULT_MODEL_KEY)
+
+
+def get_default_model_key() -> str:
+    return get_last_used_model_key()
+
+
+def get_default_model_alias() -> str:
+    return get_model_alias(get_default_model_key())
+
+
+def save_last_used_model_key(model_key: str) -> str:
+    resolved = normalize_supported_model_key(model_key, "")
+    if not resolved:
+        raise ValueError("Unsupported model.")
+    preferences = load_model_preferences()
+    preferences["lastUsedModelKey"] = resolved
+    preferences["updatedAt"] = current_timestamp()
+    MODEL_PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_PREFERENCES_PATH.write_text(json.dumps(preferences, ensure_ascii=False, indent=2), encoding="utf-8")
+    return resolved
+
+
+def remember_last_used_model_key(model_key: str) -> str:
+    resolved = normalize_supported_model_key(model_key)
+    try:
+        save_last_used_model_key(resolved)
+    except Exception as exc:
+        log_event(
+            "model_preference_save_failed",
+            f"Failed to persist last-used model preference: {exc}",
+            extra={"modelKey": resolved},
+        )
+    return resolved
+
+
 def get_model_directory(model_key: str) -> Path:
     config = get_registry_model_config(ROOT_DIR, model_key)
     if config and config.target_dir:
@@ -479,10 +541,14 @@ def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
     if manifest_payload:
         for key, item in manifest_payload.items():
             selected = get_selected_model_context(key)
+            calibration = get_model_context_calibration(key)
             item["contextOptions"] = make_context_options_payload(get_model_context_option_values(key))
             item["selectedContextWindow"] = selected
             item["effectiveContextWindow"] = selected
             item["contextWindow"] = selected
+            item["calibrated"] = bool(calibration)
+            item["structuredEditChars"] = int(calibration.get("structuredEditChars", 0) or 0) if calibration else 0
+            item["measuredAt"] = str(calibration.get("measuredAt", "") or "") if calibration else ""
         return manifest_payload
     return {
         key: {
@@ -498,6 +564,9 @@ def get_public_model_capabilities() -> Dict[str, Dict[str, object]]:
             "selectedContextWindow": get_selected_model_context(key),
             "effectiveContextWindow": get_model_context_limit(key),
             "targetDir": str(get_model_directory(key).relative_to(ROOT_DIR)),
+            "calibrated": bool(get_model_context_calibration(key)),
+            "structuredEditChars": int(get_model_context_calibration(key).get("structuredEditChars", 0) or 0),
+            "measuredAt": str(get_model_context_calibration(key).get("measuredAt", "") or ""),
         }
         for key in sorted(SUPPORTED_MODEL_KEYS)
     }
@@ -554,6 +623,147 @@ def load_model_context_selections() -> Dict[str, int]:
 def save_model_context_selections(selections: Dict[str, int]) -> None:
     MODEL_CONTEXT_SELECTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     MODEL_CONTEXT_SELECTIONS_PATH.write_text(json.dumps(selections, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_model_context_calibration() -> Dict[str, Dict[str, object]]:
+    try:
+        if not MODEL_CONTEXT_CALIBRATION_PATH.exists():
+            return {}
+        raw = json.loads(MODEL_CONTEXT_CALIBRATION_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    calibration: Dict[str, Dict[str, object]] = {}
+    for key, value in raw.items():
+        model_key = get_model_key_from_alias(str(key))
+        if model_key not in SUPPORTED_MODEL_KEYS or not isinstance(value, dict):
+            continue
+        item: Dict[str, object] = {}
+        for numeric_key in ("contextWindow", "maxInputChars", "structuredEditChars"):
+            try:
+                numeric = int(value.get(numeric_key, 0) or 0)
+            except (TypeError, ValueError):
+                numeric = 0
+            if numeric > 0:
+                item[numeric_key] = numeric
+        measured_at = str(value.get("measuredAt", "") or "").strip()
+        if measured_at:
+            item["measuredAt"] = measured_at
+        if item:
+            calibration[model_key] = item
+    return calibration
+
+
+def get_model_context_calibration(model_key: str) -> Dict[str, object]:
+    model_key = get_model_key_from_alias(model_key)
+    return dict(load_model_context_calibration().get(model_key, {}))
+
+
+def normalize_calibration_contexts(model_key: str, requested_contexts: object = None) -> List[int]:
+    allowed = set(get_model_context_option_values(model_key)) | {4096, 8192, 16384, 32768}
+    if isinstance(requested_contexts, list) and requested_contexts:
+        contexts = []
+        for item in requested_contexts:
+            try:
+                value = int(item)
+            except (TypeError, ValueError):
+                continue
+            if value in allowed and value not in contexts:
+                contexts.append(value)
+        if contexts:
+            requested_max = max(contexts)
+            model_max = max(allowed)
+            selected = max(requested_max, model_max)
+            return sorted([value for value in allowed if value <= selected], reverse=True)
+    selected = max(allowed)
+    return sorted([value for value in allowed if value <= selected], reverse=True) or [selected]
+
+
+def load_latest_context_bench() -> List[Dict[str, object]]:
+    bench_path = LOGS_DIR / "model-context-bench.json"
+    try:
+        raw = json.loads(bench_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return raw if isinstance(raw, list) else []
+
+
+def model_bench_successes(model_key: str) -> List[Dict[str, object]]:
+    successes: List[Dict[str, object]] = []
+    for item in load_latest_context_bench():
+        if str(item.get("model", "")) != model_key:
+            continue
+        tests = item.get("tests") if isinstance(item.get("tests"), dict) else {}
+        if item.get("startup_ok") and tests and all(isinstance(test, dict) and test.get("ok") for test in tests.values()):
+            successes.append(item)
+    return successes
+
+
+def summarize_model_bench_failures(model_key: str) -> str:
+    snippets: List[str] = []
+    for item in load_latest_context_bench():
+        if str(item.get("model", "")) != model_key:
+            continue
+        context = item.get("context", "?")
+        if not item.get("startup_ok"):
+            output = str(item.get("startup_output", "") or "").strip()
+            snippets.append(f"context {context}: startup failed. {truncate_middle(output, 900)}")
+            continue
+        tests = item.get("tests") if isinstance(item.get("tests"), dict) else {}
+        failed = [
+            f"{name}: {str(test.get('error', 'failed'))}"
+            for name, test in tests.items()
+            if isinstance(test, dict) and not test.get("ok")
+        ]
+        if failed:
+            snippets.append(f"context {context}: " + "; ".join(failed[:3]))
+    summary_path = LOGS_DIR / "model-context-summary.md"
+    summary = ""
+    try:
+        summary = summary_path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        pass
+    detail = "\n".join(snippets[:3]).strip()
+    return detail or summary or "No successful context probe was recorded."
+
+
+def run_model_context_calibration(model_key: str, requested_contexts: object = None) -> Dict[str, object]:
+    raw_model_key = str(model_key or "").strip().lower()
+    resolved_model_key = get_model_key_from_alias(raw_model_key)
+    config = get_registry_model_config(ROOT_DIR, resolved_model_key)
+    accepted_names = {
+        resolved_model_key,
+        str(config.alias).lower() if config else "",
+        str(config.model_id).lower() if config else "",
+    }
+    if resolved_model_key not in SUPPORTED_MODEL_KEYS or not raw_model_key or raw_model_key not in accepted_names:
+        raise ValueError("Unsupported model.")
+    model_key = resolved_model_key
+    contexts = normalize_calibration_contexts(model_key, requested_contexts)
+    args = ["--models", model_key, "--contexts", *[str(item) for item in contexts], "--stop-after-first-success"]
+    completed = run_python_script_via_log("measure_context_limits.py", *args, timeout_seconds=3600)
+    if completed.returncode != 0:
+        output = (completed.stdout or completed.stderr or "").strip()
+        raise RuntimeError(output[-4000:] or f"measure_context_limits.py exited with {completed.returncode}")
+    successes = model_bench_successes(model_key)
+    if not successes:
+        raise RuntimeError(
+            "No context calibration succeeded for "
+            f"{model_key}. Tested contexts: {', '.join(str(item) for item in contexts)}. "
+            f"{summarize_model_bench_failures(model_key)}"
+        )
+    calibration = get_model_context_calibration(model_key)
+    if not calibration:
+        raise RuntimeError(f"Context calibration finished but no calibration data was written for {model_key}.")
+    return {
+        "modelKey": model_key,
+        "contexts": contexts,
+        "calibration": calibration,
+        "structuredEditChars": int(calibration.get("structuredEditChars", 0) or 0),
+        "maxInputChars": int(calibration.get("maxInputChars", 0) or 0),
+        "measuredAt": str(calibration.get("measuredAt", "") or ""),
+    }
 
 
 def get_selected_model_context(model_key: str) -> int:
@@ -642,6 +852,12 @@ def get_model_generation_options(model_key: str) -> Dict[str, object]:
     return options
 
 
+def get_model_request_options(model_key: str) -> Dict[str, object]:
+    if str(model_key or "").lower().startswith("qwen"):
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return {}
+
+
 def get_analyze_max_tokens(model_key: str) -> int:
     configured = MODEL_ANALYZE_MAX_TOKENS.get(model_key, MODEL_ANALYZE_MAX_TOKENS[DEFAULT_MODEL_KEY])
     context_limit = max(1024, get_model_context_limit(model_key))
@@ -657,7 +873,12 @@ def get_analyze_timeout_seconds(model_key: str) -> int:
     return MODEL_ANALYZE_TIMEOUT_SECONDS.get(model_key, MODEL_ANALYZE_TIMEOUT_SECONDS[DEFAULT_MODEL_KEY])
 
 
-def get_context_limits(model_key: str, single_file_focus: bool, prefer_compact: bool = False) -> Dict[str, int]:
+def get_context_limits(
+    model_key: str,
+    single_file_focus: bool,
+    prefer_compact: bool = False,
+    max_response_tokens: Optional[int] = None,
+) -> Dict[str, int]:
     limits = MODEL_CONTEXT_LIMITS.get(model_key, MODEL_CONTEXT_LIMITS[DEFAULT_MODEL_KEY]).copy()
     if single_file_focus:
         limits["file_chars"] = limits["single_file_chars"]
@@ -669,7 +890,25 @@ def get_context_limits(model_key: str, single_file_focus: bool, prefer_compact: 
         limits["full_max_files"] = 0
         limits["full_total_chars"] = 0
         limits["full_file_chars"] = 0
-    char_ceiling = estimate_input_char_budget(model_key, get_chat_max_tokens(model_key))
+    response_tokens = int(max_response_tokens) if max_response_tokens is not None else get_chat_max_tokens(model_key)
+    char_ceiling = estimate_input_char_budget(model_key, response_tokens)
+    calibration = get_model_context_calibration(model_key)
+    calibrated_chars = int(
+        (
+            calibration.get("structuredEditChars", 0)
+            if response_tokens <= 1200
+            else calibration.get("maxInputChars", 0)
+        )
+        or 0
+    )
+    if calibrated_chars > 0:
+        for key in ("total_chars", "full_total_chars", "single_total_chars"):
+            if key in limits:
+                limits[key] = max(int(limits.get(key, 0) or 0), calibrated_chars)
+        file_budget = max(3500, min(calibrated_chars, int(calibrated_chars * 0.9)))
+        for key in ("file_chars", "full_file_chars", "single_file_chars"):
+            if key in limits:
+                limits[key] = max(int(limits.get(key, 0) or 0), file_budget)
     for key in ("total_chars", "full_total_chars", "single_total_chars"):
         if key in limits and int(limits.get(key, 0) or 0) > 0:
             limits[key] = min(int(limits[key]), char_ceiling)
@@ -680,6 +919,11 @@ def get_context_limits(model_key: str, single_file_focus: bool, prefer_compact: 
 
 
 def estimate_input_char_budget(model_key: str, max_response_tokens: Optional[int] = None) -> int:
+    calibration = get_model_context_calibration(model_key)
+    calibrated_key = "structuredEditChars" if max_response_tokens and int(max_response_tokens) <= 1200 else "maxInputChars"
+    calibrated_chars = int(calibration.get(calibrated_key, 0) or calibration.get("maxInputChars", 0) or 0)
+    if calibrated_chars > 0:
+        return max(3500, calibrated_chars)
     context_limit = max(1024, get_model_context_limit(model_key))
     response_tokens = int(max_response_tokens or get_chat_max_tokens(model_key))
     response_tokens = max(256, min(response_tokens, max(512, context_limit // 3)))
@@ -859,10 +1103,11 @@ def get_task(task_id: str) -> Optional[TaskState]:
 
 
 def clear_session(ui_state: str = "idle") -> None:
+    default_model_key = get_default_model_key()
     with STATE_LOCK:
         STATE.project_path = None
-        STATE.model_key = DEFAULT_MODEL_KEY
-        STATE.model_alias = DEFAULT_MODEL_ALIAS
+        STATE.model_key = default_model_key
+        STATE.model_alias = get_model_alias(default_model_key)
         STATE.summary = ""
         STATE.tree = []
         STATE.files = []
@@ -911,6 +1156,62 @@ def run_script_via_log(script_name: str, *args: str, timeout_seconds: Optional[i
             temp_path = handle.name
             completed = subprocess.run(
                 ["cmd", "/c", str(SCRIPTS_DIR / script_name), *args],
+                cwd=str(ROOT_DIR),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=timeout_seconds,
+                env=env,
+            )
+        stdout = Path(temp_path).read_text(encoding="utf-8", errors="replace")
+        return subprocess.CompletedProcess(
+            args=completed.args,
+            returncode=completed.returncode,
+            stdout=stdout,
+            stderr="",
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = ""
+        if temp_path and Path(temp_path).exists():
+            output = Path(temp_path).read_text(encoding="utf-8", errors="replace")
+        raise subprocess.TimeoutExpired(exc.cmd, exc.timeout, output=output, stderr="") from exc
+    finally:
+        if temp_path and Path(temp_path).exists():
+            Path(temp_path).unlink()
+
+
+def get_bundled_python_executable() -> Path:
+    candidates = [
+        ROOT_DIR / "runtime" / "WinPython" / "python.exe",
+        ROOT_DIR / "runtime" / "WinPython" / "python" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return Path(sys.executable)
+
+
+def run_python_script_via_log(script_name: str, *args: str, timeout_seconds: Optional[int] = None) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    script_path = SCRIPTS_DIR / script_name
+    logs_dir = ROOT_DIR / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w+b",
+            suffix=".log",
+            prefix=f"{Path(script_name).stem}-",
+            dir=str(logs_dir),
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            completed = subprocess.run(
+                [str(get_bundled_python_executable()), str(script_path), *args],
                 cwd=str(ROOT_DIR),
                 stdout=handle,
                 stderr=subprocess.STDOUT,
@@ -1132,9 +1433,41 @@ def get_model_auto_settings(model_key: str, hardware_profile: Optional[Dict[str,
     return recommend_model_settings(hardware_profile, manifest)
 
 
-def get_model_llama_args(model_key: str) -> List[str]:
+def should_use_low_memory_llama_args(model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> bool:
+    try:
+        manifest = get_model_manifest(model_key)
+    except ValueError:
+        return False
+    if not manifest.get("lowMemoryLlamaArgs"):
+        return False
+    hardware_profile = hardware_profile or get_hardware_profile_payload()
+    max_vram = float(hardware_profile.get("maxVramGb") or 0)
+    total_ram = float(hardware_profile.get("totalRamGb") or 0)
+    recommended_ram = float(manifest.get("recommendedRamGb") or 0)
+    return 0 <= max_vram < 4 or (recommended_ram > 0 and total_ram < recommended_ram)
+
+
+def get_model_llama_args(model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> List[str]:
+    if should_use_low_memory_llama_args(model_key, hardware_profile):
+        raw = get_model_manifest(model_key).get("lowMemoryLlamaArgs")
+        return parse_llama_server_args(raw if isinstance(raw, list) else [])
     config = get_registry_model_config(ROOT_DIR, model_key)
     return parse_llama_server_args(config.llama_args if config else [])
+
+
+LLAMA_MANIFEST_BOOLEAN_ARGS = {"--flash-attn", "--jinja", "--mlock"}
+LLAMA_MANIFEST_VALUE_ARGS = {"--n-cpu-moe", "--batch-size", "--ubatch-size"}
+
+
+def append_llama_manifest_args(launch_args: List[str], model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> None:
+    for raw_arg in get_model_llama_args(model_key, hardware_profile):
+        if "=" in raw_arg:
+            name, value = raw_arg.split("=", 1)
+            if name in LLAMA_MANIFEST_VALUE_ARGS and value:
+                launch_args.extend([name, value])
+            continue
+        if raw_arg in LLAMA_MANIFEST_BOOLEAN_ARGS:
+            launch_args.append(raw_arg)
 
 
 def resolve_llama_server_for_backend(runtime_backend: str) -> Path:
@@ -2471,11 +2804,7 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
         "--log", str(log_path),
         "--err", str(err_path),
     ]
-    for raw_arg in get_model_llama_args(model_key):
-        if raw_arg == "--flash-attn":
-            launch_args.append("--flash-attn")
-        elif raw_arg == "--jinja":
-            launch_args.append("--jinja")
+    append_llama_manifest_args(launch_args, model_key, hardware_profile)
     if cache_type_k:
         launch_args.extend(["--cache-type-k", cache_type_k])
     if cache_type_v:
@@ -3828,6 +4157,14 @@ def fit_text_to_limit(text: str, max_chars: int) -> str:
     return truncate_middle(text, max_chars)
 
 
+def fit_text_to_limit_preserve(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return truncate_middle(text, max_chars)
+
+
 def char_index_to_line(content: str, index: int) -> int:
     if index <= 0:
         return 1
@@ -4736,6 +5073,7 @@ def append_chat_exchange_locked(
 ) -> None:
     STATE.model_key = model_key
     STATE.model_alias = get_model_alias(model_key)
+    remember_last_used_model_key(model_key)
     user_record: Dict[str, object] = {"role": "user", "content": message, "kind": "chat", "contextUsed": bool(context.strip())}
     if attachments:
         user_record["attachments"] = [build_history_attachment(item) for item in attachments]
@@ -5651,7 +5989,7 @@ def build_raw_messages(
         base_prompt = f"{base_prompt}\n\n{memory_note}".strip()
     if compressed_memory:
         base_prompt = f"{base_prompt}\n\nCOMPRESSED CONVERSATION MEMORY:\n{compressed_memory}".strip()
-    if model_key in {"gemma4", "qwen35"} and base_prompt:
+    if model_key in {"gemma4", "qwen35", "qwen36a3b"} and base_prompt:
         messages.append({"role": "system", "content": base_prompt})
     messages.extend(history_messages)
     messages.append({"role": "user", "content": user_content})
@@ -5664,10 +6002,18 @@ def build_pinned_file_block(relative_path: str, excerpt: str, max_chars: int, mo
     content_budget = max_chars - len(prefix) - len(suffix)
     if content_budget < 160:
         return "", ""
-    content = fit_text_to_limit(excerpt, content_budget)
-    if not content:
+    content = fit_text_to_limit_preserve(excerpt, content_budget)
+    if not content.strip():
         return "", ""
     return f"{prefix}{content}{suffix}", content
+
+
+def add_line_numbers(content: str) -> str:
+    lines = content.splitlines()
+    if not lines:
+        return "     1: "
+    width = max(5, len(str(len(lines))))
+    return "\n".join(f"{index:{width}d}: {line}" for index, line in enumerate(lines, start=1))
 
 
 def build_gemma_locator_messages(
@@ -5818,6 +6164,7 @@ def build_project_context(
         "PINNED FILE CONTENT",
         "以下是已套用釘選檔案的實際內容，不只是檔名。",
         "檔案預覽不會自動加入上下文；只有下列 PINNED FILE CONTENT 區塊會提供給模型。",
+        "若檔案標示為 [完整內容]，內容會附 1-based 行號；回答行號時必須引用這些行號，不要自行估算。",
         "若檔案標示為 [節錄模式]，代表模型只收到部分內容，不是完整原始碼。",
         "已套用釘選檔案:",
         *selected_paths,
@@ -5827,8 +6174,7 @@ def build_project_context(
     full_total_chars = limits.get("full_total_chars", 0)
     full_file_chars = limits.get("full_file_chars", 0)
     if (
-        state.model_key == "qwen35"
-        and selected_paths
+        selected_paths
         and len(selected_paths) <= full_max_files
         and full_total_chars > 0
         and full_file_chars > 0
@@ -5844,13 +6190,14 @@ def build_project_context(
                 can_use_full_mode = False
                 break
             normalized_content = content.strip()
-            if len(normalized_content) > full_file_chars:
+            line_numbered_content = add_line_numbers(normalized_content)
+            if len(line_numbered_content) > full_file_chars:
                 can_use_full_mode = False
                 break
             separator_chars = 2 if full_chunks else 0
             remaining_chars = full_total_chars - full_chars - separator_chars
-            block, sent_content = build_pinned_file_block(relative_path, content, remaining_chars, mode_label="完整內容")
-            if not block or sent_content != normalized_content:
+            block, sent_content = build_pinned_file_block(relative_path, line_numbered_content, remaining_chars, mode_label="完整內容")
+            if not block or sent_content != line_numbered_content:
                 can_use_full_mode = False
                 break
             full_chunks.append(block)
@@ -5862,6 +6209,7 @@ def build_project_context(
                     "truncated": False,
                     "charsSent": len(sent_content),
                     "charsTotal": len(normalized_content),
+                    "lineNumbered": True,
                 }
             )
         if can_use_full_mode and len(full_files) == len(selected_paths):
@@ -6126,58 +6474,205 @@ def infer_edit_candidate_paths(project_root: Path, state: SessionState, message:
     return candidates[:MAX_EDIT_FILES]
 
 
-def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
-    candidate_paths = require_pinned_context(state) if state.pinned_files else infer_edit_candidate_paths(project_root, state, message)
-    selected_paths = rank_paths_for_message(project_root, candidate_paths, message)[:MAX_EDIT_FILES]
+def set_last_edit_context_coverage(coverage: Dict[str, object]) -> None:
+    LAST_EDIT_CONTEXT_COVERAGE.clear()
+    LAST_EDIT_CONTEXT_COVERAGE.update(coverage)
+
+
+def get_last_edit_context_coverage() -> Dict[str, object]:
+    return dict(LAST_EDIT_CONTEXT_COVERAGE)
+
+
+def build_edit_context_coverage(
+    model_key: str,
+    selected_paths: List[str],
+    files: List[Dict[str, object]],
+    char_limit: int,
+    used_chars: int,
+) -> Dict[str, object]:
+    sent = {str(item.get("path", "")) for item in files}
+    return {
+        "mode": "edit-plan",
+        "modelKey": model_key,
+        "selectedFiles": len(selected_paths),
+        "filesSent": len(files),
+        "fullCount": sum(1 for item in files if item.get("mode") == "full"),
+        "regionCount": sum(1 for item in files if item.get("mode") == "region"),
+        "windowCount": sum(1 for item in files if item.get("mode") == "window"),
+        "truncated": any(bool(item.get("truncated")) for item in files) or len(files) < len(selected_paths),
+        "omittedFiles": [path for path in selected_paths if path not in sent],
+        "charLimit": char_limit,
+        "usedChars": used_chars,
+        "contextWindow": get_model_context_limit(model_key),
+        "files": files,
+    }
+
+
+def build_member_region_excerpt(content: str, relative_path: str, message: str, max_chars: int, max_sections: int) -> Tuple[str, str, bool]:
+    sections = select_relevant_sections(content, relative_path, message, max_sections=max_sections)
+    if sections:
+        blocks: List[str] = []
+        total_chars = 0
+        for section in sections:
+            header = f"區段: {section['name']} (約第 {section['start_line']}-{section['end_line']} 行)"
+            block = f"{header}\n{section['text']}"
+            if total_chars + len(block) > max_chars:
+                if not blocks:
+                    blocks.append(truncate_middle(block, max_chars))
+                break
+            blocks.append(block)
+            total_chars += len(block)
+        return "\n\n".join(blocks), "region", len("\n\n".join(blocks)) < len(content.strip())
+
+    if Path(relative_path).suffix.lower() == ".cs":
+        regions = detect_csharp_regions(content)
+        member_index = build_member_index_chunk(content, relative_path, max_items=120)
+        chunks: List[str] = [member_index] if member_index else []
+        total_chars = sum(len(chunk) for chunk in chunks)
+        for region in regions:
+            block = f"區段: {region['name']} (約第 {region['start_line']}-{region['end_line']} 行)\n{region['text']}"
+            separator = 2 if chunks else 0
+            if total_chars + separator + len(block) > max_chars:
+                break
+            chunks.append(block)
+            total_chars += separator + len(block)
+        if chunks:
+            return "\n\n".join(chunks), "region", True
+
+    return build_general_file_excerpt(content, relative_path, message, max_chars=max_chars), "window", True
+
+
+def choose_edit_candidate_paths(project_root: Path, state: SessionState, message: str, max_files: int) -> List[str]:
+    if state.pinned_files:
+        pinned = require_pinned_context(state)
+        if len(pinned) <= max_files:
+            return pinned
+        return rank_paths_for_message(project_root, pinned, message)[:max_files]
+    candidates = infer_edit_candidate_paths(project_root, state, message)
+    return rank_paths_for_message(project_root, candidates, message)[:max_files]
+
+
+def build_edit_context_from_paths(
+    project_root: Path,
+    state: SessionState,
+    message: str,
+    selected_paths: List[str],
+    *,
+    heading: str,
+    advisory: bool = False,
+) -> Tuple[str, Dict[str, object]]:
     single_file_focus = len(selected_paths) == 1
-    total_limit = MAX_EDIT_SINGLE_FILE_CHARS if single_file_focus else MAX_EDIT_TOTAL_CHARS
+    limits = get_context_limits(state.model_key, single_file_focus=single_file_focus, max_response_tokens=900)
+    total_limit = int(limits.get("total_chars", MAX_EDIT_TOTAL_CHARS) or MAX_EDIT_TOTAL_CHARS)
+    full_total_chars = int(limits.get("full_total_chars", 0) or 0)
+    full_file_chars = int(limits.get("full_file_chars", 0) or 0)
+    if advisory:
+        total_limit = min(total_limit, estimate_input_char_budget(state.model_key, 1200), 40000)
     chunks = [
-        "可編輯候選檔案:\n" + "\n".join(selected_paths) if selected_paths else "可編輯候選檔案:\n(無)",
+        f"{heading}:\n" + "\n".join(selected_paths) if selected_paths else f"{heading}:\n(無)",
     ]
     total_chars = sum(len(chunk) for chunk in chunks)
+    files_coverage: List[Dict[str, object]] = []
+    file_contents: List[Tuple[str, str]] = []
     for relative_path in selected_paths:
         try:
-            excerpt = build_excerpt_for_message(
-                project_root,
-                relative_path,
-                message,
-                max_chars=MAX_EDIT_SINGLE_FILE_CHARS if single_file_focus else MAX_EDIT_FILE_CHARS,
-                max_sections=3 if single_file_focus else 2,
-            )
+            file_contents.append((relative_path, read_file_full(project_root, relative_path)))
         except (OSError, ValueError):
             continue
-        block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
+
+    normalized_contents = [(path, content.strip()) for path, content in file_contents]
+    full_content_total = sum(len(content) for _, content in normalized_contents)
+    full_mode_blockers: List[str] = []
+    if not normalized_contents:
+        full_mode_blockers.append("沒有可讀取的候選檔案。")
+    if full_total_chars <= 0 or full_file_chars <= 0:
+        full_mode_blockers.append("目前模型未啟用 full-file edit budget。")
+    if normalized_contents and full_total_chars > 0 and full_content_total + total_chars + 2 * len(normalized_contents) > min(total_limit, full_total_chars):
+        full_mode_blockers.append("候選檔案總字元數超過本輪 edit context 上限。")
+    oversized_files = [path for path, content in normalized_contents if full_file_chars > 0 and len(content) > full_file_chars]
+    if oversized_files:
+        full_mode_blockers.append("單檔字元數超過 full-file 上限：" + ", ".join(oversized_files[:3]))
+    can_send_all_full = (
+        bool(normalized_contents)
+        and full_total_chars > 0
+        and full_file_chars > 0
+        and full_content_total + total_chars + 2 * len(normalized_contents) <= min(total_limit, full_total_chars)
+        and all(len(content) <= full_file_chars for _, content in normalized_contents)
+    )
+
+    for relative_path, content in normalized_contents:
+        mode = "full"
+        truncated = False
+        excerpt = content
+        if not can_send_all_full:
+            excerpt, mode, truncated = build_member_region_excerpt(
+                content,
+                relative_path,
+                message,
+                max_chars=int(limits.get("file_chars", MAX_EDIT_FILE_CHARS) or MAX_EDIT_FILE_CHARS),
+                max_sections=4 if single_file_focus else 3,
+            )
+        mode_label = "完整內容" if mode == "full" else ("完整函式/區段" if mode == "region" else "節錄模式")
+        block = f"\n檔案: {relative_path} [{mode_label}]\n```\n{excerpt}\n```"
         if total_chars + len(block) > total_limit:
-            break
+            if mode == "full":
+                excerpt, mode, truncated = build_member_region_excerpt(
+                    content,
+                    relative_path,
+                    message,
+                    max_chars=max(1200, total_limit - total_chars - 120),
+                    max_sections=3,
+                )
+                mode_label = "完整函式/區段" if mode == "region" else "節錄模式"
+                block = f"\n檔案: {relative_path} [{mode_label}]\n```\n{excerpt}\n```"
+            if total_chars + len(block) > total_limit:
+                break
         chunks.append(block)
         total_chars += len(block)
-    return "\n\n".join(chunks), selected_paths
+        files_coverage.append(
+            {
+                "path": relative_path,
+                "mode": mode,
+                "truncated": bool(truncated),
+                "charsSent": len(excerpt),
+                "charsTotal": len(content),
+                "reason": "完整送出" if mode == "full" else ("；".join(full_mode_blockers) or "已退回相關函式/片段以符合 edit context 上限。"),
+            }
+        )
+
+    coverage = build_edit_context_coverage(state.model_key, selected_paths, files_coverage, total_limit, total_chars)
+    set_last_edit_context_coverage(coverage)
+    return "\n\n".join(chunks), coverage
+
+
+def build_edit_context(project_root: Path, state: SessionState, message: str) -> Tuple[str, List[str]]:
+    limits = get_context_limits(
+        state.model_key,
+        single_file_focus=bool(state.pinned_files and len(state.pinned_files) == 1),
+        max_response_tokens=900,
+    )
+    selected_paths = choose_edit_candidate_paths(project_root, state, message, int(limits.get("max_files", MAX_EDIT_FILES) or MAX_EDIT_FILES))
+    context, _coverage = build_edit_context_from_paths(
+        project_root,
+        state,
+        message,
+        selected_paths,
+        heading="可編輯候選檔案",
+    )
+    return context, selected_paths
 
 
 def build_advisory_context(project_root: Path, state: SessionState, message: str, allowed_files: List[str]) -> str:
-    allowed_files = rank_paths_for_message(project_root, allowed_files, message)
-    chunks = [
-        "建議優先參考檔案:\n" + "\n".join(allowed_files) if allowed_files else "建議優先參考檔案:\n(無)",
-    ]
-    total_chars = sum(len(chunk) for chunk in chunks)
-    total_limit = min(MAX_EDIT_SINGLE_FILE_CHARS, 20000)
-    for relative_path in allowed_files[:MAX_EDIT_FILES]:
-        try:
-            excerpt = build_excerpt_for_message(
-                project_root,
-                relative_path,
-                message,
-                max_chars=MAX_ADVISORY_FILE_CHARS,
-                max_sections=3,
-            )
-        except (OSError, ValueError):
-            continue
-        block = f"\n檔案: {relative_path}\n```\n{excerpt}\n```"
-        if total_chars + len(block) > total_limit:
-            break
-        chunks.append(block)
-        total_chars += len(block)
-    return "\n\n".join(chunks)
+    selected_paths = rank_paths_for_message(project_root, allowed_files, message)[:MAX_EDIT_FILES]
+    context, _coverage = build_edit_context_from_paths(
+        project_root,
+        state,
+        message,
+        selected_paths,
+        heading="建議優先參考檔案",
+        advisory=True,
+    )
+    return context
 
 
 def try_resolve_identifier_question(project_root: Path, state: SessionState, message: str) -> Optional[str]:
@@ -6246,7 +6741,8 @@ def write_model_debug_log(kind: str, model_key: str, content: str) -> str:
         check=False,
         timeout=10,
     ).stdout.strip() or "unknown"
-    path = ROOT_DIR / "logs" / f"{kind}-{model_key}-{stamp}.log"
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOGS_DIR / f"{kind}-{model_key}-{stamp}.log"
     path.write_text(content[-12000:], encoding="utf-8", errors="replace")
     return str(path)
 
@@ -6295,8 +6791,9 @@ def create_gemma_locator(
             pending_edit=pending_edit,
             refine_mode=refine_mode,
         ),
-        timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
+        timeout_seconds=get_edit_plan_timeout_seconds(state.model_key, context_chars=len(context), max_tokens=GEMMA4_LOCATOR_MAX_TOKENS),
         max_tokens=GEMMA4_LOCATOR_MAX_TOKENS,
+        stream=True,
     )
     try:
         payload = extract_json_payload(raw_reply)
@@ -6476,6 +6973,9 @@ def build_fallback_advisory_plan(
         "path": target_path,
         "location": location,
         "target": target_name,
+        "verified": False,
+        "source": "model-unverified",
+        "missingSearchSnippet": before_snippet if before_snippet and before_snippet not in (target_item.get("beforeSnippet", "") if isinstance(target_item, dict) else "") else "",
         "whyHere": str(salvaged.get("whyHere", "")).strip() or "目前只能確認應在這個檔案或區塊附近重新檢查，無法安全產出精準替換片段。",
         "before": before_snippet,
         "after": after_snippet,
@@ -6503,6 +7003,9 @@ def build_fallback_advisory_plan(
                 "after": direct_edit.get("afterSnippet", suggestion["after"]),
                 "diffWindow": direct_edit.get("diffWindow", suggestion["diffWindow"]),
                 "notes": notes + format_notes(direct_edit.get("notes")),
+                "verified": True,
+                "source": "local-verified",
+                "missingSearchSnippet": "",
             }
         )
         actions = [
@@ -6534,6 +7037,7 @@ def build_fallback_advisory_plan(
         "suggestions": [suggestion],
         "displayText": display_text,
         "failureReason": short_failure_reason,
+        "contextCoverage": get_last_edit_context_coverage(),
     }
 
 
@@ -6597,6 +7101,7 @@ def build_public_plan(plan: Dict[str, object]) -> Dict[str, object]:
         "summary": plan["summary"],
         "needMoreContext": plan.get("needMoreContext", []),
         "failureReason": plan.get("failureReason", ""),
+        "contextCoverage": plan.get("contextCoverage", {}),
         "edits": [
             {
                 "path": item["path"],
@@ -7980,8 +8485,9 @@ def create_precise_edit_plan(
                 pending_edit=pending_edit,
                 refine_mode=refine_mode,
             ),
-            timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
+            timeout_seconds=get_edit_plan_timeout_seconds(state.model_key, context_chars=len(context), max_tokens=GEMMA4_PATCH_MAX_TOKENS),
             max_tokens=GEMMA4_PATCH_MAX_TOKENS,
+            stream=True,
         )
         try:
             patch_payload = extract_json_payload(raw_reply)
@@ -8008,8 +8514,9 @@ def create_precise_edit_plan(
                 refine_mode=refine_mode,
                 model_key=state.model_key,
             ),
-            timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
+            timeout_seconds=get_edit_plan_timeout_seconds(state.model_key, context_chars=len(context), max_tokens=900),
             max_tokens=900,
+            stream=True,
         )
         try:
             payload = extract_json_payload(raw_reply)
@@ -8047,8 +8554,12 @@ def create_precise_edit_plan(
                 continue
             occurrences = after.count(search)
             if occurrences != 1:
+                log_suffix = ""
+                if raw_reply.strip():
+                    log_path = write_model_debug_log("edit-plan-raw", state.model_key, raw_reply)
+                    log_suffix = f" 原始模型回覆已寫入 {log_path}。"
                 raise RuntimeError(
-                    f"修改建議無法安全定位到 {path}：search 片段必須剛好匹配 1 次，目前匹配到 {occurrences} 次。"
+                    f"修改建議無法安全定位到 {path}：search 片段必須剛好匹配 1 次，目前匹配到 {occurrences} 次。{log_suffix}"
                 )
             if first_match_index is None:
                 first_match_index = after.find(search)
@@ -8112,6 +8623,7 @@ def create_precise_edit_plan(
         "needMoreContext": need_more_context,
         "edits": normalized_edits,
         "actions": actions,
+        "contextCoverage": get_last_edit_context_coverage(),
     }
     return plan
 
@@ -8175,6 +8687,9 @@ def create_advisory_edit_plan(
                 "path": "(未指定檔案)",
                 "location": str(locator.get("locationHint", "")).strip() or "未提供",
                 "target": str(locator.get("target", "")).strip() or "請補充要修改的函式或區塊",
+                "verified": False,
+                "source": "model-unverified",
+                "missingSearchSnippet": "",
                 "whyHere": str(locator.get("reason", "")).strip() or "目前無法唯一定位修改區段。",
                 "before": "",
                 "after": "",
@@ -8201,6 +8716,7 @@ def create_advisory_edit_plan(
                     }
                 ),
                 "failureReason": failure_reason,
+                "contextCoverage": get_last_edit_context_coverage(),
             }
 
     advisory_message = context_message or message
@@ -8218,8 +8734,13 @@ def create_advisory_edit_plan(
             refine_mode=refine_mode,
             model_key=state.model_key,
         ),
-        timeout_seconds=get_edit_plan_timeout_seconds(state.model_key),
+        timeout_seconds=get_edit_plan_timeout_seconds(
+            state.model_key,
+            context_chars=len(context),
+            max_tokens=GEMMA4_ADVISORY_MAX_TOKENS if is_gemma4_state(state) else 1200,
+        ),
         max_tokens=GEMMA4_ADVISORY_MAX_TOKENS if is_gemma4_state(state) else 1200,
+        stream=True,
     )
     try:
         payload = extract_json_payload(raw_reply)
@@ -8275,6 +8796,8 @@ def create_advisory_edit_plan(
         location = "未提供"
         diff_window = build_diff_window(display_path, before_snippet or "(未提供)", after_snippet or "(未提供)")
         full_before = ""
+        verified = False
+        missing_search_snippet = ""
         if path:
             try:
                 full_before = read_file_full(project_root, path)
@@ -8288,6 +8811,7 @@ def create_advisory_edit_plan(
                 if before_snippet:
                     occurrences = full_before.count(before_snippet)
                     if occurrences == 1:
+                        verified = True
                         match_index = full_before.find(before_snippet)
                         full_after = full_before.replace(before_snippet, after_snippet, 1)
                         region = locate_change_region(full_before, match_index)
@@ -8296,6 +8820,7 @@ def create_advisory_edit_plan(
                             target = str(region["name"])
                         diff_window = truncate_middle(generate_diff(path, full_before, full_after), 12000)
                     elif after_snippet:
+                        missing_search_snippet = before_snippet
                         diff_window = truncate_middle(build_diff_window(display_path, before_snippet, after_snippet), 12000)
             except (OSError, ValueError):
                 pass
@@ -8307,6 +8832,8 @@ def create_advisory_edit_plan(
         else:
             safety_issues = []
         if safety_issues:
+            verified = False
+            missing_search_snippet = before_snippet
             notes = notes + [
                 f"保守檢查：{'；'.join(safety_issues)}",
                 "以下片段只供人工檢查，未建立可直接套用的 action；請補充正確的函式、欄位或變數名稱後再重新產生建議。",
@@ -8323,6 +8850,9 @@ def create_advisory_edit_plan(
                 "path": display_path,
                 "location": location,
                 "target": target,
+                "verified": verified,
+                "source": "model-verified" if verified else "model-unverified",
+                "missingSearchSnippet": missing_search_snippet,
                 "whyHere": why_here,
                 "before": before_snippet,
                 "after": after_snippet,
@@ -8363,6 +8893,7 @@ def create_advisory_edit_plan(
         "suggestions": normalized_suggestions,
         "displayText": display_text,
         "failureReason": failure_reason,
+        "contextCoverage": get_last_edit_context_coverage(),
     }
 
 
@@ -8377,6 +8908,7 @@ def create_edit_plan(project_root: Path, state: SessionState, message: str) -> D
     if local_plan:
         local_plan["request"] = message
         local_plan["refineMode"] = refine_mode
+        local_plan["contextCoverage"] = get_last_edit_context_coverage()
         return local_plan
     try:
         plan = create_precise_edit_plan(
@@ -8421,7 +8953,17 @@ def call_local_model(
     max_tokens: int = 600,
     continue_on_length: int = 0,
     raw_mode: bool = False,
+    stream: bool = False,
 ) -> str:
+    if stream:
+        return collect_streaming_model_reply(
+            model_alias,
+            messages,
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+            continue_on_length=continue_on_length,
+            raw_mode=raw_mode,
+        )
     endpoint = get_model_endpoint(model_alias)
     model_key = get_model_key_from_alias(model_alias)
     working_messages = list(messages)
@@ -8457,6 +8999,7 @@ def call_local_model(
             "stream": False,
             "max_tokens": max_tokens,
         }
+        request_payload.update(get_model_request_options(model_key))
         request_payload.update(get_model_generation_options(model_key))
         payload = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
@@ -8518,6 +9061,48 @@ def call_local_model(
     return sanitize_model_reply(model_alias, "\n".join(part for part in parts if part.strip()), raw_mode=raw_mode)
 
 
+def collect_streaming_model_reply(
+    model_alias: str,
+    messages: List[Dict[str, object]],
+    timeout_seconds: int = 180,
+    max_tokens: int = 600,
+    continue_on_length: int = 0,
+    raw_mode: bool = False,
+) -> str:
+    model_key = get_model_key_from_alias(model_alias)
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    try:
+        for event in stream_local_model_events(
+            model_alias,
+            messages,
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+            continue_on_length=continue_on_length,
+        ):
+            event_type = str(event.get("type", ""))
+            text = str(event.get("text", "") or "")
+            if event_type == "content" and text:
+                content_parts.append(text)
+            elif event_type == "reasoning" and text:
+                reasoning_parts.append(text)
+    except RuntimeError as exc:
+        partial_reply = "".join(content_parts).strip()
+        if partial_reply:
+            debug_text = partial_reply
+            if reasoning_parts:
+                debug_text = f"<think>\n{''.join(reasoning_parts).strip()}\n</think>\n\n{partial_reply}".strip()
+            log_path = write_model_debug_log("edit-plan-partial", model_key, debug_text)
+            raise RuntimeError(
+                f"{exc} 已收到部分模型回應，未直接判定為無內容；原始 partial reply 已寫入 {log_path}。"
+            ) from exc
+        raise
+    reply = "".join(content_parts).strip()
+    if not reply and reasoning_parts:
+        reply = f"<think>\n{''.join(reasoning_parts).strip()}\n</think>"
+    return sanitize_model_reply(model_alias, reply, raw_mode=raw_mode)
+
+
 def raise_local_model_http_error(exc: urllib.error.HTTPError) -> None:
     details = ""
     try:
@@ -8560,7 +9145,9 @@ def stream_local_model_events(
             "stream": True,
             "max_tokens": max_tokens,
         }
-        request_payload.update(get_model_generation_options(get_model_key_from_alias(model_alias)))
+        model_key = get_model_key_from_alias(model_alias)
+        request_payload.update(get_model_request_options(model_key))
+        request_payload.update(get_model_generation_options(model_key))
         payload = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             endpoint,
@@ -8688,6 +9275,7 @@ def build_session_payload(
         STATE.memory_compacted_count = existing_memory_compacted_count if preserve_history else 0
         STATE.pending_edit = None
         STATE.ui_state = "ready"
+        remember_last_used_model_key(model_key)
         save_current_thread_locked()
     return {
         "projectPath": str(project_root),
@@ -8695,6 +9283,7 @@ def build_session_payload(
         "modelAlias": model_alias,
         "summary": summary,
         "tree": tree,
+        "fileMeta": {file.path: {"size": file.size, "language": file.language, "kind": file_kind_from_path(file.path)} for file in files},
         "entrypoints": entrypoints,
         "tests": tests,
         "structure": structure,
@@ -8847,6 +9436,7 @@ def get_status_payload_unlocked() -> Dict[str, object]:
         key: get_model_manifest(key)
         for key in sorted(SUPPORTED_MODEL_KEYS)
     }
+    default_model_key = get_default_model_key()
     return {
             "appVersion": APP_VERSION,
             "appName": APP_NAME,
@@ -8855,6 +9445,8 @@ def get_status_payload_unlocked() -> Dict[str, object]:
             "projectPath": STATE.project_path,
             "modelKey": STATE.model_key,
             "modelAlias": STATE.model_alias,
+            "defaultModelKey": default_model_key,
+            "lastUsedModelKey": default_model_key,
             "models": get_public_model_capabilities(),
             "contextOptions": get_context_options_payload(),
             "hardwareProfile": hardware_profile,
@@ -8863,6 +9455,7 @@ def get_status_payload_unlocked() -> Dict[str, object]:
             "effectiveContextWindow": get_model_context_limit(STATE.model_key),
             "summary": STATE.summary,
             "tree": STATE.tree,
+            "fileMeta": {file.path: {"size": file.size, "language": file.language, "kind": file_kind_from_path(file.path)} for file in STATE.files},
             "entrypoints": STATE.entrypoints,
             "tests": STATE.tests,
             "pinnedFiles": STATE.pinned_files,
@@ -8916,12 +9509,14 @@ def get_models_payload() -> Dict[str, object]:
             "runtimeBackend": auto_settings.get("runtimeBackend", "cpu"),
             "nGpuLayers": auto_settings.get("nGpuLayers", 0),
             "threads": auto_settings.get("threads", os.cpu_count() or 4),
-            "llamaArgs": get_model_llama_args(key),
+            "llamaArgs": get_model_llama_args(key, hardware_profile),
         }
     log_hardware_catalog_once(hardware_profile, recommended_model_key, models)
+    default_model_key = get_default_model_key()
     return {
         "models": models,
-        "defaultModelKey": DEFAULT_MODEL_KEY,
+        "defaultModelKey": default_model_key,
+        "lastUsedModelKey": default_model_key,
         "contextOptions": get_context_options_payload(),
         "hardwareProfile": hardware_profile,
         "recommendedModelKey": recommended_model_key,
@@ -9006,6 +9601,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/models/context":
             self.handle_model_context()
+            return
+        if parsed.path == "/api/models/context-calibration":
+            self.handle_model_context_calibration()
             return
         if parsed.path == "/api/files/generate/plan":
             self.handle_generate_file_plan()
@@ -9178,7 +9776,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             project_path = str(payload.get("projectPath", "")).strip()
-            model_key = str(payload.get("modelKey", DEFAULT_MODEL_KEY)).strip().lower()
+            model_key = str(payload.get("modelKey") or get_default_model_key()).strip().lower()
             if model_key not in SUPPORTED_MODEL_KEYS:
                 raise ValueError(f"Unsupported model. Use one of: {', '.join(sorted(SUPPORTED_MODEL_KEYS))}.")
             if not project_path:
@@ -9192,7 +9790,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_redownload_model(self) -> None:
         try:
             payload = self.read_json_body()
-            model_key = str(payload.get("modelKey", DEFAULT_MODEL_KEY)).strip().lower()
+            model_key = str(payload.get("modelKey") or get_default_model_key()).strip().lower()
             if model_key not in SUPPORTED_MODEL_KEYS:
                 raise ValueError(f"Unsupported model. Use one of: {', '.join(sorted(SUPPORTED_MODEL_KEYS))}.")
             task = start_background_task(TASK_REDOWNLOAD_MODEL, redownload_model_worker, model_key)
@@ -9219,10 +9817,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_model_ensure(self) -> None:
         try:
             payload = self.read_json_body()
-            model_key = str(payload.get("modelKey", STATE.model_key or DEFAULT_MODEL_KEY)).strip().lower()
+            model_key = str(payload.get("modelKey") or STATE.model_key or get_default_model_key()).strip().lower()
             if model_key not in SUPPORTED_MODEL_KEYS:
                 raise ValueError("Unsupported model.")
             result = ensure_local_model_server(model_key, port=get_model_port(model_key))
+            remember_last_used_model_key(model_key)
             json_response(self, {"ok": True, "data": {"modelKey": model_key, **result}})
         except ValueError as exc:
             error_response(self, make_error("MODEL_INVALID", "Model validation failed.", str(exc)))
@@ -9238,7 +9837,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def handle_model_context(self) -> None:
         try:
             payload = self.read_json_body()
-            model_key = str(payload.get("modelKey", STATE.model_key or DEFAULT_MODEL_KEY)).strip().lower()
+            model_key = str(payload.get("modelKey") or STATE.model_key or get_default_model_key()).strip().lower()
             if model_key not in SUPPORTED_MODEL_KEYS:
                 raise ValueError("Unsupported model.")
             requested = payload.get("contextWindow")
@@ -9248,11 +9847,34 @@ class WebUIHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 if STATE.model_key == model_key:
                     STATE.model_alias = get_model_alias(model_key)
+            remember_last_used_model_key(model_key)
             json_response(self, {"ok": True, "data": {"modelKey": model_key, "selectedContextWindow": selected, **get_models_payload()}})
         except (TypeError, ValueError) as exc:
             error_response(self, make_error("MODEL_CONTEXT_INVALID", "Model context validation failed.", str(exc)))
         except Exception as exc:
             error_response(self, make_error("MODEL_CONTEXT_FAILED", "Failed to update model context.", str(exc)))
+
+    def handle_model_context_calibration(self) -> None:
+        try:
+            payload = self.read_json_body()
+            model_key = str(payload.get("modelKey") or STATE.model_key or get_default_model_key()).strip().lower()
+            result = run_model_context_calibration(model_key, payload.get("contexts"))
+            remember_last_used_model_key(model_key)
+            json_response(self, {"ok": True, "data": {**result, **get_models_payload()}})
+        except ValueError as exc:
+            error_response(self, make_error("MODEL_CONTEXT_CALIBRATION_INVALID", "Model context calibration request is invalid.", str(exc)))
+        except subprocess.TimeoutExpired as exc:
+            output = str(getattr(exc, "output", "") or "")
+            error_response(
+                self,
+                make_error(
+                    "MODEL_CONTEXT_CALIBRATION_TIMEOUT",
+                    "Model context calibration timed out.",
+                    output[-4000:] or str(exc),
+                ),
+            )
+        except Exception as exc:
+            error_response(self, make_error("MODEL_CONTEXT_CALIBRATION_FAILED", "Model context calibration failed.", str(exc)))
 
     def handle_generate_file_plan(self) -> None:
         try:
@@ -9552,6 +10174,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     )
                 )
             with STATE_LOCK:
+                STATE.model_key = model_key
+                STATE.model_alias = get_model_alias(model_key)
+                remember_last_used_model_key(model_key)
                 STATE.history.append({
                     "role": "assistant",
                     "content": reply,
@@ -9963,16 +10588,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json_body()
             message = str(payload.get("message", "")).strip()
+            requested_model_key = str(payload.get("modelKey", "")).strip().lower()
             if not message:
                 raise ValueError("message is required.")
             with STATE_LOCK:
                 if STATE.ui_state != "ready" or not STATE.project_path:
                     raise ValueError("請先完成開啟專案。")
+                model_key = requested_model_key or STATE.model_key
+                if model_key not in SUPPORTED_MODEL_KEYS:
+                    raise ValueError("Unsupported model.")
                 project_root = Path(STATE.project_path)
+                current_model_key = STATE.model_key
                 snapshot = SessionState(
                     project_path=STATE.project_path,
-                    model_key=STATE.model_key,
-                    model_alias=STATE.model_alias,
+                    model_key=model_key,
+                    model_alias=get_model_alias(model_key),
                     summary=STATE.summary,
                     tree=list(STATE.tree),
                     files=list(STATE.files),
@@ -9986,11 +10616,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     pending_edit=STATE.pending_edit,
                     ui_state=STATE.ui_state,
                 )
+            if requested_model_key and requested_model_key != current_model_key:
+                ensure_local_model_server(model_key, port=get_model_port(model_key))
             plan = create_edit_plan(project_root, snapshot, message)
             public_plan = build_public_plan(plan)
             reply_text = format_plan_for_chat(public_plan)
             with STATE_LOCK:
+                STATE.model_key = snapshot.model_key
+                STATE.model_alias = snapshot.model_alias
                 STATE.pending_edit = public_plan
+                remember_last_used_model_key(snapshot.model_key)
                 user_record = {"role": "user", "content": message, "kind": "edit-request"}
                 assistant_record = {"role": "assistant", "content": reply_text, "kind": "edit-plan"}
                 STATE.history.append(user_record)
@@ -10003,8 +10638,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
             json_response(self, {"ok": True, "data": {"plan": public_plan}})
         except ValueError as exc:
             details = str(exc)
-            code = "PROJECT_NOT_READY" if details == "請先完成開啟專案。" else "EDIT_PLAN_FAILED"
-            message = "Project is not ready." if code == "PROJECT_NOT_READY" else "Generate edit plan failed."
+            if details == "請先完成開啟專案。":
+                code = "PROJECT_NOT_READY"
+                message = "Project is not ready."
+            elif details.startswith("Unsupported model"):
+                code = "MODEL_INVALID"
+                message = "Model validation failed."
+            else:
+                code = "EDIT_PLAN_FAILED"
+                message = "Generate edit plan failed."
             error_response(self, make_error(code, message, details))
         except RuntimeError as exc:
             try:
@@ -10227,6 +10869,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8764, type=int)
     args = parser.parse_args()
+    clear_session(ui_state="idle")
     cleanup_image_upload_dir()
     server = ThreadingHTTPServer((args.host, args.port), WebUIHandler)
     print(f"{APP_NAME} Web UI running at http://{args.host}:{args.port}", flush=True)

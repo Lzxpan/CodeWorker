@@ -2,6 +2,8 @@ function createTreeNode(path) {
   const node = elements.treeItemTemplate.content.firstElementChild.cloneNode(true);
   const checkbox = node.querySelector(".pin-checkbox");
   const button = node.querySelector(".tree-link");
+  const meta = state.fileMetaByPath?.[path] || {};
+  const size = Number(meta.size || meta.sizeBytes || 0);
   checkbox.checked = state.pinnedFiles.has(path);
   checkbox.disabled = state.uiState !== "ready";
   checkbox.addEventListener("change", () => {
@@ -11,7 +13,8 @@ function createTreeNode(path) {
     elements.projectSummary.textContent = formatProjectSummary(state.summaryRaw, [...state.pinnedFiles]);
     schedulePinnedFilesSync(rollback);
   });
-  button.textContent = path;
+  button.textContent = size > 0 ? `${path} (${formatBytes(size)})` : path;
+  button.title = size > 0 ? `${path} · ${formatBytes(size)}` : path;
   button.disabled = state.uiState !== "ready";
   button.addEventListener("click", () => {
     if (button.disabled || checkbox.disabled) return;
@@ -37,7 +40,16 @@ function renderVirtualTreeWindow() {
 }
 
 function renderTree(tree, totalCount = null) {
-  state.tree = (tree || []).map((entry) => typeof entry === "string" ? entry : entry.path).filter(Boolean);
+  const entries = Array.isArray(tree) ? tree : [];
+  entries.forEach((entry) => {
+    if (entry && typeof entry === "object" && entry.path) {
+      state.fileMetaByPath[entry.path] = {
+        ...(state.fileMetaByPath[entry.path] || {}),
+        ...entry,
+      };
+    }
+  });
+  state.tree = entries.map((entry) => typeof entry === "string" ? entry : entry.path).filter(Boolean);
   state.virtualTree.items = state.tree;
   state.virtualTree.total = Number.isFinite(Number(totalCount)) ? Number(totalCount) : state.tree.length;
   const visibleCount = state.tree.length;
@@ -78,5 +90,5 @@ async function loadFileTree({ query = "", offset = 0, limit = 500 } = {}) {
   if (state.uiState !== "ready") return;
   const params = new URLSearchParams({ query, offset: String(offset), limit: String(limit) });
   const data = await requestJson(`/api/file-tree?${params.toString()}`);
-  renderTree((data.items || []).map((item) => item.path), data.total);
+  renderTree(data.items || [], data.total);
 }

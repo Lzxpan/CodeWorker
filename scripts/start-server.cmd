@@ -123,7 +123,7 @@ if %RETRIES% LEQ 0 (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2" >nul
+timeout /t 2 /nobreak >nul
 goto wait_loop
 
 :ready

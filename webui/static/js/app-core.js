@@ -47,6 +47,7 @@ const elements = {
   removeChatImageBtn: document.getElementById("removeChatImageBtn"),
   contextWindowLabel: document.getElementById("contextWindowLabel"),
   contextWindowSelect: document.getElementById("contextWindowSelect"),
+  contextCalibrateBtn: document.getElementById("contextCalibrateBtn"),
   editPlanBtn: document.getElementById("editPlanBtn"),
   gitDiffBtn: document.getElementById("gitDiffBtn"),
   gitCheckpointBtn: document.getElementById("gitCheckpointBtn"),
@@ -348,8 +349,52 @@ function formatContextCoverage(coverage) {
   const filesSent = Number(coverage.filesSent || 0);
   const selectedFiles = Number(coverage.selectedFiles || filesSent);
   const fullCount = Number(coverage.fullCount || 0);
-  const excerptCount = Number(coverage.excerptCount || 0);
-  const omittedFiles = Number(coverage.omittedFiles || 0);
+  const regionCount = Number(coverage.regionCount || 0);
+  const windowCount = Number(coverage.windowCount || 0);
+  const excerptCount = Number(coverage.excerptCount || regionCount + windowCount);
+  const omittedFiles = Array.isArray(coverage.omittedFiles) ? coverage.omittedFiles.length : Number(coverage.omittedFiles || 0);
+  const charLimit = Number(coverage.charLimit || 0);
+  const usedChars = Number(coverage.usedChars || 0);
+  const fileDetails = Array.isArray(coverage.files)
+    ? coverage.files.slice(0, 5).map((file) => {
+      const modeLabel = state.language === "en"
+        ? ({ full: "full", region: "region", window: "window", excerpt: "excerpt" }[String(file.mode || "")] || String(file.mode || "sent"))
+        : ({ full: "完整", region: "函式/區段", window: "片段", excerpt: "節錄" }[String(file.mode || "")] || String(file.mode || "已送出"));
+      const sent = Number(file.charsSent || 0);
+      const total = Number(file.charsTotal || 0);
+      const kb = sent ? `${(sent / 1024).toFixed(1)}KB` : "0KB";
+      const reason = String(file.reason || "").trim();
+      return state.language === "en"
+        ? `${file.path || ""}: ${modeLabel} ${kb}${total ? `/${(total / 1024).toFixed(1)}KB` : ""}${file.truncated ? ", truncated" : ""}${reason ? `, ${reason}` : ""}`
+        : `${file.path || ""}：${modeLabel} ${kb}${total ? `/${(total / 1024).toFixed(1)}KB` : ""}${file.truncated ? "，已截斷" : ""}${reason ? `，${reason}` : ""}`;
+    })
+    : [];
+  const budgetText = charLimit
+    ? (state.language === "en"
+      ? ` Budget ${Math.round(usedChars / 1024)}KB/${Math.round(charLimit / 1024)}KB.`
+      : ` 容量 ${Math.round(usedChars / 1024)}KB/${Math.round(charLimit / 1024)}KB。`)
+    : "";
+  const detailsText = fileDetails.length
+    ? (state.language === "en" ? ` Files: ${fileDetails.join(" | ")}` : ` 檔案：${fileDetails.join("｜")}`)
+    : "";
+  if (mode === "edit-plan") {
+    if (state.language === "en") {
+      const parts = [
+        `Edit context: sent ${filesSent}/${selectedFiles} candidate file(s)`,
+        `(${fullCount} full, ${regionCount} region, ${windowCount} window)`,
+      ];
+      if (omittedFiles > 0) parts.push(`, omitted ${omittedFiles}`);
+      if (coverage.truncated) parts.push(". The model did not receive every target in full.");
+      return `${parts.join("")}${budgetText}${detailsText}${memorySuffix}`;
+    }
+    const parts = [
+      `修改計畫上下文：已送出 ${filesSent}/${selectedFiles} 個候選檔案`,
+      `（完整 ${fullCount}、函式/區段 ${regionCount}、片段 ${windowCount}）`,
+    ];
+    if (omittedFiles > 0) parts.push(`，另有 ${omittedFiles} 個未送出`);
+    if (coverage.truncated) parts.push("。模型沒有讀到所有目標的完整內容。");
+    return `${parts.join("")}${budgetText}${detailsText}${memorySuffix}`;
+  }
   if (state.language === "en") {
     const parts = [
       `Context: sent ${filesSent}/${selectedFiles} pinned file(s)`,
