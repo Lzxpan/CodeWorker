@@ -363,6 +363,40 @@ async function analyzeProject() {
   }
 }
 
+async function clearSelectedProject() {
+  if (!state.projectPath && !elements.projectPath.value.trim()) {
+    return;
+  }
+  clearError();
+  clearChatImage({ silent: true });
+  setStatus(t("statuses.clearingProject"), true);
+  try {
+    const data = await requestJson("/api/project/clear", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.projectPath = "";
+    state.summaryRaw = "";
+    state.fileMetaByPath = {};
+    state.pendingEdit = null;
+    state.uiState = data.uiState || "idle";
+    state.history = data.history || state.history || [];
+    state.transcript = data.transcript || state.transcript || [];
+    state.threads = data.threads || state.threads || [];
+    elements.projectPath.value = "";
+    resetProjectViews(t("hints.initialSummary"));
+    renderHistory(state.history, state.transcript);
+    renderThreads(state.threads);
+    renderPendingEdit(null);
+    renderContextCoverage(null);
+    setUiState("idle");
+    setStatus(t("statuses.projectCleared"));
+  } catch (error) {
+    setStatus(t("statuses.projectClearFailed"));
+    showError(normalizeError(error, "PROJECT_CLEAR_FAILED", t("errors.projectClearFailed")));
+  }
+}
+
 function actionRiskLabel(action) {
   const high = String(action?.risk || "") === "high";
   if (state.language === "en") return high ? "high risk" : "review";

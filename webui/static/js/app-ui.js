@@ -147,10 +147,23 @@ function compactModelName(name, key) {
     .replace("Gemma 4 26B", "Gemma4 26B");
 }
 
+function formatProfileMatch(match = {}) {
+  const level = String(match.level || "preset");
+  const zh = { exact: "本機已測", compatible: "相容設定", preset: "預設未實測" };
+  const en = { exact: "measured", compatible: "compatible", preset: "preset unverified" };
+  return (state.language === "en" ? en : zh)[level] || level;
+}
+
 function formatModelOptionLabel(key, model) {
   const parts = [];
   if (model.recommended) {
     parts.push(state.language === "en" ? "R" : "薦");
+  }
+  const matchLevel = model.optimizationPlan?.profileMatch?.level;
+  if (matchLevel === "exact") {
+    parts.push(state.language === "en" ? "OK" : "已測");
+  } else if (matchLevel === "compatible") {
+    parts.push(state.language === "en" ? "C" : "相容");
   }
   parts.push(formatModelTier(model.tier, true));
   const size = Number(model.estimatedModelSizeGb || 0);
@@ -175,16 +188,27 @@ function renderHardwareStatus(profile = state.hardwareProfile, selectedModel = n
     : "";
   const model = selectedModel || getModelCapability(elements.modelKey.value || state.modelKey);
   const backend = model.runtimeBackend || "cpu";
+  const optimizationPlan = model.optimizationPlan || state.hardwareOptimization?.optimizationPlan || {};
   const context = model.selectedContextWindow || model.effectiveContextWindow || model.contextWindow;
   const recommendation = state.recommendedModelKey ? getModelLabel(state.recommendedModelKey) : "";
   const gpuText = gpuNames || (state.language === "en" ? "CPU only" : "僅 CPU");
   const recommendedText = recommendation
     ? `${state.language === "en" ? "Recommended" : "推薦"}: ${recommendation}`
     : "";
+  const planContext = optimizationPlan.contextWindow || context;
+  const matchText = formatProfileMatch(optimizationPlan.profileMatch || {});
+  const measured = optimizationPlan.measuredPerformance || {};
+  const measuredText = measured.ok
+    ? `${state.language === "en" ? "Measured" : "實測"}: ${Number(measured.replySeconds || 0).toFixed(1)}s · ${Number(measured.charsPerSecond || 0).toFixed(1)} chars/s`
+    : (optimizationPlan.profileMatch?.matchedAt ? `${state.language === "en" ? "Profile" : "設定檔"}: ${optimizationPlan.profileMatch.matchedAt}` : "");
+  const warnings = Array.isArray(optimizationPlan.warnings) ? optimizationPlan.warnings.slice(0, 2) : [];
   elements.hardwareStatus.innerHTML = `
     <div><strong>${escapeHtml(t("labels.hardwareStatus"))}</strong>: ${escapeHtml(profileName)} · RAM ${escapeHtml(ram ? `${ram.toFixed(1)}GB` : "-")} · ${escapeHtml(gpuText)}</div>
     <div>${escapeHtml(recommendedText || (state.language === "en" ? "Recommendation unavailable" : "尚無推薦模型"))}</div>
-    <div>Backend ${escapeHtml(backend)} · ctx ${escapeHtml(formatContextWindow(context))}</div>
+    <div>${escapeHtml(state.language === "en" ? "Optimization" : "最佳化配置")}：${escapeHtml(matchText)} · Backend ${escapeHtml(optimizationPlan.runtimeBackend || backend)} · ctx ${escapeHtml(formatContextWindow(planContext))} · GPU layers ${escapeHtml(optimizationPlan.nGpuLayers ?? "-")} · threads ${escapeHtml(optimizationPlan.threads ?? "-")}</div>
+    <div>batch ${escapeHtml(optimizationPlan.batchSize || "-")} · ubatch ${escapeHtml(optimizationPlan.ubatchSize || "-")} · CPU MoE ${escapeHtml(optimizationPlan.nCpuMoe || "-")} · cache ${escapeHtml([optimizationPlan.cacheTypeK, optimizationPlan.cacheTypeV].filter(Boolean).join("/") || "-")}</div>
+    ${measuredText ? `<div>${escapeHtml(measuredText)}</div>` : ""}
+    ${warnings.length ? `<div class="warning-text">${escapeHtml(warnings.join(" "))}</div>` : ""}
   `;
 }
 
@@ -602,6 +626,7 @@ function applyTranslations() {
   if (elements.projectControlSummaryMeta) elements.projectControlSummaryMeta.textContent = t("labels.projectControlMeta");
   elements.openProjectBtn.textContent = t("buttons.openProject");
   elements.analyzeBtn.textContent = t("buttons.analyzeProject");
+  if (elements.clearProjectBtn) elements.clearProjectBtn.textContent = t("buttons.clearProject");
   if (elements.sidebarStatusSummary) elements.sidebarStatusSummary.textContent = t("labels.statusDetails");
   elements.firstRunHint.textContent = t("hints.firstRun");
   elements.errorPanelTitle.textContent = t("headings.errorPanel");

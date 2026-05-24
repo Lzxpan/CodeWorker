@@ -1,4 +1,4 @@
-# CodeWorker V1.02.000
+# CodeWorker V1.02.001
 
 > 離線、可攜、以隱私與資安為優先的 Windows 本地 LLM 程式碼助理。
 
@@ -14,8 +14,8 @@
 
 - 本機模型服務：初始 fallback 為 `Gemma 4 26B`，之後會把最後一次成功使用的模型作為預設模型；所有模型都由 bundled `llama.cpp` service 啟動，不需要 Ollama。
 - 模型下載進度：大型 GGUF 下載會顯示百分比、已下載大小與總大小，讓使用者知道模型仍在下載。
-- 多模型選擇：保留 `Gemma 4 26B` 與 `Qwen 3.5 9B Vision`，並新增 `Qwen3.6-35B-A3B Vision`、`Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite`。
-- 硬體自動最佳化：Web UI 會偵測 RAM、CPU、GPU vendor、VRAM、`nvidia-smi` 與 Vulkan 可用性，推薦模型並套用 backend、context、threads、GPU layers 與 8GB NVIDIA MoE offload 參數。
+- 多模型選擇：保留 `Gemma 4 26B` 與 `Qwen 3.5 9B Vision`，並新增 `Qwen3.6-35B-A3B Vision`、`Gemma 4 E4B Uncensored Q6`、`Qwen3.6-35B-A3B Uncensored IQ2_M`、`Qwen3-Coder 30B A3B`、`GLM-4.6`、`Qwen2.5-Coder 14B Instruct`、`DeepSeek-Coder V2 Lite`。
+- 硬體自動最佳化：Web UI 會偵測 RAM、CPU、GPU vendor、VRAM、`nvidia-smi` 與 Vulkan 可用性，推薦模型並套用 backend、context、threads、GPU layers 與 8GB NVIDIA MoE offload 參數；效能測試後會寫入本機硬體匹配設定檔供下次沿用。
 - Context 下拉選單：每個模型可獨立選擇自己的 context options，支援 `4k` 到 `256k`，`GLM-4.6` 另支援 `200k` 選項。
 - Context 容量實測：可針對目前模型測試可送出的 KB 上限，結果寫入本機 `data\model-context-calibration.json`，後續修改計畫會優先使用實測 `structuredEditChars`。
 - 完整檔案上下文：pinned files 與 resolver 鎖定檔案若低於模型實測容量，會以完整檔案送出；放不下時才逐步降為完整函式 / class region，再降為 line windows。
@@ -79,7 +79,7 @@ scripts\launch-webui.cmd
 
 更新檢查重點：
 
-1. Web UI 左上角應顯示 `CodeWorker V1.02.000`。
+1. Web UI 左上角應顯示 `CodeWorker V1.02.001`。
 2. `scripts\bootstrap.cmd` 會補齊 runtime、Python packages、模型 manifest 與既有下載項目，不會重複下載已存在且校驗通過的檔案。
 3. `scripts\launch-webui.cmd` 會重新啟動 `http://127.0.0.1:8764`；若 port 上已有舊的 CodeWorker Web UI，會先回收舊 process。
 4. 開啟專案後可執行 `分析專案檔案結構`、`用目前輸入查 CodeGraph`、`重新掃描索引` 與一般聊天，結果都會出現在同一個 transcript。
@@ -108,21 +108,22 @@ scripts\install-aider.cmd
 
 ### 畫面範例
 
-![CodeWorker V1.02.000 繁中 Web UI 註解畫面](docs/screenshots/webui-overview-zh-v102000.png)
+![CodeWorker V1.02.001 繁中 Web UI 畫面](docs/screenshots/webui-overview-zh-v102001.png)
 
-圖中的註解標出目前主要工作區：專案控制入口、專案摘要與虛擬化檔案樹、單一對話流與 AI 忙碌狀態、輸入區 / CodeGraph / Git 修改操作，以及右側對話串管理。
+畫面顯示目前主要工作區：專案控制入口、`清空選取專案`、專案摘要與虛擬化檔案樹、單一對話流、輸入區 / CodeGraph / Git 修改操作，以及右側對話串管理。
 
 ### 一般問答
 
 1. 啟動 Web UI。
 2. 不必開啟專案，直接在主對話框提問。
 3. 此模式不會加入 `PROJECT RAG CONTEXT`、pinned files 或 file tree。
+4. 如果已開啟專案，按 `清空選取專案` 可清除目前 project context，但保留模型與對話紀錄。
 
 ### 專案搜尋與問答
 
 1. 在 `專案路徑` 選擇專案根目錄。
 2. 點 `開啟專案`。
-3. 需要先整理大量檔案時點 `分析專案檔案結構`。
+3. 需要先整理大量檔案時點 `分析專案檔案結構`；若要回到一般問答，點右側的 `清空選取專案`。
 4. 直接詢問「在哪個檔案」、「哪段 code」、「要怎麼修改」；沒有 pinned files 時會自動用 RAG 搜尋全專案。
 5. 若要聚焦少數檔案，在 `檔案樹` 勾選檔名。
 
@@ -353,6 +354,15 @@ CodeGraph 出處：
 
 ## 7. 版本歷程
 
+### V1.02.001
+
+- 將 Web UI 與啟動檢查版本推進到 `CodeWorker V1.02.001`，同步更新 `VERSION`、`/api/status`、`scripts\launch-webui.cmd`、前端顯示文字與 README 截圖。
+- 新增 `清空選取專案` 按鈕，放在 `分析專案檔案結構` 右側；可清除 project path、summary、file tree、pinned files、preview 與 pending edit，保留目前模型與對話紀錄，讓同一個 thread 回到一般問答模式。
+- 新增 `Gemma 4 E4B Uncensored Q6` 與 `Qwen3.6-35B-A3B Uncensored IQ2_M` 模型 catalog / manifest / resolver 設定，包含獨立 port、context options、matching `mmproj` 與 `--jinja` 啟動參數。
+- 強化硬體最佳化與模型效能測試：`/api/models`、`/api/status`、`/api/hardware/optimization` 會回傳一致的 `optimizationPlan`，效能測試結果會寫入本機 `data\model-performance-calibration.json` 與 `data\hardware-model-profiles.json`，下次遇到相同或相容硬體時可套用匹配設定。
+- 針對 CPU-only / shared-memory iGPU 的大型模型啟動改用保守設定，加入 `--no-repack`、較小 batch / ubatch 與 adaptive startup timeout，避免用固定過短 timeout 誤判本機模型啟動失敗。
+- 擴充 regression，覆蓋清空專案、兩個新增 HauhauCS 模型、硬體 profile matching、performance-test 寫入設定檔、低記憶體啟動參數、adaptive timeout 與前端 `/api/project/clear` 呼叫。
+
 ### V1.02.000
 
 - 將 Web UI 與啟動檢查版本推進到 `CodeWorker V1.02.000`，同步更新 `VERSION`、`/api/status`、`scripts\launch-webui.cmd`、前端顯示文字與 README 截圖。
@@ -485,3 +495,6 @@ CodeGraph 相關註記：
 - 本地模型與第三方 runtime 的授權條件。
 - 客戶環境對 USB、可攜式工具與 offline AI 的使用規範。
 - 目標專案與資料是否允許被本機模型讀取。
+
+
+

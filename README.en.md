@@ -1,4 +1,4 @@
-# CodeWorker V1.02.000
+# CodeWorker V1.02.001
 
 > A privacy-first offline Windows code assistant built around local LLM workflows.
 
@@ -14,8 +14,8 @@ Core capabilities:
 
 - Local model service: `Gemma 4 26B` is the initial fallback model, then CodeWorker uses the last successfully used model as the next default. All models are served by the bundled `llama.cpp` service. Ollama is not required.
 - Model download progress: large GGUF downloads show percent, downloaded size, and total size so users can tell that the model is still downloading.
-- Model catalog: `Gemma 4 26B` and `Qwen 3.5 9B Vision` remain available, with new options for `Qwen3.6-35B-A3B Vision`, `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite`.
-- Hardware auto-optimization: the Web UI detects RAM, CPU, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability, then recommends a model and applies backend, context, threads, GPU layers, and 8GB NVIDIA MoE offload settings.
+- Model catalog: `Gemma 4 26B` and `Qwen 3.5 9B Vision` remain available, with new options for `Qwen3.6-35B-A3B Vision`, `Gemma 4 E4B Uncensored Q6`, `Qwen3.6-35B-A3B Uncensored IQ2_M`, `Qwen3-Coder 30B A3B`, `GLM-4.6`, `Qwen2.5-Coder 14B Instruct`, and `DeepSeek-Coder V2 Lite`.
+- Hardware auto-optimization: the Web UI detects RAM, CPU, GPU vendor, VRAM, `nvidia-smi`, and Vulkan availability, then recommends a model and applies backend, context, threads, GPU layers, and 8GB NVIDIA MoE offload settings; performance tests write local hardware-model profiles for reuse on matching machines.
 - Context selector: each model remembers its own context options from `4k` to `256k`; `GLM-4.6` also exposes a `200k` option.
 - Context capacity measurement: the current model can be benchmarked for the KB it can actually receive. Results are stored locally in `data\model-context-calibration.json`, and edit plans prefer the measured `structuredEditChars`.
 - Full-file edit context: pinned files and resolver-selected files are sent as complete files when they fit within the measured budget; only then does CodeWorker fall back to full function / class regions and line windows.
@@ -79,7 +79,7 @@ scripts\launch-webui.cmd
 
 Update checks:
 
-1. The Web UI brand should show `CodeWorker V1.02.000`.
+1. The Web UI brand should show `CodeWorker V1.02.001`.
 2. `scripts\bootstrap.cmd` fills missing runtimes, Python packages, model manifest data, and already downloaded assets without redownloading files that still pass validation.
 3. `scripts\launch-webui.cmd` starts `http://127.0.0.1:8764`; if an older CodeWorker Web UI owns the port, it reclaims that process first.
 4. After opening a project, `Analyze file structure`, `Query CodeGraph from input`, `Rescan index`, and normal chat should all append results into the same transcript.
@@ -108,21 +108,22 @@ scripts\install-aider.cmd
 
 ### Screenshot
 
-![CodeWorker V1.02.000 English Web UI overview with callouts](docs/screenshots/webui-overview-en-v102000.png)
+![CodeWorker V1.02.001 English Web UI overview](docs/screenshots/webui-overview-en-v102001.png)
 
-The callouts mark the current workflow areas: project controls entry, project summary and virtual file tree, the single transcript with AI busy state, input / CodeGraph / Git edit actions, and thread management.
+The screenshot shows the current workflow areas: project controls, `Clear selected project`, project summary and virtual file tree, the single transcript, input / CodeGraph / Git edit actions, and thread management.
 
 ### General Q&A
 
 1. Launch the Web UI.
 2. Ask directly in the main chat without opening a project.
 3. This mode does not add `PROJECT RAG CONTEXT`, pinned files, or file tree data.
+4. If a project is already open, click `Clear selected project` to clear project context while preserving the current model and chat history.
 
 ### Project search and Q&A
 
 1. Choose the project root in `Project path`.
 2. Click `Open project`.
-3. Click `Analyze file structure` when many files need to be organized before pinning.
+3. Click `Analyze file structure` when many files need to be organized before pinning; click `Clear selected project` next to it when you want to return to general Q&A.
 4. Ask where code lives, which files matter, or how to change a behavior. Without pinned files, CodeWorker searches the whole project through RAG.
 5. Check file names in the `File tree` when you want focused context.
 
@@ -353,6 +354,15 @@ CodeGraph attribution:
 
 ## 7. Version History
 
+### V1.02.001
+
+- advanced the Web UI and launch checks to `CodeWorker V1.02.001`, updating `VERSION`, `/api/status`, `scripts\launch-webui.cmd`, frontend display strings, and README screenshots.
+- added `Clear selected project` next to `Analyze file structure`; it clears project path, summary, file tree, pinned files, preview, and pending edit while preserving the current model and chat history so the same thread can return to general Q&A.
+- added `Gemma 4 E4B Uncensored Q6` and `Qwen3.6-35B-A3B Uncensored IQ2_M` to the model catalog, manifest, and resolver, including dedicated ports, context options, matching `mmproj`, and `--jinja` launch arguments.
+- improved hardware optimization and model performance testing: `/api/models`, `/api/status`, and `/api/hardware/optimization` return a consistent `optimizationPlan`, and performance tests write local `data\model-performance-calibration.json` plus `data\hardware-model-profiles.json` for future exact / compatible profile matches.
+- made CPU-only and shared-memory iGPU launches safer for large models with `--no-repack`, smaller batch / ubatch values, and adaptive startup timeouts instead of short fixed timeout assumptions.
+- expanded regression coverage for project clearing, the two new HauhauCS models, hardware profile matching, performance-test profile writes, low-memory launch arguments, adaptive timeouts, and frontend `/api/project/clear` wiring.
+
 ### V1.02.000
 
 - advanced the Web UI and launch checks to `CodeWorker V1.02.000`, updating `VERSION`, `/api/status`, `scripts\launch-webui.cmd`, frontend display strings, and README screenshots.
@@ -485,3 +495,6 @@ If you use CodeWorker inside customer environments or air-gapped networks, verif
 - the licenses of local models and third-party runtimes.
 - local rules for USB tools, portable software, and offline AI.
 - whether target project data is allowed to be read by a local model.
+
+
+

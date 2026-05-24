@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CodeWorker V1.02.000 Web UI</title>
+  <title>CodeWorker V1.02.001 Web UI</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -14,7 +14,7 @@
         <div class="brand-main">
           <div class="brand-mark">CW</div>
           <div class="brand-copy">
-            <h1 id="brandTitle">CodeWorker V1.02.000</h1>
+            <h1 id="brandTitle">CodeWorker V1.02.001</h1>
             <p id="brandSubtitle">本地離線專案分析與對話</p>
           </div>
         </div>
@@ -71,6 +71,10 @@
             <div class="action-item">
               <button id="analyzeBtn">分析專案檔案結構</button>
               <button type="button" class="help-trigger" data-help="analyze-project" aria-label="分析專案檔案結構說明">?</button>
+            </div>
+            <div class="action-item">
+              <button id="clearProjectBtn" type="button" class="ghost">清空選取專案</button>
+              <button type="button" class="help-trigger" data-help="clear-project" aria-label="清空選取專案說明">?</button>
             </div>
           </div>
         </div>
@@ -223,6 +227,7 @@
                   </select>
                 </div>
                 <button type="button" id="contextCalibrateBtn" class="ghost">測試此模型可送出 KB</button>
+                <button type="button" id="modelPerformanceTestBtn" class="ghost">測試目前模型效能</button>
               </div>
             </div>
           </form>

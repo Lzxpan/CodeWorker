@@ -22,24 +22,43 @@ def parse_llama_args(raw_args: object) -> list[str]:
     return [arg for arg in args if arg.startswith("--")]
 
 
-def detect_auto_settings(root: Path, model_key: str, config: dict) -> tuple[int, list[str]]:
+def load_hardware_profiles(root: Path) -> dict:
+    path = root / "data" / "hardware-model-profiles.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def detect_auto_settings(root: Path, model_key: str, config: dict, model_file: str = "") -> dict:
     try:
         sys.path.insert(0, str(root / "webui"))
-        from core.hardware import classify_hardware, detect_hardware, recommend_model_settings  # type: ignore
+        from core.hardware import build_optimization_plan, classify_hardware, detect_hardware  # type: ignore
 
         profile = classify_hardware(detect_hardware())
-        settings = recommend_model_settings(profile, config)
-        n_gpu_layers = int(settings.get("nGpuLayers") or 0)
-        max_vram = float(profile.get("maxVramGb") or 0)
-        total_ram = float(profile.get("totalRamGb") or 0)
-        recommended_ram = float(config.get("recommendedRamGb") or 0)
-        use_low_memory = bool(config.get("lowMemoryLlamaArgs")) and (
-            0 <= max_vram < 4 or (recommended_ram > 0 and total_ram < recommended_ram)
+        runtime_path = (
+            root
+            / "runtime"
+            / "llama.cpp"
+            / "llama-server.exe"
         )
-        raw_args = config.get("lowMemoryLlamaArgs") if use_low_memory else config.get("llamaArgs")
-        return n_gpu_layers, parse_llama_args(raw_args)
+        return build_optimization_plan(
+            profile,
+            model_key,
+            config,
+            stored_profiles=load_hardware_profiles(root),
+            model_file_path=model_file,
+            runtime_path=runtime_path,
+        )
     except Exception:
-        return int(config.get("nGpuLayers") or 0), parse_llama_args(config.get("llamaArgs"))
+        return {
+            "contextWindow": int(config.get("contextWindow") or 4096),
+            "nGpuLayers": int(config.get("nGpuLayers") or 0),
+            "cacheTypeK": config.get("cacheTypeK") or "",
+            "cacheTypeV": config.get("cacheTypeV") or "",
+            "llamaArgs": parse_llama_args(config.get("llamaArgs")),
+        }
 
 
 def first_match(model_dir: Path, patterns: list[str]) -> str:
@@ -81,14 +100,17 @@ def main() -> int:
     emit("MODEL_DIR", target_dir)
     emit("MODEL_ALIAS", config.get("alias") or f"{model_key}-local")
     emit("MODEL_PORT", config.get("port") or 8082)
-    emit("MODEL_CONTEXT", config.get("contextWindow") or 4096)
-    emit("MODEL_CACHE_TYPE_K", config.get("cacheTypeK") or "")
-    emit("MODEL_CACHE_TYPE_V", config.get("cacheTypeV") or "")
-    n_gpu_layers, llama_args = detect_auto_settings(root, model_key, config)
-    emit("MODEL_N_GPU_LAYERS", n_gpu_layers)
+    model_file = first_match(target_dir, file_patterns)
+    mmproj_file = first_match(target_dir, mmproj_patterns) if mmproj_patterns else ""
+    auto_settings = detect_auto_settings(root, model_key, config, model_file)
+    emit("MODEL_CONTEXT", auto_settings.get("contextWindow") or config.get("contextWindow") or 4096)
+    emit("MODEL_CACHE_TYPE_K", auto_settings.get("cacheTypeK") or config.get("cacheTypeK") or "")
+    emit("MODEL_CACHE_TYPE_V", auto_settings.get("cacheTypeV") or config.get("cacheTypeV") or "")
+    llama_args = parse_llama_args(auto_settings.get("llamaArgs"))
+    emit("MODEL_N_GPU_LAYERS", auto_settings.get("nGpuLayers") or 0)
     emit("MODEL_LLAMA_ARGS", " ".join(llama_args))
-    emit("MODEL_FILE", first_match(target_dir, file_patterns))
-    emit("MODEL_MMPROJ", first_match(target_dir, mmproj_patterns) if mmproj_patterns else "")
+    emit("MODEL_FILE", model_file)
+    emit("MODEL_MMPROJ", mmproj_file)
     emit("MODEL_FILE_PATTERNS", ";".join(file_patterns))
     emit("MODEL_MMPROJ_PATTERNS", ";".join(mmproj_patterns))
     return 0

@@ -44,9 +44,24 @@ def test_qwen_request_options_disable_thinking():
         "qwen36a3b requests should disable thinking for visible CodeWorker answers",
     )
     assert_true(
-        server.get_model_request_options("gemma4") == {},
-        "non-Qwen requests should not get Qwen chat template options",
+        server.get_model_request_options("qwen35") == {"chat_template_kwargs": {"enable_thinking": False}},
+        "qwen35 requests should disable thinking for visible CodeWorker answers",
     )
+    assert_true(
+        server.get_model_request_options("gemma4") == {"chat_template_kwargs": {"enable_thinking": False}},
+        "gemma4 requests should disable thinking for visible CodeWorker answers",
+    )
+    assert_true(
+        server.get_model_request_options("gemma4e4buncensored") == {"chat_template_kwargs": {"enable_thinking": False}},
+        "Gemma 4 E4B requests should share Gemma request options",
+    )
+
+
+def test_model_key_resolution_prefers_exact_and_longest_prefix():
+    assert_true(server.get_model_key_from_alias("gemma4e4buncensored") == "gemma4e4buncensored", "model key resolution should not collapse Gemma 4 E4B into gemma4")
+    assert_true(server.get_model_key_from_alias("gemma4e4buncensored-local") == "gemma4e4buncensored", "model alias resolution should prefer exact alias matches")
+    assert_true(server.normalize_supported_model_key("gemma4e4buncensored", "") == "gemma4e4buncensored", "supported model normalization should keep the full key")
+    assert_true(server.get_model_port("gemma4e4buncensored") == 8088, "Gemma 4 E4B should resolve to its dedicated port")
 
 
 def test_default_model_uses_last_used_preference():
@@ -109,6 +124,64 @@ def test_chat_exchange_persists_last_used_model_preference():
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_clear_project_context_preserves_general_chat_state():
+    old_threads_dir = server.THREADS_DIR
+    old_active_thread_id = server.ACTIVE_THREAD_ID
+    old_state = {
+        "project_path": server.STATE.project_path,
+        "model_key": server.STATE.model_key,
+        "model_alias": server.STATE.model_alias,
+        "summary": server.STATE.summary,
+        "tree": list(server.STATE.tree),
+        "files": list(server.STATE.files),
+        "entrypoints": list(server.STATE.entrypoints),
+        "tests": list(server.STATE.tests),
+        "pinned_files": list(server.STATE.pinned_files),
+        "current_preview_path": server.STATE.current_preview_path,
+        "history": list(server.STATE.history),
+        "transcript": list(server.STATE.transcript),
+        "pending_edit": server.STATE.pending_edit,
+        "ui_state": server.STATE.ui_state,
+    }
+    temp_dir = ROOT / ".tmp" / f"regression-clear-project-{uuid.uuid4().hex}"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.THREADS_DIR = temp_dir / "threads"
+        server.ACTIVE_THREAD_ID = "clear-project-thread"
+        with server.STATE_LOCK:
+            server.STATE.project_path = str(ROOT)
+            server.STATE.model_key = "qwen36uncensored" if "qwen36uncensored" in server.SUPPORTED_MODEL_KEYS else "gemma4"
+            server.STATE.model_alias = server.get_model_alias(server.STATE.model_key)
+            server.STATE.summary = "project summary"
+            server.STATE.tree = ["webui/server.py"]
+            server.STATE.files = [server.ProjectFile(path="webui/server.py", size=123, language="Python")]
+            server.STATE.entrypoints = ["webui/server.py"]
+            server.STATE.tests = ["scripts/run_webui_regression.py"]
+            server.STATE.pinned_files = ["webui/server.py"]
+            server.STATE.current_preview_path = "webui/server.py"
+            server.STATE.history = [{"role": "user", "content": "一般問答要保留"}]
+            server.STATE.transcript = [{"id": "t1", "kind": "chat", "role": "user", "title": "你", "content": "一般問答要保留", "createdAt": 1, "data": {}}]
+            server.STATE.pending_edit = {"mode": "precise"}
+            server.STATE.ui_state = "ready"
+            server.clear_project_context_locked()
+            server.save_current_thread_locked()
+            status = server.get_status_payload_unlocked()
+        assert_true(status["projectPath"] is None, "clear project should remove backend project path")
+        assert_true(status["tree"] == [] and status["pinnedFiles"] == [], "clear project should remove file tree and pinned files")
+        assert_true(status["pendingEdit"] is None, "clear project should drop pending edit tied to project files")
+        assert_true(status["history"][0]["content"] == "一般問答要保留", "clear project should preserve chat history for general Q&A")
+        assert_true(status["modelKey"] in server.SUPPORTED_MODEL_KEYS, "clear project should preserve selected supported model")
+        saved = server.load_thread_file(server.thread_path("clear-project-thread"))
+        assert_true(saved and not saved.get("projectPath"), "cleared project state should persist to the active thread")
+    finally:
+        server.THREADS_DIR = old_threads_dir
+        server.ACTIVE_THREAD_ID = old_active_thread_id
+        for key, value in old_state.items():
+            setattr(server.STATE, key, value)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def test_edit_plan_flow_uses_requested_model_key():
     source = inspect.getsource(server.WebUIHandler.handle_edit_plan)
     assert_true('requested_model_key = str(payload.get("modelKey", "")).strip().lower()' in source, "edit plan should read the selected model from the request")
@@ -118,12 +191,21 @@ def test_edit_plan_flow_uses_requested_model_key():
 
 
 def test_gemma_context_window_matches_local_bench():
-    assert_true(server.get_model_context_limit("gemma4") == 262144, "gemma4 should default to the selectable 256k context window")
-    assert_true(server.get_model_context_limit("qwen35") == 262144, "qwen35 should default to the selectable 256k context window")
-    assert_true(any(item["value"] == 262144 for item in server.get_context_options_payload()), "context options should expose 256k")
-    assert_true(server.get_chat_max_tokens("gemma4") <= 4096, "gemma4 response budget should leave room for input context")
-    limits = server.get_context_limits("gemma4", single_file_focus=False)
-    assert_true(limits["total_chars"] >= 20000, "gemma4 RAG char budget should use the selected context window")
+    old_context = server.MODEL_CONTEXT_SELECTIONS_PATH
+    temp_dir = ROOT / ".tmp" / f"regression-context-default-{uuid.uuid4().hex}"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.MODEL_CONTEXT_SELECTIONS_PATH = temp_dir / "model-contexts.json"
+        assert_true(server.get_model_context_limit("gemma4") == 262144, "gemma4 should default to the selectable 256k context window")
+        assert_true(server.get_model_context_limit("qwen35") == 262144, "qwen35 should default to the selectable 256k context window")
+        assert_true(any(item["value"] == 262144 for item in server.get_context_options_payload()), "context options should expose 256k")
+        assert_true(server.get_chat_max_tokens("gemma4") <= 4096, "gemma4 response budget should leave room for input context")
+        limits = server.get_context_limits("gemma4", single_file_focus=False)
+        assert_true(limits["total_chars"] >= 20000, "gemma4 RAG char budget should use the selected context window")
+    finally:
+        server.MODEL_CONTEXT_SELECTIONS_PATH = old_context
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def test_context_calibration_overrides_input_budget_and_model_payload():
@@ -321,6 +403,11 @@ def test_context_benchmark_reuses_existing_compatible_model_server():
         measure_context_limits.subprocess.run = old_run
 
 
+def test_context_measurement_script_uses_current_enabled_models():
+    assert_true("gemma4e4buncensored" in measure_context_limits.MODELS, "context calibration should include newly enabled Gemma 4 E4B model")
+    assert_true("qwen36uncensored" in measure_context_limits.MODELS, "context calibration should include newly enabled Qwen3.6 uncensored model")
+
+
 def test_start_server_uses_low_memory_model_env_for_qwen36_on_low_vram():
     resolved = subprocess.run(
         [str(ROOT / "runtime" / "WinPython" / "python" / "python.exe"), str(ROOT / "scripts" / "resolve_model_env.py"), "qwen36a3b"],
@@ -354,7 +441,7 @@ def test_gemma_manifest_uses_unsloth_with_mmproj():
 def test_new_model_catalog_exposes_hardware_metadata():
     payload = server.get_models_payload()
     models = payload["models"]
-    for key in ("qwen36a3b", "qwen3coder30b", "glm46", "qwen25coder14b", "deepseekcoderlite"):
+    for key in ("qwen36a3b", "qwen36uncensored", "gemma4e4buncensored", "qwen3coder30b", "glm46", "qwen25coder14b", "deepseekcoderlite"):
         assert_true(key in models, f"{key} should be available in the model catalog")
         assert_true(models[key].get("tier") in {"low", "standard", "high", "extreme"}, f"{key} should expose a hardware tier")
         assert_true(models[key].get("estimatedModelSizeGb", 0) > 0, f"{key} should expose estimated model size")
@@ -363,6 +450,53 @@ def test_new_model_catalog_exposes_hardware_metadata():
     assert_true(payload.get("hardwareProfile", {}).get("profile"), "/api/models should expose a hardware profile")
     assert_true(payload.get("recommendedModelKey") in models, "/api/models should expose a model recommendation")
     assert_true("--jinja" in models["glm46"].get("llamaArgs", []), "glm46 should require llama.cpp jinja chat templates")
+    assert_true("--jinja" in models["gemma4e4buncensored"].get("llamaArgs", []), "Gemma 4 E4B uncensored should require llama.cpp jinja chat templates")
+
+
+def test_gemma4e4b_uncensored_manifest_and_resolver():
+    manifest = json.loads((ROOT / "config" / "bootstrap.manifest.json").read_text(encoding="utf-8"))
+    model = manifest["models"]["gemma4e4buncensored"]
+    assert_true(model["repo"] == "HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive", "Gemma 4 E4B uncensored should use the HauhauCS GGUF repo")
+    assert_true(model["defaultQuant"] == "Q6_K_P", "Gemma 4 E4B uncensored should use the requested Q6_K_P quant")
+    assert_true(model["filePattern"] == "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf", "Gemma 4 E4B uncensored should target the requested GGUF")
+    assert_true(model["supportsImages"] is True and model["mmprojPatterns"], "Gemma 4 E4B uncensored should expose multimodal mmproj requirements")
+    resolved = subprocess.run(
+        [str(ROOT / "runtime" / "WinPython" / "python" / "python.exe"), str(ROOT / "scripts" / "resolve_model_env.py"), "gemma4e4buncensored"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=60,
+    )
+    assert_true(resolved.returncode == 0, "resolve_model_env.py should resolve gemma4e4buncensored")
+    assert_true('MODEL_PORT=8088' in resolved.stdout, "Gemma 4 E4B uncensored should use its dedicated port")
+    assert_true('--jinja' in resolved.stdout, "Gemma 4 E4B uncensored launch args should include --jinja")
+    assert_true('Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf' in resolved.stdout, "Gemma 4 E4B uncensored resolver should expose the requested file pattern")
+
+
+def test_qwen36_uncensored_manifest_and_resolver():
+    manifest = json.loads((ROOT / "config" / "bootstrap.manifest.json").read_text(encoding="utf-8"))
+    model = manifest["models"]["qwen36uncensored"]
+    assert_true(model["repo"] == "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive", "Qwen3.6 uncensored should use the HauhauCS GGUF repo")
+    assert_true(model["defaultQuant"] == "IQ2_M", "Qwen3.6 uncensored should default to the 6GB/8GB-oriented IQ2_M quant")
+    assert_true(model["filePattern"] == "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf", "Qwen3.6 uncensored should target the IQ2_M GGUF")
+    assert_true(model["supportsImages"] is True and model["mmprojPatterns"], "Qwen3.6 uncensored should expose multimodal mmproj requirements")
+    resolved = subprocess.run(
+        [str(ROOT / "runtime" / "WinPython" / "python" / "python.exe"), str(ROOT / "scripts" / "resolve_model_env.py"), "qwen36uncensored"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=60,
+    )
+    assert_true(resolved.returncode == 0, "resolve_model_env.py should resolve qwen36uncensored")
+    assert_true('MODEL_PORT=8089' in resolved.stdout, "Qwen3.6 uncensored should use its dedicated port")
+    assert_true('--jinja' in resolved.stdout, "Qwen3.6 uncensored launch args should include --jinja")
+    assert_true('Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf' in resolved.stdout, "Qwen3.6 uncensored resolver should expose the requested file pattern")
 
 
 def test_hardware_profile_classification_and_recommendations():
@@ -378,8 +512,10 @@ def test_hardware_profile_classification_and_recommendations():
     )
     standard_profile = classify_hardware(standard)
     assert_true(standard_profile["profile"] == "standard", "32GB RAM with AMD iGPU should be standard")
+    assert_true(standard_profile["hardwareClass"] == "igpu-shared-memory", "sub-4GB AMD iGPU should be shared-memory class")
     standard_settings = recommend_model_settings(standard_profile, server.get_model_manifest("qwen25coder14b"))
-    assert_true(standard_settings["runtimeBackend"] == "vulkan", "AMD iGPU with Vulkan should prefer Vulkan")
+    assert_true(standard_settings["runtimeBackend"] == "cpu", "AMD shared-memory iGPU should use CPU-safe defaults until measured stable")
+    assert_true(standard_settings["nGpuLayers"] == 0, "AMD shared-memory iGPU should not offload layers by default")
     assert_true(standard_settings["contextWindow"] == 32768, "standard hardware should use qwen25coder14b default context")
 
     high = HardwareInfo(
@@ -456,11 +592,440 @@ def test_qwen36a3b_catalog_targets_8gb_nvidia_moe_offload():
         has_vulkan=True,
     ))
     low_vram_settings = recommend_model_settings(low_vram_profile, qwen36)
+    assert_true(low_vram_settings["runtimeBackend"] == "cpu", "qwen36a3b should use CPU-safe backend on shared-memory iGPU")
     assert_true(low_vram_settings["nGpuLayers"] == 0, "qwen36a3b should avoid iGPU offload on sub-4GB VRAM")
     low_vram_args = server.get_model_llama_args("qwen36a3b", low_vram_profile)
+    assert_true("--no-repack" in low_vram_args, "qwen36a3b low-memory args should avoid CPU_REPACK allocation pressure")
     assert_true("--batch-size=256" in low_vram_args, "qwen36a3b low-memory args should reduce batch size")
     assert_true("--ubatch-size=64" in low_vram_args, "qwen36a3b low-memory args should reduce ubatch size")
     assert_true("--mlock" not in low_vram_args, "qwen36a3b low-memory args should avoid mlock")
+
+
+def test_igpu_large_models_use_cpu_safe_profile_and_adaptive_startup_timeout():
+    from core.hardware import HardwareInfo, classify_hardware, recommend_model_settings
+
+    profile = classify_hardware(HardwareInfo(
+        total_ram_gb=31.1,
+        cpu_cores=6,
+        cpu_threads=12,
+        gpus=[{"name": "AMD Radeon 760M Graphics", "vendor": "amd", "vramGb": 0.5, "driverVersion": "32.0.21030.2001"}],
+        has_nvidia_smi=False,
+        has_vulkan=True,
+        os_name="Windows",
+        arch="AMD64",
+        cpu_model="AMD Ryzen 5 8600G w/ Radeon 760M Graphics",
+    ))
+    gemma_settings = recommend_model_settings(profile, server.get_model_manifest("gemma4"))
+    assert_true(gemma_settings["runtimeBackend"] == "cpu", "Gemma4 on shared-memory iGPU should not launch with Vulkan preset")
+    assert_true(gemma_settings["nGpuLayers"] == 0, "Gemma4 on shared-memory iGPU should not offload layers")
+    assert_true(gemma_settings["contextWindow"] <= 32768, "Gemma4 on near-minimum RAM should use conservative context")
+    assert_true("--batch-size=128" in gemma_settings["llamaArgs"], "CPU-safe constrained profile should set conservative batch size")
+    assert_true("--ubatch-size=32" in gemma_settings["llamaArgs"], "CPU-safe constrained profile should set conservative ubatch size")
+    assert_true("--no-repack" in gemma_settings["llamaArgs"], "CPU-safe constrained profile should disable CPU_REPACK")
+    assert_true(server.get_model_startup_timeout_seconds("gemma4", gemma_settings, profile) > 420, "large local model startup timeout should scale with real work")
+    qwen35_settings = recommend_model_settings(profile, server.get_model_manifest("qwen35"))
+    assert_true(qwen35_settings["runtimeBackend"] == "cpu", "Qwen 3.5 on shared-memory iGPU should use CPU-safe backend")
+    assert_true("--no-repack" in qwen35_settings["llamaArgs"], "Qwen 3.5 low-memory launch should disable CPU_REPACK")
+
+    model_path = ROOT / ".tmp" / "gemma4-startup-test.gguf"
+    old_query_models = server.query_models
+    old_query_model_props = server.query_model_props
+    old_get_listening_pid = server.get_listening_pid
+    try:
+        server.query_models = lambda port, timeout_sec=2: {"data": [{"id": "gemma4-local"}]}
+        server.query_model_props = lambda port, timeout_sec=2: {
+            "model_path": str(model_path),
+            "default_generation_settings": {"n_ctx": 32768},
+            "modalities": {"vision": True},
+        }
+        server.get_listening_pid = lambda port: None
+        assert_true(
+            server.is_running_model_server_compatible("gemma4", "gemma4-local", 8081, model_path, ROOT / ".tmp" / "mmproj.gguf", 32768),
+            "readiness should validate against the optimized launch context, not the manifest maximum",
+        )
+    finally:
+        server.query_models = old_query_models
+        server.query_model_props = old_query_model_props
+        server.get_listening_pid = old_get_listening_pid
+
+
+def test_model_optimization_plan_covers_hardware_matrix_and_models():
+    from core.hardware import HardwareInfo, build_optimization_plan, classify_hardware
+
+    scenarios = [
+        ("cpu64", HardwareInfo(total_ram_gb=64.0, cpu_cores=8, cpu_threads=16, gpus=[], has_nvidia_smi=False, has_vulkan=False), "cpu", "cpu-only"),
+        ("nvidia8", HardwareInfo(total_ram_gb=64.0, cpu_cores=12, cpu_threads=24, gpus=[{"name": "NVIDIA GeForce RTX 3070", "vendor": "nvidia", "vramGb": 8.0, "driverVersion": "551.1"}], has_nvidia_smi=True, has_vulkan=True), "cuda", "nvidia-vram-8gb"),
+        ("nvidia16", HardwareInfo(total_ram_gb=64.0, cpu_cores=12, cpu_threads=24, gpus=[{"name": "NVIDIA GeForce RTX 4080 Laptop", "vendor": "nvidia", "vramGb": 16.0, "driverVersion": "551.1"}], has_nvidia_smi=True, has_vulkan=True), "cuda", "nvidia-vram-16gb"),
+        ("nvidia24", HardwareInfo(total_ram_gb=96.0, cpu_cores=16, cpu_threads=32, gpus=[{"name": "NVIDIA GeForce RTX 4090", "vendor": "nvidia", "vramGb": 24.0, "driverVersion": "551.1"}], has_nvidia_smi=True, has_vulkan=True), "cuda", "nvidia-vram-24gb"),
+        ("nvidia36", HardwareInfo(total_ram_gb=128.0, cpu_cores=24, cpu_threads=48, gpus=[{"name": "NVIDIA RTX 6000 Ada", "vendor": "nvidia", "vramGb": 36.0, "driverVersion": "551.1"}], has_nvidia_smi=True, has_vulkan=True), "cuda", "nvidia-vram-36gb"),
+        ("nvidia48", HardwareInfo(total_ram_gb=192.0, cpu_cores=32, cpu_threads=64, gpus=[{"name": "NVIDIA RTX 6000 Ada", "vendor": "nvidia", "vramGb": 48.0, "driverVersion": "551.1"}], has_nvidia_smi=True, has_vulkan=True), "cuda", "nvidia-vram-48gb-plus"),
+        ("macmini32", HardwareInfo(total_ram_gb=32.0, cpu_cores=8, cpu_threads=8, gpus=[{"name": "Apple M2", "vendor": "apple", "vramGb": 0.0}], has_nvidia_smi=False, has_vulkan=False, os_name="Darwin", arch="arm64", machine_type="mac-mini"), "metal", "apple-silicon-unified"),
+    ]
+    for label, info, expected_backend, expected_class in scenarios:
+        profile = classify_hardware(info)
+        assert_true(profile["hardwareClass"] == expected_class, f"{label} should expose the expected hardware class")
+        for model_key in server.SUPPORTED_MODEL_KEYS:
+            plan = build_optimization_plan(profile, model_key, server.get_model_manifest(model_key))
+            assert_true(plan["runtimeBackend"] == expected_backend, f"{label}/{model_key} should use expected backend")
+            for field in ("contextWindow", "nGpuLayers", "threads", "batchSize", "ubatchSize", "cacheTypeK", "cacheTypeV", "fitLevel", "warnings", "reason", "profileMatch", "measuredPerformance"):
+                assert_true(field in plan, f"{model_key} optimizationPlan should include {field}")
+            if expected_class == "apple-silicon-unified":
+                assert_true(any("Metal" in item or "metal" in item for item in plan["warnings"]), "Apple Silicon preset should mention Metal runtime status")
+
+
+def test_hardware_model_profile_match_prefers_measured_settings():
+    old_profiles_path = server.HARDWARE_MODEL_PROFILES_PATH
+    old_perf_path = server.MODEL_PERFORMANCE_CALIBRATION_PATH
+    temp_dir = ROOT / ".tmp" / f"regression-hardware-profiles-{uuid.uuid4().hex}"
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        server.HARDWARE_MODEL_PROFILES_PATH = temp_dir / "hardware-model-profiles.json"
+        server.MODEL_PERFORMANCE_CALIBRATION_PATH = temp_dir / "model-performance-calibration.json"
+        profile = {
+            "profile": "high",
+            "totalRamGb": 64,
+            "cpuThreads": 24,
+            "gpus": [{"name": "NVIDIA GeForce RTX 3070", "vendor": "nvidia", "vramGb": 8, "driverVersion": "551.1"}],
+            "gpuVendors": ["nvidia"],
+            "maxVramGb": 8,
+            "hasNvidiaSmi": True,
+            "hasVulkan": True,
+            "hardwareClass": "nvidia-vram-8gb",
+            "ramBucketGb": 64,
+            "vramBucketGb": 8,
+            "osName": "Windows",
+            "arch": "AMD64",
+            "cpuModel": "Ryzen",
+        }
+        plan = server.get_model_optimization_plan("qwen36a3b", profile)
+        plan["contextWindow"] = 32768
+        plan["nGpuLayers"] = 123
+        result = server.record_model_performance_result(
+            "qwen36a3b",
+            profile,
+            plan,
+            {"ok": True, "startupSeconds": 1.2, "replySeconds": 2.3, "charsPerSecond": 9.5},
+            model_path=ROOT / ".tmp" / "fake-qwen36.gguf",
+            runtime_path=ROOT / "runtime" / "llama.cpp" / "llama-server.exe",
+        )
+        assert_true(result["profileMatch"]["level"] == "exact", "recorded profile should be exact for the same hardware/model/runtime")
+        stored = json.loads(server.HARDWARE_MODEL_PROFILES_PATH.read_text(encoding="utf-8"))
+        assert_true(stored.get("profiles"), "performance test should write hardware-model-profiles.json")
+        matched = server.get_model_optimization_plan(
+            "qwen36a3b",
+            {**profile, "gpus": [{**profile["gpus"][0]}]},
+            model_path=ROOT / ".tmp" / "fake-qwen36.gguf",
+            runtime_path=ROOT / "runtime" / "llama.cpp" / "llama-server.exe",
+        )
+        assert_true(matched["profileMatch"]["level"] == "exact", "same hardware/model/runtime should reuse exact measured profile")
+        assert_true(matched["source"] == "measured-local", "exact profile should be marked as measured local")
+        assert_true(matched["nGpuLayers"] == 123, "measured launch setting should override the preset")
+        compatible = server.get_model_optimization_plan(
+            "qwen36a3b",
+            {**profile, "gpus": [{**profile["gpus"][0], "driverVersion": "552.0"}]},
+            model_path=ROOT / ".tmp" / "fake-qwen36.gguf",
+            runtime_path=ROOT / "runtime" / "llama.cpp" / "llama-server.exe",
+        )
+        assert_true(compatible["profileMatch"]["level"] == "compatible", "same bucket with changed driver should be compatible")
+        different_vram = server.get_model_optimization_plan(
+            "qwen36a3b",
+            {**profile, "maxVramGb": 16, "vramBucketGb": 16, "hardwareClass": "nvidia-vram-16gb"},
+            model_path=ROOT / ".tmp" / "fake-qwen36.gguf",
+            runtime_path=ROOT / "runtime" / "llama.cpp" / "llama-server.exe",
+        )
+        assert_true(different_vram["profileMatch"]["level"] == "preset", "different VRAM bucket must not reuse old profile")
+    finally:
+        server.HARDWARE_MODEL_PROFILES_PATH = old_profiles_path
+        server.MODEL_PERFORMANCE_CALIBRATION_PATH = old_perf_path
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_models_api_and_ui_expose_optimization_plan_and_performance_test():
+    payload = server.get_models_payload()
+    for key, model in payload["models"].items():
+        plan = model.get("optimizationPlan")
+        assert_true(isinstance(plan, dict), f"{key} should expose optimizationPlan")
+        assert_true(plan.get("profileMatch", {}).get("level") in {"exact", "compatible", "preset"}, f"{key} should expose profile match level")
+        assert_true("measuredPerformance" in plan, f"{key} should expose measured performance state")
+    status = server.get_status_payload()
+    assert_true(isinstance(status.get("optimizationPlan"), dict), "/api/status should expose selected model optimization plan")
+    server_source = (ROOT / "webui" / "server.py").read_text(encoding="utf-8")
+    assert_true('/api/hardware/optimization' in server_source, "server should expose hardware optimization endpoint")
+    assert_true('/api/models/performance-test' in server_source, "server should expose model performance test endpoint")
+    ui_html = (ROOT / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    ui_js = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "webui" / "static" / "js").glob("*.js"))
+    assert_true('id="modelPerformanceTestBtn"' in ui_html, "UI should expose a model performance test button")
+    assert_true("refreshHardwareOptimization" in ui_js, "UI should refresh optimization when status/model state changes")
+    assert_true("profileMatch" in ui_js and "optimizationPlan" in ui_js, "UI should render profile match and optimization plan details")
+
+
+def test_edit_safety_allows_new_declared_csharp_locals():
+    before_snippet = """private void DrawCell(Graphics g, int gridX, int gridY, Color color)
+        {
+            Rectangle rect = new(
+                LeftPadding + gridX * CellSize + 1,
+                TopPadding + gridY * CellSize + 1,
+                CellSize - 2,
+                CellSize - 2);
+
+            using LinearGradientBrush brush = new(rect, ControlPaint.Light(color), color, 45f);
+            g.FillRectangle(brush, rect);
+            using Pen border = new(ControlPaint.Dark(color));
+            g.DrawRectangle(border, rect);
+        }"""
+    after_snippet = """private void DrawCell(Graphics g, int gridX, int gridY, Color color)
+        {
+            Rectangle rect = new(
+                LeftPadding + gridX * CellSize + 1,
+                TopPadding + gridY * CellSize + 1,
+                CellSize - 2,
+                CellSize - 2);
+
+            using LinearGradientBrush baseBrush = new(rect, color, ControlPaint.Light(color), 90f);
+            g.FillRectangle(baseBrush, rect);
+
+            Rectangle highlightRect = new(rect.X, rect.Y, rect.Width, rect.Height / 2);
+            using LinearGradientBrush highlightBrush = new(highlightRect, Color.FromArgb(120, Color.White), Color.FromArgb(0, Color.White), 90f);
+            g.FillRectangle(highlightBrush, highlightRect);
+
+            using Pen glassBorder = new(Color.FromArgb(180, Color.White), 1.5f);
+            g.DrawRectangle(glassBorder, rect);
+        }"""
+    issues = server.collect_edit_safety_issues(before_snippet, after_snippet, before_snippet, "增加水晶光澤效果")
+    assert_true(not issues, f"declared C# locals in replacement snippets should not be treated as unknown identifiers: {issues}")
+
+
+def test_edit_identifier_concerns_are_soft_and_language_broad():
+    before_snippet = "function renderTitle(title) {\n  return title;\n}\n"
+    after_snippet = (
+        "function renderTitle(title) {\n"
+        "  const label = formatTitle(title);\n"
+        "  let suffix = \"!\";\n"
+        "  return label + suffix + unknownHelper(title);\n"
+        "}\n"
+    )
+    hard_issues = server.collect_edit_safety_issues(before_snippet, after_snippet, before_snippet, "更新標題")
+    concerns = server.collect_edit_semantic_concerns(before_snippet, after_snippet, before_snippet, "更新標題")
+    assert_true(not hard_issues, "new identifiers should not be deterministic hard failures unless explicitly forbidden")
+    concern_text = json.dumps(concerns, ensure_ascii=False)
+    assert_true("unknownHelper" in concern_text, "truly unknown identifiers should become soft semantic concerns")
+    assert_true("label" not in concern_text and "suffix" not in concern_text, "JS/TS local declarations should be recognized broadly")
+
+    python_after = (
+        "def render_title(title):\n"
+        "    label = format_title(title)\n"
+        "    for part in parts:\n"
+        "        label += part\n"
+        "    return label\n"
+    )
+    python_concerns = server.collect_edit_semantic_concerns("def render_title(title):\n    return title\n", python_after, "", "更新標題")
+    python_unknowns = {
+        identifier
+        for concern in python_concerns
+        for identifier in concern.get("identifiers", [])
+    }
+    assert_true("label" not in python_unknowns and "part" not in python_unknowns, "Python assignment and loop locals should be recognized")
+
+
+def test_edit_identifier_concerns_cover_vb_delphi_cpp_and_html_locals():
+    cases = [
+        (
+            "VB",
+            "Private Function RenderTitle(title As String) As String\n    Return title\nEnd Function\n",
+            "Private Function RenderTitle(title As String) As String\n    Dim label As String = FormatTitle(title)\n    Dim index As Integer = 0\n    For Each part As String In parts\n        label &= part\n    Next\n    Return label\nEnd Function\n",
+            {"label", "index", "part"},
+        ),
+        (
+            "Delphi",
+            "function RenderTitle(const Title: string): string;\nbegin\n  Result := Title;\nend;\n",
+            "function RenderTitle(const Title: string): string;\nvar\n  LabelText: string;\n  I: Integer;\nbegin\n  LabelText := FormatTitle(Title);\n  for I := 0 to 3 do\n    LabelText := LabelText + IntToStr(I);\n  Result := LabelText;\nend;\n",
+            {"LabelText", "I"},
+        ),
+        (
+            "C++",
+            "std::string renderTitle(const std::string& title) {\n    return title;\n}\n",
+            "std::string renderTitle(const std::string& title) {\n    auto label = formatTitle(title);\n    std::vector<int> indexes;\n    size_t index = 0;\n    for (const auto& part : parts) {\n        label += part;\n    }\n    return label;\n}\n",
+            {"label", "indexes", "index", "part"},
+        ),
+        (
+            "HTML",
+            "<div class=\"title\">Old</div>\n",
+            "<div class=\"title\" data-title=\"newTitle\">\n  <span id=\"labelText\">New</span>\n  <script>\n    const labelText = document.getElementById('labelText');\n    let highlightClass = 'active';\n  </script>\n</div>\n",
+            {"labelText", "highlightClass"},
+        ),
+    ]
+    for language, before_snippet, after_snippet, expected_locals in cases:
+        concerns = server.collect_edit_semantic_concerns(before_snippet, after_snippet, before_snippet, f"更新 {language} 顯示")
+        unknowns = {
+            identifier
+            for concern in concerns
+            for identifier in concern.get("identifiers", [])
+        }
+        missing = expected_locals.intersection(unknowns)
+        assert_true(not missing, f"{language} local declarations should not be treated as unknown identifiers: {sorted(missing)}; concerns={concerns}")
+
+
+def test_semantic_verifier_can_allow_soft_identifier_concerns():
+    concerns = [{"kind": "unknownIdentifier", "identifiers": ["unknownHelper"], "message": "unknownHelper needs semantic validation"}]
+    original_call_local_model = server.call_local_model
+    captured = {}
+    try:
+        def fake_call_local_model(model_alias, messages, **kwargs):
+            captured["modelAlias"] = model_alias
+            captured["messages"] = messages
+            return json.dumps({
+                "verdict": "pass",
+                "compileRisk": "low",
+                "newIdentifiers": [
+                    {"name": "unknownHelper", "classification": "existing-symbol", "reason": "provided by imported module"}
+                ],
+                "reason": "identifier is acceptable in context",
+            }, ensure_ascii=False)
+
+        server.call_local_model = fake_call_local_model
+        result = server.validate_edit_semantics_with_model(
+            model_alias="qwen35-local",
+            model_key="qwen35",
+            path="Program.ts",
+            before_snippet="return title;",
+            after_snippet="const label = unknownHelper(title);\nreturn label;",
+            full_content="function render(title) { return title; }",
+            message="更新標題",
+            concerns=concerns,
+        )
+        assert_true(result["verdict"] == "pass", "semantic verifier pass should be accepted")
+        assert_true(captured["modelAlias"] == "qwen35-local", "semantic verifier should use the selected model")
+        prompt = "\n".join(str(message.get("content", "")) for message in captured["messages"])
+        assert_true("unknownHelper" in prompt and "JSON" in prompt, "semantic verifier prompt should include concerns and require JSON")
+    finally:
+        server.call_local_model = original_call_local_model
+
+
+def test_precise_plan_uses_semantic_verifier_before_advisory_fallback():
+    root = ROOT / ".tmp" / f"regression-edit-semantic-verifier-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Program.ts"
+    source.write_text("function render(title: string) {\n  return title;\n}\n", encoding="utf-8")
+    original_call_local_model = server.call_local_model
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen35",
+            model_alias="qwen35-local",
+            files=[server.ProjectFile(path="Program.ts", size=source.stat().st_size, language="TypeScript")],
+            tree=["Program.ts"],
+            pinned_files=["Program.ts"],
+            ui_state="ready",
+        )
+        calls = {"count": 0}
+
+        def fake_call_local_model(*_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return json.dumps({
+                    "summary": "更新 render",
+                    "needMoreContext": [],
+                    "edits": [
+                        {
+                            "path": "Program.ts",
+                            "target": "render",
+                            "reason": "測試 soft semantic verifier",
+                            "notes": [],
+                            "operations": [
+                                {
+                                    "search": "  return title;",
+                                    "replace": "  const label = unknownHelper(title);\n  return label;",
+                                }
+                            ],
+                        }
+                    ],
+                }, ensure_ascii=False)
+            return json.dumps({"verdict": "pass", "compileRisk": "low", "newIdentifiers": [], "reason": "acceptable"}, ensure_ascii=False)
+
+        server.call_local_model = fake_call_local_model
+        plan = server.create_edit_plan(root, state, "更新 render 顯示")
+        assert_true(plan["mode"] == "precise", "semantic verifier pass should allow precise mode")
+        assert_true(plan["actions"], "semantic verifier pass should still create applyable actions")
+        assert_true(calls["count"] == 2, "soft identifier concerns should trigger exactly one semantic verifier call")
+    finally:
+        server.call_local_model = original_call_local_model
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_precise_plan_semantic_verifier_fail_returns_unverified_advisory():
+    root = ROOT / ".tmp" / f"regression-edit-semantic-verifier-fail-{uuid.uuid4().hex}"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "Program.ts"
+    source.write_text("function render(title: string) {\n  return title;\n}\n", encoding="utf-8")
+    original_call_local_model = server.call_local_model
+    try:
+        state = server.SessionState(
+            project_path=str(root),
+            model_key="qwen35",
+            model_alias="qwen35-local",
+            files=[server.ProjectFile(path="Program.ts", size=source.stat().st_size, language="TypeScript")],
+            tree=["Program.ts"],
+            pinned_files=["Program.ts"],
+            ui_state="ready",
+        )
+        calls = {"count": 0}
+
+        def fake_call_local_model(*_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return json.dumps({
+                    "summary": "更新 render",
+                    "needMoreContext": [],
+                    "edits": [
+                        {
+                            "path": "Program.ts",
+                            "target": "render",
+                            "reason": "測試 semantic fail",
+                            "notes": [],
+                            "operations": [
+                                {
+                                    "search": "  return title;",
+                                    "replace": "  return definitelyMissing(title);",
+                                }
+                            ],
+                        }
+                    ],
+                }, ensure_ascii=False)
+            if calls["count"] == 2:
+                return json.dumps({
+                    "verdict": "fail",
+                    "compileRisk": "high",
+                    "newIdentifiers": [
+                        {"name": "definitelyMissing", "classification": "missing", "reason": "no declaration or import"}
+                    ],
+                    "reason": "definitelyMissing is not declared",
+                }, ensure_ascii=False)
+            return json.dumps({
+                "summary": "語意驗證失敗後的文字建議",
+                "needMoreContext": [],
+                "suggestions": [
+                    {
+                        "path": "Program.ts",
+                        "target": "render",
+                        "whyHere": "render 產生標題",
+                        "before": "  return title;",
+                        "after": "  return definitelyMissing(title);",
+                        "notes": [],
+                    }
+                ],
+            }, ensure_ascii=False)
+
+        server.call_local_model = fake_call_local_model
+        plan = server.create_edit_plan(root, state, "更新 render 顯示")
+        assert_true(plan["mode"] == "advisory", "semantic verifier fail should not create precise actions")
+        assert_true(plan["suggestions"][0]["verified"] is False, "semantic verifier fail should return unverified advisory")
+        assert_true("語意驗證" in plan["failureReason"], "failure reason should explain semantic validation failure")
+    finally:
+        server.call_local_model = original_call_local_model
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_llama_launcher_accepts_auto_hardware_args():
@@ -470,15 +1035,19 @@ def test_llama_launcher_accepts_auto_hardware_args():
     assert_true('parser.add_argument("--batch-size"' in source, "launcher should accept tuned logical batch size")
     assert_true('parser.add_argument("--ubatch-size"' in source, "launcher should accept tuned physical batch size")
     assert_true('parser.add_argument("--mlock"' in source, "launcher should accept model RAM lock")
+    assert_true('parser.add_argument("--no-repack"' in source, "launcher should accept low-memory no-repack mode")
     assert_true('parser.add_argument("--flash-attn"' in source, "launcher should accept --flash-attn")
     assert_true('parser.add_argument("--jinja"' in source, "launcher should accept --jinja")
     assert_true('"--flash-attn", "on"' in source, "launcher should pass an explicit Flash Attention value for current llama.cpp")
     assert_true('"--n-cpu-moe"' in source, "launcher should forward --n-cpu-moe to llama-server")
     assert_true('"--batch-size"' in source, "launcher should forward --batch-size to llama-server")
     assert_true('"--ubatch-size"' in source, "launcher should forward --ubatch-size to llama-server")
+    assert_true('"--no-repack"' in source, "launcher should forward --no-repack to llama-server")
     server_source = (ROOT / "webui" / "server.py").read_text(encoding="utf-8")
     assert_true("append_llama_manifest_args" in server_source, "web server should centrally forward manifest llamaArgs")
     assert_true('"--n-cpu-moe"' in server_source, "web server should allow manifest MoE CPU offload args")
+    assert_true('"--no-repack"' in server_source, "web server should allow low-memory no-repack args")
+    assert_true("read_llama_failure_tail" in server_source, "web server should fail fast when llama.cpp writes a terminal model-load error")
     assert_true('"--n-gpu-layers",\n            "0"' not in source, "launcher must not hard-code CPU-only GPU layers")
     assert_true("[CODEWORKER_LAUNCH_METADATA]" in source, "launcher should write detailed launch metadata into llama-server logs")
 
@@ -3125,6 +3694,7 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true("fileMetaByPath" in js and "formatBytes(size)" in js, "file tree and pinned summary should show pinned file sizes")
     assert_true('id="aiActivity"' in html and 'id="chatBusyBar"' in html, "chat UI should include a visible busy indicator")
     assert_true('id="editPlanBtn"' in html and 'id="gitDiffBtn"' in html and 'id="gitCheckpointBtn"' in html, "chat UI should expose edit plan and Git safety actions")
+    assert_true('id="clearProjectBtn"' in html and "清空選取專案" in html, "project controls should expose a clear selected project action next to analysis")
     assert_true('id="contextCalibrateBtn"' in html and "測試此模型可送出 KB" in html, "chat UI should expose context capacity calibration")
     assert_true('id="projectControlDetails"' in html and 'class="project-control-summary"' in html, "project controls should be collapsible")
     assert_true('class="composer-meta-row"' in html, "composer should keep attachments in a compact metadata row")
@@ -3148,6 +3718,7 @@ def test_static_ui_exposes_file_tree_layout_and_ai_busy_indicator():
     assert_true("未驗證參考片段" in js and "model-unverified" in js, "advisory edit UI should mark unverified model suggestions")
     assert_true("data.plan?.contextCoverage" in js and "修改計畫上下文" in js, "edit plan UI should show context coverage and full/region/window details")
     assert_true("body: JSON.stringify({ message, modelKey })" in js, "edit plan UI should send the currently selected model key")
+    assert_true("/api/project/clear" in js and "clearSelectedProject" in js, "clear selected project UI should call the backend project clear endpoint")
     assert_true("/api/models/context-calibration" in js and "structuredEditChars" in js, "UI should expose measured structured edit budget")
     assert_true("function applyEditPlan" in js and "/api/edit/apply" in js, "UI should apply confirmed edit plans")
     assert_true("plan?.mode !== \"advisory\"" in js, "UI should only expose apply controls for non-advisory pending actions")
@@ -3197,18 +3768,33 @@ def main():
         test_no_context_chat_payload,
         test_request_max_tokens_clamps_to_default,
         test_qwen_request_options_disable_thinking,
+        test_model_key_resolution_prefers_exact_and_longest_prefix,
         test_default_model_uses_last_used_preference,
         test_chat_exchange_persists_last_used_model_preference,
+        test_clear_project_context_preserves_general_chat_state,
         test_edit_plan_flow_uses_requested_model_key,
         test_gemma_context_window_matches_local_bench,
         test_context_calibration_overrides_input_budget_and_model_payload,
         test_context_calibration_runner_targets_selected_model_and_context,
         test_context_benchmark_reuses_existing_compatible_model_server,
+        test_context_measurement_script_uses_current_enabled_models,
         test_start_server_uses_low_memory_model_env_for_qwen36_on_low_vram,
         test_gemma_manifest_uses_unsloth_with_mmproj,
         test_new_model_catalog_exposes_hardware_metadata,
+        test_gemma4e4b_uncensored_manifest_and_resolver,
+        test_qwen36_uncensored_manifest_and_resolver,
         test_hardware_profile_classification_and_recommendations,
         test_qwen36a3b_catalog_targets_8gb_nvidia_moe_offload,
+        test_igpu_large_models_use_cpu_safe_profile_and_adaptive_startup_timeout,
+        test_model_optimization_plan_covers_hardware_matrix_and_models,
+        test_hardware_model_profile_match_prefers_measured_settings,
+        test_models_api_and_ui_expose_optimization_plan_and_performance_test,
+        test_edit_safety_allows_new_declared_csharp_locals,
+        test_edit_identifier_concerns_are_soft_and_language_broad,
+        test_edit_identifier_concerns_cover_vb_delphi_cpp_and_html_locals,
+        test_semantic_verifier_can_allow_soft_identifier_concerns,
+        test_precise_plan_uses_semantic_verifier_before_advisory_fallback,
+        test_precise_plan_semantic_verifier_fail_returns_unverified_advisory,
         test_llama_launcher_accepts_auto_hardware_args,
         test_launch_webui_restarts_stale_codeworker_server,
         test_bootstrap_stops_codeworker_runtime_users_before_winpython_update,

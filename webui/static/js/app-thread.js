@@ -7,6 +7,7 @@ async function refreshStatus() {
   state.modelKey = data.modelKey || "gemma4";
   state.modelCapabilities = data.models || {};
   state.hardwareProfile = data.hardwareProfile || state.hardwareProfile;
+  state.hardwareOptimization = data.optimizationPlan ? { optimizationPlan: data.optimizationPlan } : state.hardwareOptimization;
   state.recommendedModelKey = data.recommendedModelKey || state.recommendedModelKey;
   state.contextOptions = data.contextOptions || state.contextOptions;
   Object.entries(state.modelCapabilities || {}).forEach(([key, model]) => {
@@ -49,14 +50,23 @@ async function refreshStatus() {
   refreshModelStatus().catch(() => {});
 }
 
-async function refreshModelStatus() {
-  if (!elements.modelStatus) return;
-  const data = await requestJson("/api/models");
+async function refreshHardwareOptimization(forceRefresh = false) {
+  const modelKey = elements.modelKey.value || state.modelKey || "gemma4";
+  const query = new URLSearchParams({ modelKey, forceRefresh: forceRefresh ? "1" : "0" });
+  const data = await requestJson(`/api/hardware/optimization?${query.toString()}`);
+  state.hardwareOptimization = data;
   state.modelCapabilities = data.models || state.modelCapabilities;
   state.hardwareProfile = data.hardwareProfile || state.hardwareProfile;
   state.recommendedModelKey = data.recommendedModelKey || state.recommendedModelKey;
   renderModelOptions(state.modelCapabilities);
-  const modelKey = elements.modelKey.value || state.modelKey || data.defaultModelKey || "gemma4";
+  renderHardwareStatus(state.hardwareProfile, data.models?.[modelKey]);
+  return data;
+}
+
+async function refreshModelStatus(forceRefresh = false) {
+  if (!elements.modelStatus) return;
+  const data = await refreshHardwareOptimization(forceRefresh);
+  const modelKey = elements.modelKey.value || state.modelKey || data.selectedModelKey || "gemma4";
   const model = data.models?.[modelKey];
   if (!model) {
     elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${modelKey}`;
@@ -69,7 +79,9 @@ async function refreshModelStatus() {
   renderContextSelector(data.contextOptions || model.contextOptions || state.contextOptions);
   const tier = formatModelTier(model.tier);
   const recommended = model.recommended ? ` · ${state.language === "en" ? "recommended" : "推薦"}` : "";
-  elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${model.displayName || modelKey} · ${tier}${recommended} · ${installed} · ${ready} · port ${model.port || "-"} · ctx ${formatContextWindow(model.selectedContextWindow || model.contextWindow)}`;
+  const plan = model.optimizationPlan || {};
+  const match = formatProfileMatch(plan.profileMatch || {});
+  elements.modelStatus.textContent = `${t("labels.modelStatus")}: ${model.displayName || modelKey} · ${tier}${recommended} · ${installed} · ${ready} · port ${model.port || "-"} · ctx ${formatContextWindow(plan.contextWindow || model.selectedContextWindow || model.contextWindow)} · ${match}`;
   renderHardwareStatus(state.hardwareProfile, model);
 }
 
@@ -134,6 +146,52 @@ async function calibrateSelectedModelContext() {
   } catch (error) {
     showError(normalizeError(error, "MODEL_CONTEXT_CALIBRATION_FAILED", state.language === "en" ? "Context capacity measurement failed." : "Context 容量實測失敗。"));
     setStatus(state.language === "en" ? "Context measurement failed" : "Context 實測失敗");
+  } finally {
+    if (button) button.disabled = false;
+    setAiBusy(false);
+  }
+}
+
+async function testSelectedModelPerformance() {
+  const modelKey = elements.modelKey.value || state.modelKey || "gemma4";
+  const button = elements.modelPerformanceTestBtn;
+  if (button) button.disabled = true;
+  setStatus(state.language === "en" ? "Testing model performance" : "正在測試目前模型效能", true);
+  setAiBusy(true, state.language === "en" ? "Testing local model performance" : "正在實測本機模型效能");
+  try {
+    const data = await requestJson("/api/models/performance-test", {
+      method: "POST",
+      body: JSON.stringify({ modelKey }),
+    });
+    state.hardwareOptimization = data;
+    state.modelCapabilities = data.models || state.modelCapabilities;
+    state.hardwareProfile = data.hardwareProfile || state.hardwareProfile;
+    const perf = data.performance || {};
+    appendToolCard({
+      kind: "status-performance",
+      title: state.language === "en" ? "Model performance measured" : "模型效能實測",
+      html: `
+        <section class="transcript-tool-section">
+          <div class="tool-card-head">
+            <strong>${escapeHtml(state.language === "en" ? "Model performance measured" : "模型效能實測")}</strong>
+            <span class="badge">${escapeHtml(modelKey)}</span>
+          </div>
+          <div class="tool-card-body">
+            <div>${escapeHtml(state.language === "en" ? "Result" : "結果")}：${escapeHtml(perf.ok ? (state.language === "en" ? "ok" : "成功") : (state.language === "en" ? "failed" : "失敗"))}</div>
+            <div>${escapeHtml(state.language === "en" ? "Startup" : "啟動")}：${escapeHtml(Number(perf.startupSeconds || 0).toFixed(1))}s</div>
+            <div>${escapeHtml(state.language === "en" ? "Reply" : "回應")}：${escapeHtml(Number(perf.replySeconds || 0).toFixed(1))}s · ${escapeHtml(Number(perf.charsPerSecond || 0).toFixed(1))} chars/s</div>
+            <div>${escapeHtml(state.language === "en" ? "Profile match" : "匹配設定檔")}：${escapeHtml(formatProfileMatch(data.optimizationPlan?.profileMatch || {}))}</div>
+            ${perf.error ? `<div class="warning-text">${escapeHtml(perf.error)}</div>` : ""}
+          </div>
+        </section>
+      `,
+    });
+    renderModelOptions(state.modelCapabilities);
+    await refreshModelStatus(true);
+    setStatus(state.language === "en" ? "Model performance measured" : "模型效能實測完成");
+  } catch (error) {
+    showError(normalizeError(error, "MODEL_PERFORMANCE_TEST_FAILED", state.language === "en" ? "Model performance test failed." : "模型效能實測失敗。"));
+    setStatus(state.language === "en" ? "Performance test failed" : "效能實測失敗");
   } finally {
     if (button) button.disabled = false;
     setAiBusy(false);

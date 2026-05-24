@@ -30,6 +30,7 @@ def main() -> int:
     parser.add_argument("--flash-attn", action="store_true")
     parser.add_argument("--jinja", action="store_true")
     parser.add_argument("--mlock", action="store_true")
+    parser.add_argument("--no-repack", action="store_true")
     parser.add_argument("--log", required=True)
     parser.add_argument("--err", required=True)
     args = parser.parse_args()
@@ -77,6 +78,8 @@ def main() -> int:
             command.append("--jinja")
         if args.mlock:
             command.append("--mlock")
+        if args.no_repack:
+            command.append("--no-repack")
         if args.n_cpu_moe:
             command.extend(["--n-cpu-moe", str(args.n_cpu_moe)])
         if args.batch_size:
@@ -116,6 +119,7 @@ def main() -> int:
             "flashAttn": bool(args.flash_attn),
             "jinja": bool(args.jinja),
             "mlock": bool(args.mlock),
+            "noRepack": bool(args.no_repack),
             "cacheTypeK": str(args.cache_type_k or ""),
             "cacheTypeV": str(args.cache_type_v or ""),
             "command": command,

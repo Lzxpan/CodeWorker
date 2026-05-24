@@ -184,6 +184,106 @@
       "topK": 40,
       "note": "Qwen3.6 35B A3B multimodal GGUF tuned for 8GB NVIDIA GPUs by keeping MoE weights on CPU/RAM while offloading non-MoE layers with CUDA."
     },
+    "gemma4e4buncensored": {
+      "enabled": true,
+      "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
+      "repo": "HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
+      "modelId": "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
+      "alias": "gemma4e4buncensored-local",
+      "displayName": "Gemma 4 E4B Uncensored Q6",
+      "port": 8088,
+      "contextWindow": 32768,
+      "cacheTypeK": "q4_0",
+      "cacheTypeV": "q4_0",
+      "defaultQuant": "Q6_K_P",
+      "filePattern": "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf",
+      "filePatterns": [
+        "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf"
+      ],
+      "mmprojPatterns": [
+        "mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+      ],
+      "targetDir": "models/gemma4-e4b-uncensored-hauhaucs-q6-k-p",
+      "tier": "low",
+      "estimatedModelSizeGb": 6.9,
+      "minRamGb": 16,
+      "recommendedRamGb": 24,
+      "contextOptions": [
+        8192,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "llamaArgs": [
+        "--jinja"
+      ],
+      "autoDownload": false,
+      "supportsImages": true,
+      "compactImageContext": true,
+      "temperature": 1.0,
+      "topP": 0.95,
+      "topK": 64,
+      "note": "HauhauCS Gemma 4 E4B uncensored Q6_K_P GGUF. Vision/audio requires the bundled mmproj file and llama.cpp --jinja chat-template handling."
+    },
+    "qwen36uncensored": {
+      "enabled": true,
+      "provider": "huggingface",
+      "serviceProvider": "llama.cpp",
+      "repo": "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive",
+      "modelId": "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive",
+      "alias": "qwen36uncensored-local",
+      "displayName": "Qwen3.6-35B-A3B Uncensored IQ2_M",
+      "port": 8089,
+      "contextWindow": 32768,
+      "cacheTypeK": "q4_0",
+      "cacheTypeV": "q4_0",
+      "nGpuLayers": 999,
+      "defaultQuant": "IQ2_M",
+      "filePattern": "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf",
+      "filePatterns": [
+        "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf"
+      ],
+      "mmprojPatterns": [
+        "mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+      ],
+      "targetDir": "models/qwen3.6-35b-a3b-uncensored-hauhaucs-iq2-m",
+      "tier": "standard",
+      "estimatedModelSizeGb": 11.7,
+      "minRamGb": 32,
+      "recommendedRamGb": 48,
+      "lowVramContextWindow": 32768,
+      "contextOptions": [
+        8192,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "llamaArgs": [
+        "--flash-attn",
+        "--jinja",
+        "--n-cpu-moe=999",
+        "--batch-size=512",
+        "--ubatch-size=128"
+      ],
+      "lowMemoryLlamaArgs": [
+        "--flash-attn",
+        "--jinja",
+        "--n-cpu-moe=999",
+        "--batch-size=128",
+        "--ubatch-size=32",
+        "--no-repack"
+      ],
+      "autoDownload": false,
+      "supportsImages": true,
+      "compactImageContext": true,
+      "temperature": 0.7,
+      "topP": 0.8,
+      "topK": 20,
+      "note": "HauhauCS Qwen3.6-35B-A3B uncensored aggressive IQ2_M GGUF selected for 6GB/8GB-class machines. Vision support requires the matching mmproj file and --jinja."
+    },
     "qwen3coder30b": {
       "enabled": true,
       "provider": "huggingface",

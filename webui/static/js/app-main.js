@@ -21,11 +21,13 @@ elements.modelKey.addEventListener("change", () => {
   state.modelKey = elements.modelKey.value || state.modelKey;
   renderContextSelector();
   renderHardwareStatus();
-  refreshModelStatus().catch(() => {});
+  refreshModelStatus(true).catch(() => {});
 });
 elements.contextWindowSelect?.addEventListener("change", updateSelectedContext);
 elements.contextCalibrateBtn?.addEventListener("click", calibrateSelectedModelContext);
+elements.modelPerformanceTestBtn?.addEventListener("click", testSelectedModelPerformance);
 elements.analyzeBtn.addEventListener("click", analyzeProject);
+elements.clearProjectBtn?.addEventListener("click", clearSelectedProject);
 elements.refreshStatusBtn.addEventListener("click", refreshStatus);
 elements.codeGraphUsePromptBtn?.addEventListener("click", () => queryCodeGraph());
 elements.codeGraphRebuildBtn?.addEventListener("click", rebuildCodeGraphIndex);
@@ -81,7 +83,7 @@ window.CodeWorker = Object.assign(window.CodeWorker || {}, {
   ui: { setStatus, setAiBusy, setUiState, renderProgress, renderContextCoverage, showError, clearError, startChatAutoScroll, maintainChatAutoScroll, appendLiveMessage, appendLiveText },
   tree: { renderTree, loadFileTree, renderVirtualTreeWindow },
   thread: { loadThreads, newThread, selectThread, renameThread, deleteThread },
-  chat: { sendChat, streamChat, analyzeProject, renderProjectStructure, pinStructureRecommendedFiles, generateEditPlan, applyEditPlan, showGitDiff, createGitCheckpoint, restoreEditCheckpoint },
+  chat: { sendChat, streamChat, analyzeProject, clearSelectedProject, renderProjectStructure, pinStructureRecommendedFiles, generateEditPlan, applyEditPlan, showGitDiff, createGitCheckpoint, restoreEditCheckpoint },
   codegraph: { queryCodeGraph, rebuildCodeGraphIndex, pinCodeGraphFiles, renderCodeGraphResults },
 });
 

@@ -30,6 +30,9 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+WEBUI_DIR = ROOT_DIR / "webui"
+if str(WEBUI_DIR) not in sys.path:
+    sys.path.insert(0, str(WEBUI_DIR))
 START_SERVER = ROOT_DIR / "scripts" / "start-server.cmd"
 GAME_DIR = Path(r"C:\Games")
 try:
@@ -119,9 +122,11 @@ def kill_bench_ports() -> None:
 
 
 def request_chat(port: int, model: str, messages, max_tokens: int, timeout: int = 180):
+    request_options = {}
     try:
         from webui import server as web_server  # type: ignore
         prepared = web_server.prepare_messages_for_model(model, messages)
+        request_options = web_server.get_model_request_options(model)
     except Exception:
         prepared = messages
     payload = json.dumps(
@@ -131,7 +136,7 @@ def request_chat(port: int, model: str, messages, max_tokens: int, timeout: int 
             "temperature": 0.2,
             "stream": False,
             "max_tokens": max_tokens,
-            **({"chat_template_kwargs": {"enable_thinking": False}} if str(model).startswith("qwen") else {}),
+            **request_options,
         },
         ensure_ascii=False,
     ).encode("utf-8")

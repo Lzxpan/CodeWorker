@@ -11,6 +11,7 @@ const elements = {
   projectControlSummaryMeta: document.getElementById("projectControlSummaryMeta"),
   openProjectBtn: document.getElementById("openProjectBtn"),
   analyzeBtn: document.getElementById("analyzeBtn"),
+  clearProjectBtn: document.getElementById("clearProjectBtn"),
   firstRunHint: document.getElementById("firstRunHint"),
   sidebarStatusDetails: document.getElementById("sidebarStatusDetails"),
   sidebarStatusSummary: document.querySelector("#sidebarStatusDetails summary"),
@@ -48,6 +49,7 @@ const elements = {
   contextWindowLabel: document.getElementById("contextWindowLabel"),
   contextWindowSelect: document.getElementById("contextWindowSelect"),
   contextCalibrateBtn: document.getElementById("contextCalibrateBtn"),
+  modelPerformanceTestBtn: document.getElementById("modelPerformanceTestBtn"),
   editPlanBtn: document.getElementById("editPlanBtn"),
   gitDiffBtn: document.getElementById("gitDiffBtn"),
   gitCheckpointBtn: document.getElementById("gitCheckpointBtn"),
@@ -510,6 +512,7 @@ function setUiState(nextState) {
   elements.modelKey.disabled = opening;
   elements.projectPath.disabled = opening;
   elements.analyzeBtn.disabled = !ready || busy;
+  if (elements.clearProjectBtn) elements.clearProjectBtn.disabled = opening || busy || !state.projectPath;
   if (elements.editPlanBtn) elements.editPlanBtn.disabled = !ready || busy;
   if (elements.gitDiffBtn) elements.gitDiffBtn.disabled = !ready || busy;
   if (elements.gitCheckpointBtn) elements.gitCheckpointBtn.disabled = !ready || busy;

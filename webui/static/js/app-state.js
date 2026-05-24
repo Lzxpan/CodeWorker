@@ -6,6 +6,7 @@ const state = {
   appName: "",
   modelCapabilities: {},
   hardwareProfile: null,
+  hardwareOptimization: null,
   recommendedModelKey: "",
   modelContextByKey: { gemma4: 262144, qwen35: 262144 },
   contextOptions: [
@@ -61,8 +62,8 @@ const state = {
 const I18N = {
   "zh-Hant": {
     htmlLang: "zh-Hant",
-    pageTitle: "CodeWorker V1.02.000 Web UI",
-    brandTitle: "CodeWorker V1.02.000",
+    pageTitle: "CodeWorker V1.02.001 Web UI",
+    brandTitle: "CodeWorker V1.02.001",
     brandSubtitle: "本地離線專案分析與對話",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -90,6 +91,7 @@ const I18N = {
     buttons: {
       openProject: "開啟專案",
       analyzeProject: "分析專案檔案結構",
+      clearProject: "清空選取專案",
       redownloadModel: "重新下載模型",
       dismiss: "關閉",
       refresh: "重新整理",
@@ -182,6 +184,9 @@ const I18N = {
       analyzing: "正在分析專案檔案結構",
       analyzeDone: "檔案結構分析完成",
       analyzeFailed: "檔案結構分析失敗",
+      clearingProject: "正在清空選取專案",
+      projectCleared: "已清空專案，可進行一般問答",
+      projectClearFailed: "清空專案失敗",
       openingFolder: "開啟資料夾選取視窗",
       pickFolderFailed: "選擇資料夾失敗",
       openFailed: "開啟失敗",
@@ -225,6 +230,7 @@ const I18N = {
       openProjectFailed: "開啟專案失敗。",
       modelDownloadFailed: "模型重新下載失敗。",
       analyzeFailed: "檔案結構分析失敗。",
+      projectClearFailed: "清空選取專案失敗。",
       fileTreeFailed: "檔案樹讀取失敗。",
       pinFilesFailed: "更新上下文失敗。",
       chatFailed: "對話失敗。",
@@ -245,8 +251,8 @@ const I18N = {
   },
   en: {
     htmlLang: "en",
-    pageTitle: "CodeWorker V1.02.000 Web UI",
-    brandTitle: "CodeWorker V1.02.000",
+    pageTitle: "CodeWorker V1.02.001 Web UI",
+    brandTitle: "CodeWorker V1.02.001",
     brandSubtitle: "Local offline project analysis and chat",
     languageSwitch: { zh: "繁中", en: "EN" },
     labels: {
@@ -274,6 +280,7 @@ const I18N = {
     buttons: {
       openProject: "Open project",
       analyzeProject: "Analyze file structure",
+      clearProject: "Clear selected project",
       redownloadModel: "Redownload model",
       dismiss: "Close",
       refresh: "Refresh",
@@ -366,6 +373,9 @@ const I18N = {
       analyzing: "Analyzing file structure",
       analyzeDone: "File structure analysis complete",
       analyzeFailed: "File structure analysis failed",
+      clearingProject: "Clearing selected project",
+      projectCleared: "Project cleared. General chat is ready",
+      projectClearFailed: "Failed to clear project",
       openingFolder: "Opening folder picker",
       pickFolderFailed: "Folder selection failed",
       openFailed: "Open failed",
@@ -409,6 +419,7 @@ const I18N = {
       openProjectFailed: "Failed to open project.",
       modelDownloadFailed: "Failed to redownload model.",
       analyzeFailed: "File structure analysis failed.",
+      projectClearFailed: "Failed to clear the selected project.",
       fileTreeFailed: "Failed to load file tree.",
       pinFilesFailed: "Failed to update model context.",
       chatFailed: "Chat failed.",
@@ -539,6 +550,24 @@ const HELP_CONTENT = {
         "Click Analyze file structure to show category cards and recommended pins.",
         "Click Pin recommended files to add entrypoints, configs, core source, UI, and tests to context.",
         "After pinning, use normal chat for AI analysis, answers, or code changes.",
+      ],
+    },
+  },
+  "clear-project": {
+    "zh-Hant": {
+      title: "清空選取專案",
+      description: "移除目前對話串綁定的專案上下文，包含專案路徑、摘要、檔案樹、釘選檔案、預覽與待套用修改，讓後續送出改為一般問答。",
+      usage: [
+        "不會清空目前對話歷史，也不會切換模型。",
+        "清空後仍可直接聊天；若要重新使用專案上下文，請重新選擇路徑並按「開啟專案」。",
+      ],
+    },
+    en: {
+      title: "Clear selected project",
+      description: "Remove the project context bound to this thread, including path, summary, file tree, pinned files, preview, and pending edit, so later messages become general chat.",
+      usage: [
+        "This does not clear the current chat history or change the selected model.",
+        "After clearing, you can chat directly. To use project context again, choose a path and click Open project.",
       ],
     },
   },

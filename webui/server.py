@@ -35,6 +35,7 @@ from core.models import (
     public_model_capabilities,
 )
 from core.hardware import (
+    build_optimization_plan,
     choose_recommended_model_key,
     classify_hardware,
     detect_hardware,
@@ -80,7 +81,7 @@ ATTACH_PROJECT_TIMEOUT_SECONDS = 180
 START_SERVER_TIMEOUT_SECONDS = 120
 DEFAULT_MODEL_KEY = "gemma4"
 DEFAULT_MODEL_ALIAS = "gemma4-local"
-DEFAULT_APP_VERSION = "V1.02.000"
+DEFAULT_APP_VERSION = "V1.02.001"
 
 
 def read_app_version() -> str:
@@ -201,6 +202,8 @@ UPLOAD_DIR = ROOT_DIR / ".tmp" / "chat-uploads"
 LOGS_DIR = ROOT_DIR / "logs"
 MODEL_CONTEXT_SELECTIONS_PATH = DATA_DIR / "model-contexts.json"
 MODEL_CONTEXT_CALIBRATION_PATH = DATA_DIR / "model-context-calibration.json"
+MODEL_PERFORMANCE_CALIBRATION_PATH = DATA_DIR / "model-performance-calibration.json"
+HARDWARE_MODEL_PROFILES_PATH = DATA_DIR / "hardware-model-profiles.json"
 MODEL_PREFERENCES_PATH = DATA_DIR / "model-preferences.json"
 THREADS_DIR = DATA_DIR / "chat-threads"
 GENERATED_FILES_DIR = ROOT_DIR / ".tmp" / "generated-files"
@@ -288,6 +291,7 @@ EDIT_PLAN_MODEL_TIMEOUT_SECONDS = {
     "qwen35": 420,
     "qwen36a3b": 900,
     "gemma4": 240,
+    "gemma4e4buncensored": 240,
     "qwen3coder30b": 600,
     "glm46": 600,
 }
@@ -326,6 +330,22 @@ CSHARP_ALLOWED_GLOBAL_IDENTIFIERS = {
     "Keys", "Math", "Color", "Point", "Path", "AppContext", "Form",
     "EventArgs", "KeyEventArgs", "Enumerable", "Array", "Task", "List",
     "Dictionary", "HashSet",
+}
+COMMON_EDIT_RESERVED_IDENTIFIERS = {
+    "and", "as", "auto", "begin", "case", "class", "const", "constructor",
+    "def", "delete", "destructor", "dim", "div", "do", "each", "elif", "end",
+    "endif", "except", "exports", "false", "final", "finally", "for", "foreach",
+    "friend", "from", "function", "global", "if", "implements", "import", "in",
+    "inline", "interface", "is", "let", "module", "namespace", "new", "next",
+    "nil", "none", "not", "nullptr", "or", "out", "override", "private",
+    "protected", "public", "raise", "readonly", "return", "self", "static",
+    "struct", "sub", "template", "then", "this", "true", "try", "type",
+    "typedef", "typename", "union", "unit", "unsafe", "use", "uses", "using",
+    "var", "virtual", "void", "while", "with", "yield",
+    "boolean", "byte", "char", "decimal", "double", "float", "integer",
+    "long", "object", "short", "single", "string", "uint", "ulong",
+    "ushort",
+    "script", "span", "style", "button", "input", "label", "section",
 }
 
 
@@ -413,8 +433,12 @@ class ModelReplyError(RuntimeError):
 
 def get_model_key_from_alias(model_alias: str) -> str:
     lowered = (model_alias or "").lower()
-    for key, config in get_model_configs(ROOT_DIR).items():
-        if lowered == config.alias.lower() or lowered == config.model_id.lower() or lowered.startswith(key):
+    configs = get_model_configs(ROOT_DIR)
+    for key, config in configs.items():
+        if lowered in {key, config.alias.lower(), config.model_id.lower()}:
+            return key
+    for key in sorted(configs.keys(), key=len, reverse=True):
+        if lowered.startswith(key):
             return key
     if lowered.startswith("qwen35"):
         return "qwen35"
@@ -660,6 +684,163 @@ def get_model_context_calibration(model_key: str) -> Dict[str, object]:
     return dict(load_model_context_calibration().get(model_key, {}))
 
 
+def _load_json_dict(path: Path) -> Dict[str, object]:
+    try:
+        if not path.exists():
+            return {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_json_dict(path: Path, payload: Dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_hardware_model_profiles() -> Dict[str, object]:
+    raw = _load_json_dict(HARDWARE_MODEL_PROFILES_PATH)
+    profiles = raw.get("profiles") if isinstance(raw.get("profiles"), list) else []
+    return {
+        "version": int(raw.get("version") or 1),
+        "updatedAt": str(raw.get("updatedAt") or ""),
+        "profiles": [item for item in profiles if isinstance(item, dict)],
+    }
+
+
+def save_hardware_model_profiles(payload: Dict[str, object]) -> None:
+    profiles = payload.get("profiles") if isinstance(payload.get("profiles"), list) else []
+    normalized = {
+        "version": int(payload.get("version") or 1),
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "profiles": [item for item in profiles if isinstance(item, dict)],
+    }
+    _write_json_dict(HARDWARE_MODEL_PROFILES_PATH, normalized)
+
+
+def load_model_performance_calibration() -> Dict[str, object]:
+    raw = _load_json_dict(MODEL_PERFORMANCE_CALIBRATION_PATH)
+    raw.setdefault("version", 1)
+    raw.setdefault("models", {})
+    return raw
+
+
+def save_model_performance_calibration(payload: Dict[str, object]) -> None:
+    payload["version"] = int(payload.get("version") or 1)
+    payload["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    if not isinstance(payload.get("models"), dict):
+        payload["models"] = {}
+    _write_json_dict(MODEL_PERFORMANCE_CALIBRATION_PATH, payload)
+
+
+def _profile_record_id(fingerprint: Dict[str, object]) -> str:
+    return hashlib.sha256(json.dumps(fingerprint, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def get_model_optimization_plan(
+    model_key: str,
+    hardware_profile: Optional[Dict[str, object]] = None,
+    model_path: Optional[Path] = None,
+    runtime_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    model_key = get_model_key_from_alias(model_key)
+    hardware_profile = hardware_profile or get_hardware_profile_payload()
+    manifest = dict(get_model_manifest(model_key))
+    selected_context = get_model_context_limit(model_key)
+    if selected_context:
+        manifest["contextWindow"] = selected_context
+    primary_model_path = model_path
+    if primary_model_path is None:
+        config = get_registry_model_config(ROOT_DIR, model_key)
+        patterns = config.file_patterns if config else [get_model_file_pattern(model_key)]
+        primary_model_path = match_first_model_file(get_model_directory(model_key), patterns)
+    initial = build_optimization_plan(hardware_profile, model_key, manifest)
+    resolved_runtime = runtime_path
+    if resolved_runtime is None:
+        resolved_runtime = resolve_llama_server_for_backend(str(initial.get("runtimeBackend") or "cpu"))
+    return build_optimization_plan(
+        hardware_profile,
+        model_key,
+        manifest,
+        stored_profiles=load_hardware_model_profiles(),
+        model_file_path=primary_model_path or "",
+        runtime_path=resolved_runtime or "",
+    )
+
+
+def record_model_performance_result(
+    model_key: str,
+    hardware_profile: Dict[str, object],
+    optimization_plan: Dict[str, object],
+    performance: Dict[str, object],
+    model_path: Optional[Path] = None,
+    runtime_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    model_key = get_model_key_from_alias(model_key)
+    manifest = dict(get_model_manifest(model_key))
+    selected_context = int(optimization_plan.get("contextWindow") or get_model_context_limit(model_key))
+    if selected_context:
+        manifest["contextWindow"] = selected_context
+    base = build_optimization_plan(hardware_profile, model_key, manifest, model_file_path=model_path or "", runtime_path=runtime_path or "")
+    settings = {
+        "contextWindow": int(optimization_plan.get("contextWindow") or base.get("contextWindow") or 0),
+        "runtimeBackend": str(optimization_plan.get("runtimeBackend") or base.get("runtimeBackend") or "cpu"),
+        "nGpuLayers": int(optimization_plan.get("nGpuLayers") or base.get("nGpuLayers") or 0),
+        "threads": int(optimization_plan.get("threads") or base.get("threads") or os.cpu_count() or 4),
+        "cacheTypeK": str(optimization_plan.get("cacheTypeK") or base.get("cacheTypeK") or ""),
+        "cacheTypeV": str(optimization_plan.get("cacheTypeV") or base.get("cacheTypeV") or ""),
+        "llamaArgs": list(optimization_plan.get("llamaArgs") or base.get("llamaArgs") or []),
+    }
+    fingerprint_plan = build_optimization_plan(
+        hardware_profile,
+        model_key,
+        manifest,
+        model_file_path=model_path or "",
+        runtime_path=runtime_path or "",
+    )
+    fingerprint = dict(fingerprint_plan.get("fingerprint") or {})
+    fingerprint.update({
+        "runtimeBackend": settings["runtimeBackend"],
+        "contextWindow": settings["contextWindow"],
+        "cacheTypeK": settings["cacheTypeK"],
+        "cacheTypeV": settings["cacheTypeV"],
+    })
+    measured_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    record = {
+        "id": _profile_record_id(fingerprint),
+        "measuredAt": measured_at,
+        "fingerprint": fingerprint,
+        "settings": settings,
+        "performance": dict(performance),
+    }
+    profile_payload = load_hardware_model_profiles()
+    profiles = [
+        item for item in profile_payload.get("profiles", [])
+        if isinstance(item, dict) and str(item.get("id") or "") != record["id"]
+    ]
+    profiles.insert(0, record)
+    profile_payload["profiles"] = profiles[:80]
+    save_hardware_model_profiles(profile_payload)
+
+    perf_payload = load_model_performance_calibration()
+    models = perf_payload.get("models") if isinstance(perf_payload.get("models"), dict) else {}
+    existing = models.get(model_key) if isinstance(models.get(model_key), dict) else {}
+    results = existing.get("results") if isinstance(existing.get("results"), list) else []
+    results.insert(0, {"measuredAt": measured_at, "profileId": record["id"], **dict(performance)})
+    models[model_key] = {
+        "lastMeasuredAt": measured_at,
+        "lastProfileId": record["id"],
+        "lastResult": dict(performance),
+        "results": results[:20],
+    }
+    perf_payload["models"] = models
+    save_model_performance_calibration(perf_payload)
+
+    matched = get_model_optimization_plan(model_key, hardware_profile, model_path=model_path, runtime_path=runtime_path)
+    return {**record, "profileMatch": matched.get("profileMatch", {})}
+
+
 def normalize_calibration_contexts(model_key: str, requested_contexts: object = None) -> List[int]:
     allowed = set(get_model_context_option_values(model_key)) | {4096, 8192, 16384, 32768}
     if isinstance(requested_contexts, list) and requested_contexts:
@@ -853,7 +1034,8 @@ def get_model_generation_options(model_key: str) -> Dict[str, object]:
 
 
 def get_model_request_options(model_key: str) -> Dict[str, object]:
-    if str(model_key or "").lower().startswith("qwen"):
+    normalized = str(model_key or "").lower()
+    if normalized.startswith("qwen") or normalized.startswith("gemma4"):
         return {"chat_template_kwargs": {"enable_thinking": False}}
     return {}
 
@@ -1121,6 +1303,19 @@ def clear_session(ui_state: str = "idle") -> None:
         STATE.memory_compacted_count = 0
         STATE.pending_edit = None
         STATE.ui_state = ui_state
+
+
+def clear_project_context_locked(ui_state: str = "idle") -> None:
+    STATE.project_path = None
+    STATE.summary = ""
+    STATE.tree = []
+    STATE.files = []
+    STATE.entrypoints = []
+    STATE.tests = []
+    STATE.pinned_files = []
+    STATE.current_preview_path = None
+    STATE.pending_edit = None
+    STATE.ui_state = ui_state
 
 
 def run_script(script_name: str, *args: str, timeout_seconds: Optional[int] = None) -> subprocess.CompletedProcess:
@@ -1429,8 +1624,7 @@ def get_hardware_profile_payload(force_refresh: bool = False) -> Dict[str, objec
 
 def get_model_auto_settings(model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     hardware_profile = hardware_profile or get_hardware_profile_payload()
-    manifest = get_model_manifest(model_key)
-    return recommend_model_settings(hardware_profile, manifest)
+    return get_model_optimization_plan(model_key, hardware_profile)
 
 
 def should_use_low_memory_llama_args(model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> bool:
@@ -1448,6 +1642,13 @@ def should_use_low_memory_llama_args(model_key: str, hardware_profile: Optional[
 
 
 def get_model_llama_args(model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> List[str]:
+    try:
+        plan = get_model_optimization_plan(model_key, hardware_profile)
+        raw = plan.get("llamaArgs")
+        if isinstance(raw, list):
+            return parse_llama_server_args(raw)
+    except Exception:
+        pass
     if should_use_low_memory_llama_args(model_key, hardware_profile):
         raw = get_model_manifest(model_key).get("lowMemoryLlamaArgs")
         return parse_llama_server_args(raw if isinstance(raw, list) else [])
@@ -1455,12 +1656,18 @@ def get_model_llama_args(model_key: str, hardware_profile: Optional[Dict[str, ob
     return parse_llama_server_args(config.llama_args if config else [])
 
 
-LLAMA_MANIFEST_BOOLEAN_ARGS = {"--flash-attn", "--jinja", "--mlock"}
+LLAMA_MANIFEST_BOOLEAN_ARGS = {"--flash-attn", "--jinja", "--mlock", "--no-repack"}
 LLAMA_MANIFEST_VALUE_ARGS = {"--n-cpu-moe", "--batch-size", "--ubatch-size"}
 
 
-def append_llama_manifest_args(launch_args: List[str], model_key: str, hardware_profile: Optional[Dict[str, object]] = None) -> None:
-    for raw_arg in get_model_llama_args(model_key, hardware_profile):
+def append_llama_manifest_args(
+    launch_args: List[str],
+    model_key: str,
+    hardware_profile: Optional[Dict[str, object]] = None,
+    llama_args: Optional[List[str]] = None,
+) -> None:
+    selected_args = llama_args if llama_args is not None else get_model_llama_args(model_key, hardware_profile)
+    for raw_arg in selected_args:
         if "=" in raw_arg:
             name, value = raw_arg.split("=", 1)
             if name in LLAMA_MANIFEST_VALUE_ARGS and value:
@@ -2453,6 +2660,7 @@ def is_running_model_server_compatible(
     port: int,
     model_file: Path,
     mmproj_file: Optional[Path],
+    expected_context_window: Optional[int] = None,
 ) -> bool:
     if not is_model_ready(model_alias, port):
         return False
@@ -2465,7 +2673,7 @@ def is_running_model_server_compatible(
         settings = props.get("default_generation_settings", {})
         if isinstance(settings, dict):
             running_ctx = int(settings.get("n_ctx", 0) or 0)
-            expected_ctx = get_model_context_limit(model_key)
+            expected_ctx = int(expected_context_window or get_model_context_limit(model_key) or 0)
             if running_ctx and expected_ctx and running_ctx < expected_ctx:
                 return False
         if get_model_capabilities(model_key).get("requires_mmproj"):
@@ -2482,7 +2690,7 @@ def is_running_model_server_compatible(
     expected_model = str(model_file).lower()
     if expected_model and expected_model not in lowered:
         return False
-    expected_ctx = str(get_model_context_limit(model_key))
+    expected_ctx = str(int(expected_context_window or get_model_context_limit(model_key) or 0))
     if expected_ctx and not commandline_has_context_size(lowered, int(expected_ctx)):
         return False
     if get_model_capabilities(model_key).get("requires_mmproj"):
@@ -2491,6 +2699,97 @@ def is_running_model_server_compatible(
         expected_mmproj = str(mmproj_file).lower()
         return "--mmproj" in lowered and expected_mmproj in lowered
     return True
+
+
+def get_model_startup_timeout_seconds(model_key: str, auto_settings: Dict[str, object], hardware_profile: Dict[str, object]) -> int:
+    manifest = get_model_manifest(model_key)
+    try:
+        model_size_gb = float(manifest.get("estimatedModelSizeGb") or 0)
+    except (TypeError, ValueError):
+        model_size_gb = 0.0
+    backend = str(auto_settings.get("runtimeBackend") or "cpu").lower()
+    fit_level = str(auto_settings.get("fitLevel") or "")
+    hardware_class = str(hardware_profile.get("hardwareClass") or "")
+    timeout = 180
+    if model_size_gb > 0:
+        timeout += int(model_size_gb * 12)
+    if manifest.get("mmprojPatterns"):
+        timeout += 60
+    if backend == "cpu":
+        timeout += 180
+    if hardware_class in {"cpu-only", "igpu-shared-memory", "apple-silicon-unified"}:
+        timeout += 120
+    if fit_level == "below-minimum":
+        timeout += 240
+    elif fit_level == "constrained":
+        timeout += 120
+    return max(180, min(timeout, 1200))
+
+
+LLAMA_TERMINAL_FAILURE_PATTERNS = (
+    "failed to load model",
+    "error loading model",
+    "unable to allocate",
+    "exiting due to model loading error",
+    "server executable not found",
+    "model file not found",
+    "mmproj file not found",
+)
+
+
+def read_llama_launch_pid(log_path: Path) -> Optional[int]:
+    if not log_path.exists():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^\[CODEWORKER_LAUNCH_PID\]\s+(\d+)\s*$", text, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=20,
+            )
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def read_llama_failure_tail(log_path: Path, err_path: Path) -> str:
+    text = ""
+    for path in (log_path, err_path):
+        if not path.exists():
+            continue
+        try:
+            text = (text + "\n" + path.read_text(encoding="utf-8", errors="replace")[-6000:])[-9000:]
+        except OSError:
+            continue
+    lowered = text.lower()
+    if any(pattern in lowered for pattern in LLAMA_TERMINAL_FAILURE_PATTERNS):
+        return text.strip()
+    return ""
 
 
 def is_port_listening(port: int) -> bool:
@@ -2743,8 +3042,10 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
         str(auto_settings.get("runtimeBackend") or "cpu"),
         task_id=task_id,
     )
+    auto_settings = get_model_optimization_plan(model_key, hardware_profile, model_path=model_file, runtime_path=llama_server)
 
-    if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
+    expected_context_window = int(auto_settings.get("contextWindow") or get_model_context_limit(model_key) or 0)
+    if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file, expected_context_window):
         write_hardware_optimization_log(
             build_hardware_optimization_log_entry(
                 "model_server_already_running",
@@ -2764,7 +3065,7 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
 
     if is_model_ready(model_alias, port) or is_port_listening(port):
         reclaim_details = try_reclaim_codeworker_port(port, model_alias=model_alias)
-        if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
+        if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file, expected_context_window):
             return {"modelAlias": model_alias, "logPath": None, "alreadyRunning": True}
         if is_model_ready(model_alias, port) or is_port_listening(port):
             raise RuntimeError(
@@ -2798,13 +3099,13 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
         "--port", str(port),
         "--alias", model_alias,
         "--model", str(model_file),
-        "--context", str(get_model_context_limit(model_key)),
+        "--context", str(auto_settings.get("contextWindow") or get_model_context_limit(model_key)),
         "--threads", str(auto_settings.get("threads") or os.cpu_count() or 4),
         "--n-gpu-layers", str(auto_settings.get("nGpuLayers") or 0),
         "--log", str(log_path),
         "--err", str(err_path),
     ]
-    append_llama_manifest_args(launch_args, model_key, hardware_profile)
+    append_llama_manifest_args(launch_args, model_key, hardware_profile, list(auto_settings.get("llamaArgs") or []))
     if cache_type_k:
         launch_args.extend(["--cache-type-k", cache_type_k])
     if cache_type_v:
@@ -2839,8 +3140,13 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
         close_fds=True,
     )
 
-    for _ in range(60):
-        if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file):
+    startup_timeout_seconds = get_model_startup_timeout_seconds(model_key, auto_settings, hardware_profile)
+    deadline = time.monotonic() + startup_timeout_seconds
+    launch_pid: Optional[int] = None
+    last_progress_update = 0.0
+    terminal_failure_details = ""
+    while time.monotonic() < deadline:
+        if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file, expected_context_window):
             write_hardware_optimization_log(
                 build_hardware_optimization_log_entry(
                     "model_launch_ready",
@@ -2860,11 +3166,62 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
                 )
             )
             return {"modelAlias": model_alias, "logPath": str(log_path), "alreadyRunning": False}
+        terminal_failure_details = read_llama_failure_tail(log_path, err_path)
+        if terminal_failure_details:
+            break
+        if launch_pid is None:
+            launch_pid = read_llama_launch_pid(log_path)
+        if launch_pid is not None and not process_is_running(launch_pid) and not is_port_listening(port):
+            terminal_failure_details = read_llama_failure_tail(log_path, err_path) or f"llama-server process exited before becoming ready. pid={launch_pid}"
+            break
+        if task_id and time.monotonic() - last_progress_update >= 10:
+            elapsed = int(startup_timeout_seconds - max(0, deadline - time.monotonic()))
+            visible_progress = min(82, 56 + int((elapsed / max(startup_timeout_seconds, 1)) * 24))
+            update_task(
+                task_id,
+                progress=visible_progress,
+                step="啟動本地模型",
+                message=f"正在載入 {get_model_manifest(model_key).get('displayName', model_key)}，已等待 {elapsed}s / {startup_timeout_seconds}s",
+            )
+            last_progress_update = time.monotonic()
         threading.Event().wait(2)
 
-    details = ""
+    for _ in range(5):
+        if is_running_model_server_compatible(model_key, model_alias, port, model_file, mmproj_file, expected_context_window):
+            write_hardware_optimization_log(
+                build_hardware_optimization_log_entry(
+                    "model_launch_ready_after_timeout_boundary",
+                    hardware_profile,
+                    recommended_model_key,
+                    selected_model_key=model_key,
+                    auto_settings=auto_settings,
+                    launch_args=launch_args,
+                    llama_server_path=llama_server,
+                    model_path=model_file,
+                    mmproj_path=mmproj_file,
+                    log_path=log_path,
+                    err_path=err_path,
+                    port=port,
+                    already_running=False,
+                    details="llama-server became ready during the final verification probes after the adaptive startup window.",
+                )
+            )
+            return {"modelAlias": model_alias, "logPath": str(log_path), "alreadyRunning": False}
+        threading.Event().wait(3)
+
+    details = terminal_failure_details or ""
     if log_path.exists():
-        details = log_path.read_text(encoding="utf-8", errors="replace")[-6000:]
+        try:
+            details = (details + "\n" + log_path.read_text(encoding="utf-8", errors="replace")[-6000:])[-9000:]
+        except OSError:
+            pass
+    if err_path.exists():
+        try:
+            err_details = err_path.read_text(encoding="utf-8", errors="replace")[-6000:]
+            if err_details:
+                details = (details + "\n" + err_details)[-9000:]
+        except OSError:
+            pass
     write_hardware_optimization_log(
         build_hardware_optimization_log_entry(
             "model_launch_failed",
@@ -2880,7 +3237,7 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
             err_path=err_path,
             port=port,
             already_running=False,
-            details=details or "llama-server did not become ready before timeout.",
+            details=details or f"llama-server did not become ready before adaptive timeout={startup_timeout_seconds}s.",
         )
     )
     raise RuntimeError(
@@ -2888,7 +3245,7 @@ def ensure_local_model_server(model_key: str, port: Optional[int] = None, task_i
             make_error(
                 "MODEL_START_FAILED",
                 "Server failed to become ready.",
-                details or str(log_path),
+                details or f"{log_path}; adaptive timeout={startup_timeout_seconds}s",
                 log_path=str(log_path),
                 extra={"modelKey": model_key},
             )
@@ -4339,18 +4696,68 @@ def extract_free_identifiers(text: str) -> List[str]:
 def extract_declared_identifiers(text: str) -> List[str]:
     declared: List[str] = []
     searchable = strip_code_literals_and_comments(text)
-    patterns = [
-        re.compile(r"\b(?:var|int|long|short|byte|float|double|decimal|bool|string|char|object)\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
-        re.compile(r"\b(?:Point|Color|Path|Form|EventArgs|KeyEventArgs|List|Dictionary|HashSet)\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
-    ]
-    for pattern in patterns:
+    primitive_or_var = r"(?:var|int|long|short|byte|float|double|decimal|bool|string|char|object)"
+    qualified_type = r"(?:[A-Z_][A-Za-z0-9_]*(?:\s*\.\s*[A-Z_][A-Za-z0-9_]*)*)"
+    generic_suffix = r"(?:\s*<[^;=(){}]+>)?"
+    type_suffix = r"(?:\s*(?:\[\]|\?))*"
+    csharp_type = rf"(?:{primitive_or_var}|{qualified_type}{generic_suffix}{type_suffix})"
+    declaration_start = r"(?:^|[;\{\}\n])\s*"
+    declaration_prefix = r"(?:using\s+|const\s+|readonly\s+|static\s+)*"
+    local_declaration = re.compile(
+        rf"{declaration_start}{declaration_prefix}{csharp_type}\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?==|;|,|\))",
+        re.MULTILINE,
+    )
+    foreach_declaration = re.compile(
+        rf"\bforeach\s*\(\s*{csharp_type}\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b",
+        re.MULTILINE,
+    )
+    using_statement_declaration = re.compile(
+        rf"\busing\s*\(\s*{csharp_type}\s+([A-Za-z_][A-Za-z0-9_]*)\s*=",
+        re.MULTILINE,
+    )
+    for pattern in (local_declaration, foreach_declaration, using_statement_declaration):
         for match in pattern.finditer(searchable):
             declared.append(match.group(1))
+    common_patterns = [
+        re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b"),
+        re.compile(r"\b(?:function|class|interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b"),
+        re.compile(r"\bcatch\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)"),
+        re.compile(r"\bimport\s+([A-Za-z_$][A-Za-z0-9_$]*)\b"),
+        re.compile(r"\bDim\s+([A-Za-z_][A-Za-z0-9_]*)\s+As\b", re.IGNORECASE),
+        re.compile(r"\bFor\s+Each\s+([A-Za-z_][A-Za-z0-9_]*)\s+As\b", re.IGNORECASE),
+        re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[^;]+;", re.MULTILINE),
+        re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s*:=", re.IGNORECASE),
+        re.compile(r"\b(?:auto|size_t|std::[A-Za-z_][A-Za-z0-9_:<>]*|[A-Z_][A-Za-z0-9_:<>]*)\s*(?:[&*]\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?==|;|,|\))"),
+        re.compile(r"\bfor\s*\(\s*(?:const\s+)?(?:auto|[A-Za-z_][A-Za-z0-9_:<>]*)\s*(?:[&*]\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*:", re.IGNORECASE),
+        re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=\n]+)?=", re.MULTILINE),
+        re.compile(r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\b"),
+        re.compile(r"\bwith\b[^\n]+?\bas\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
+        re.compile(r"\bexcept\b[^\n]+?\bas\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
+        re.compile(r"\b(?:let|const)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"),
+        re.compile(r"\b(?:var|const)\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
+        re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:="),
+        re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*="),
+    ]
+    for pattern in common_patterns:
+        for match in pattern.finditer(searchable):
+            declared.append(match.group(1).lstrip("$"))
+    for params in re.finditer(r"\(([^(){};]{1,300})\)", searchable):
+        text_inside = params.group(1)
+        if "," not in text_inside and not re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\s+[A-Za-z_][A-Za-z0-9_]*\b", text_inside):
+            continue
+        for piece in text_inside.split(","):
+            part = piece.strip()
+            if not part:
+                continue
+            part = part.split("=", 1)[0].strip()
+            part = part.split(":", 1)[0].strip()
+            tokens = re.findall(r"[A-Za-z_$][A-Za-z0-9_$]*", part)
+            if tokens:
+                declared.append(tokens[-1].lstrip("$"))
     return declared
 
 
-def collect_edit_safety_issues(before_snippet: str, after_snippet: str, full_content: str, message: str) -> List[str]:
-    issues: List[str] = []
+def analyze_edit_identifiers(before_snippet: str, after_snippet: str, full_content: str, message: str) -> Dict[str, object]:
     forbidden = {item.lower(): item for item in parse_forbidden_identifiers(message)}
     after_identifiers = extract_free_identifiers(after_snippet)
     before_identifiers = set(item.lower() for item in extract_free_identifiers(before_snippet))
@@ -4358,23 +4765,156 @@ def collect_edit_safety_issues(before_snippet: str, after_snippet: str, full_con
     full_identifiers = set(item.lower() for item in extract_free_identifiers(full_content))
 
     forbidden_hits = sorted({identifier for identifier in after_identifiers if identifier.lower() in forbidden})
-    if forbidden_hits:
-        issues.append(f"建議片段仍引用被明確否定的 identifier：{', '.join(forbidden_hits)}")
-
-    unknown_identifiers: List[str] = []
+    unresolved_identifiers: List[str] = []
     for identifier in after_identifiers:
         lowered = identifier.lower()
         if lowered in before_identifiers or lowered in declared_identifiers:
             continue
-        if identifier in CSHARP_RESERVED_IDENTIFIERS or identifier in CSHARP_ALLOWED_GLOBAL_IDENTIFIERS:
+        if (
+            lowered in {item.lower() for item in CSHARP_RESERVED_IDENTIFIERS}
+            or lowered in {item.lower() for item in CSHARP_ALLOWED_GLOBAL_IDENTIFIERS}
+            or lowered in COMMON_EDIT_RESERVED_IDENTIFIERS
+        ):
             continue
         if lowered in full_identifiers:
             continue
-        unknown_identifiers.append(identifier)
-    if unknown_identifiers:
-        issues.append(f"建議片段引入未在目標檔案中出現的 identifier：{', '.join(sorted(set(unknown_identifiers)))}")
+        unresolved_identifiers.append(identifier)
+    return {
+        "forbidden": sorted(set(forbidden_hits)),
+        "unresolved": sorted(set(unresolved_identifiers)),
+        "declared": sorted(declared_identifiers),
+    }
+
+
+def collect_edit_safety_issues(before_snippet: str, after_snippet: str, full_content: str, message: str) -> List[str]:
+    issues: List[str] = []
+    analysis = analyze_edit_identifiers(before_snippet, after_snippet, full_content, message)
+    forbidden_hits = [str(item) for item in analysis.get("forbidden", [])]
+    if forbidden_hits:
+        issues.append(f"建議片段仍引用被明確否定的 identifier：{', '.join(forbidden_hits)}")
 
     return issues
+
+
+def collect_edit_semantic_concerns(before_snippet: str, after_snippet: str, full_content: str, message: str) -> List[Dict[str, object]]:
+    analysis = analyze_edit_identifiers(before_snippet, after_snippet, full_content, message)
+    unresolved = [str(item) for item in analysis.get("unresolved", []) if str(item).strip()]
+    if not unresolved:
+        return []
+    return [
+        {
+            "kind": "unknownIdentifier",
+            "identifiers": unresolved,
+            "message": f"建議片段引入需要語意驗證的 identifier：{', '.join(unresolved)}",
+        }
+    ]
+
+
+def _semantic_verifier_json_default(verdict: str, reason: str, concerns: List[Dict[str, object]]) -> Dict[str, object]:
+    return {
+        "verdict": verdict,
+        "compileRisk": "high" if verdict == "fail" else "medium",
+        "newIdentifiers": [
+            {"name": name, "classification": "uncertain", "reason": reason}
+            for concern in concerns
+            for name in concern.get("identifiers", [])
+        ],
+        "reason": reason,
+    }
+
+
+def validate_edit_semantics_with_model(
+    model_alias: str,
+    model_key: str,
+    path: str,
+    before_snippet: str,
+    after_snippet: str,
+    full_content: str,
+    message: str,
+    concerns: List[Dict[str, object]],
+) -> Dict[str, object]:
+    if not concerns:
+        return {"verdict": "pass", "compileRisk": "low", "newIdentifiers": [], "reason": "No semantic concerns."}
+    prompt = (
+        "你是 CodeWorker 的 edit semantic verifier。"
+        "請只判斷 patch 片段中的 soft semantic concerns，不要重新設計修改。\n"
+        "Hard safety gates 已由程式處理；你不能放行路徑、stale patch、明確 forbidden identifier。\n"
+        "請只輸出 JSON，不要 markdown，不要解釋文字。\n"
+        "JSON schema:\n"
+        "{\n"
+        '  "verdict": "pass|fail|uncertain",\n'
+        '  "compileRisk": "low|medium|high",\n'
+        '  "newIdentifiers": [{"name":"...", "classification":"declared-local|existing-symbol|external-api|missing|uncertain", "reason":"..."}],\n'
+        '  "reason": "..."\n'
+        "}\n\n"
+        f"USER REQUEST:\n{message}\n\n"
+        f"FILE: {path}\n\n"
+        f"SOFT CONCERNS:\n{json.dumps(concerns, ensure_ascii=False, indent=2)}\n\n"
+        f"BEFORE SNIPPET:\n{truncate_middle(before_snippet, 6000)}\n\n"
+        f"AFTER SNIPPET:\n{truncate_middle(after_snippet, 8000)}\n\n"
+        f"TARGET FILE CONTEXT:\n{truncate_middle(full_content, 10000)}\n"
+    )
+    try:
+        raw_reply = call_local_model(
+            model_alias,
+            [
+                {"role": "system", "content": "Return JSON only. Validate semantic concerns conservatively."},
+                {"role": "user", "content": prompt},
+            ],
+            timeout_seconds=min(300, get_edit_plan_timeout_seconds(model_key, len(prompt), 500)),
+            max_tokens=500,
+            raw_mode=True,
+        )
+        payload = extract_json_payload(raw_reply)
+    except Exception as exc:
+        return _semantic_verifier_json_default("uncertain", f"semantic verifier failed: {exc}", concerns)
+    if not isinstance(payload, dict):
+        return _semantic_verifier_json_default("uncertain", "semantic verifier returned a non-object JSON payload", concerns)
+    verdict = str(payload.get("verdict", "")).strip().lower()
+    if verdict not in {"pass", "fail", "uncertain"}:
+        verdict = "uncertain"
+    identifiers = payload.get("newIdentifiers")
+    if not isinstance(identifiers, list):
+        identifiers = []
+    return {
+        "verdict": verdict,
+        "compileRisk": str(payload.get("compileRisk", "") or "medium"),
+        "newIdentifiers": identifiers,
+        "reason": str(payload.get("reason", "") or "semantic verifier did not provide a reason"),
+    }
+
+
+def enforce_edit_semantic_validation(
+    model_alias: str,
+    model_key: str,
+    path: str,
+    before_snippet: str,
+    after_snippet: str,
+    full_content: str,
+    message: str,
+) -> Dict[str, object]:
+    safety_issues = collect_edit_safety_issues(before_snippet, after_snippet, full_content, message)
+    if safety_issues:
+        raise RuntimeError("精準修改未通過安全檢查：" + "；".join(safety_issues))
+    concerns = collect_edit_semantic_concerns(before_snippet, after_snippet, full_content, message)
+    if not concerns:
+        return {"verdict": "pass", "concerns": [], "reason": "No semantic concerns."}
+    semantic = validate_edit_semantics_with_model(
+        model_alias=model_alias,
+        model_key=model_key,
+        path=path,
+        before_snippet=before_snippet,
+        after_snippet=after_snippet,
+        full_content=full_content,
+        message=message,
+        concerns=concerns,
+    )
+    if semantic.get("verdict") != "pass":
+        raise RuntimeError(
+            "精準修改未通過語意驗證："
+            + str(semantic.get("reason") or "semantic verifier did not pass")
+        )
+    return {**semantic, "concerns": concerns}
 
 
 def build_line_window_from_index(content: str, index: int, before_lines: int = 10, after_lines: int = 20) -> Dict[str, object]:
@@ -8571,9 +9111,15 @@ def create_precise_edit_plan(
         after_snippet = normalized_operations[0]["replace"]
         if is_gemma4_state(state) and (not before_snippet.strip() or not after_snippet.strip()):
             raise RuntimeError(f"Gemma 4 未提供有效的 search/replace 片段：{path}")
-        safety_issues = collect_edit_safety_issues(before_snippet, after_snippet, before, message)
-        if safety_issues:
-            raise RuntimeError("精準修改未通過安全檢查：" + "；".join(safety_issues))
+        semantic_validation = enforce_edit_semantic_validation(
+            state.model_alias,
+            state.model_key,
+            path,
+            before_snippet,
+            after_snippet,
+            before,
+            message,
+        )
         diff_text = generate_diff(path, before, after)
         if not diff_text.strip():
             continue
@@ -8598,6 +9144,7 @@ def create_precise_edit_plan(
                 "operations": normalized_operations,
                 "diff": diff_text,
                 "diffWindow": diff_window,
+                "semanticValidation": semantic_validation,
             }
         )
 
@@ -8827,10 +9374,13 @@ def create_advisory_edit_plan(
         if path:
             try:
                 safety_issues = collect_edit_safety_issues(before_snippet, after_snippet, full_before, message)
+                semantic_concerns = collect_edit_semantic_concerns(before_snippet, after_snippet, full_before, message)
             except (OSError, ValueError):
                 safety_issues = []
+                semantic_concerns = []
         else:
             safety_issues = []
+            semantic_concerns = []
         if safety_issues:
             verified = False
             missing_search_snippet = before_snippet
@@ -8843,6 +9393,13 @@ def create_advisory_edit_plan(
                 if before_snippet and after_snippet
                 else "模型建議引用未確認或被否定的 identifier，未建立可直接套用的 action。"
             )
+        elif semantic_concerns:
+            verified = False
+            concern_text = "；".join(str(item.get("message", "")) for item in semantic_concerns if isinstance(item, dict))
+            notes = notes + [
+                f"語意檢查待確認：{concern_text}",
+                "以下片段只供人工檢查，未建立可直接套用的 action；若要套用，請重新產生精準修改並通過語意驗證。",
+            ]
         if is_gemma4_state(state) and not before_snippet and not after_snippet:
             notes = notes + ["Gemma 4 未提供足夠的局部替換片段，已保留為保守文字建議。"]
         normalized_suggestions.append(
@@ -9437,6 +9994,7 @@ def get_status_payload_unlocked() -> Dict[str, object]:
         for key in sorted(SUPPORTED_MODEL_KEYS)
     }
     default_model_key = get_default_model_key()
+    optimization_plan = get_model_optimization_plan(STATE.model_key, hardware_profile)
     return {
             "appVersion": APP_VERSION,
             "appName": APP_NAME,
@@ -9451,6 +10009,7 @@ def get_status_payload_unlocked() -> Dict[str, object]:
             "contextOptions": get_context_options_payload(),
             "hardwareProfile": hardware_profile,
             "recommendedModelKey": choose_recommended_model_key(hardware_profile, raw_model_configs),
+            "optimizationPlan": optimization_plan,
             "selectedContextWindow": get_selected_model_context(STATE.model_key),
             "effectiveContextWindow": get_model_context_limit(STATE.model_key),
             "summary": STATE.summary,
@@ -9494,10 +10053,17 @@ def get_models_payload() -> Dict[str, object]:
         mmproj = None
         if config and config.mmproj_patterns:
             mmproj = match_first_model_file(model_dir, config.mmproj_patterns)
+        auto_settings = get_model_optimization_plan(key, hardware_profile, model_path=primary)
         ready = False
         if primary:
-            ready = is_running_model_server_compatible(key, get_model_alias(key), get_model_port(key), primary, mmproj)
-        auto_settings = get_model_auto_settings(key, hardware_profile)
+            ready = is_running_model_server_compatible(
+                key,
+                get_model_alias(key),
+                get_model_port(key),
+                primary,
+                mmproj,
+                int(auto_settings.get("contextWindow") or get_model_context_limit(key) or 0),
+            )
         models[key] = {
             **capability,
             "installed": bool(primary and primary.exists()),
@@ -9509,7 +10075,8 @@ def get_models_payload() -> Dict[str, object]:
             "runtimeBackend": auto_settings.get("runtimeBackend", "cpu"),
             "nGpuLayers": auto_settings.get("nGpuLayers", 0),
             "threads": auto_settings.get("threads", os.cpu_count() or 4),
-            "llamaArgs": get_model_llama_args(key, hardware_profile),
+            "llamaArgs": list(auto_settings.get("llamaArgs") or []),
+            "optimizationPlan": auto_settings,
         }
     log_hardware_catalog_once(hardware_profile, recommended_model_key, models)
     default_model_key = get_default_model_key()
@@ -9521,6 +10088,102 @@ def get_models_payload() -> Dict[str, object]:
         "hardwareProfile": hardware_profile,
         "recommendedModelKey": recommended_model_key,
         "mediaAssessment": get_media_analysis_assessment(),
+    }
+
+
+def get_hardware_scenario_presets() -> List[Dict[str, object]]:
+    return [
+        {"key": "cpu-only-64gb", "label": "CPU-only RAM 64GB+", "source": "preset-unverified", "notes": "Use CPU backend, conservative context, and measured profile when available."},
+        {"key": "nvidia-vram-8gb", "label": "NVIDIA VRAM 8GB", "source": "preset-unverified", "notes": "Use CUDA, low-VRAM context, and CPU MoE for large MoE models."},
+        {"key": "nvidia-vram-16gb", "label": "NVIDIA VRAM 16GB", "source": "preset-unverified", "notes": "Use CUDA with moderate context and retest per model."},
+        {"key": "nvidia-vram-24gb", "label": "NVIDIA VRAM 24GB", "source": "preset-unverified", "notes": "Use CUDA with larger context for high-tier models."},
+        {"key": "nvidia-vram-36gb", "label": "NVIDIA VRAM 36GB", "source": "preset-unverified", "notes": "Use CUDA high-memory presets; verify GLM/Qwen large models before long work."},
+        {"key": "nvidia-vram-48gb-plus", "label": "NVIDIA VRAM 48GB+", "source": "preset-unverified", "notes": "Extreme preset; can try largest catalog models with measured override."},
+        {"key": "apple-silicon-unified", "label": "Mac mini / Apple Silicon", "source": "preset-unverified", "notes": "Use Metal only when a matching llama.cpp Metal runtime is installed."},
+    ]
+
+
+def get_hardware_optimization_payload(model_key: str = "", force_refresh: bool = False) -> Dict[str, object]:
+    selected_model_key = normalize_supported_model_key(model_key or STATE.model_key or get_default_model_key())
+    hardware_profile = get_hardware_profile_payload(force_refresh=force_refresh)
+    models_payload = get_models_payload()
+    selected_model = models_payload.get("models", {}).get(selected_model_key, {})
+    return {
+        "hardwareProfile": hardware_profile,
+        "selectedModelKey": selected_model_key,
+        "recommendedModelKey": models_payload.get("recommendedModelKey", ""),
+        "optimizationPlan": selected_model.get("optimizationPlan") or get_model_optimization_plan(selected_model_key, hardware_profile),
+        "models": models_payload.get("models", {}),
+        "scenarioPresets": get_hardware_scenario_presets(),
+        "profileStore": {
+            "path": str(HARDWARE_MODEL_PROFILES_PATH),
+            "profileCount": len(load_hardware_model_profiles().get("profiles", [])),
+        },
+    }
+
+
+def run_model_performance_test(model_key: str) -> Dict[str, object]:
+    model_key = normalize_supported_model_key(model_key, "")
+    if not model_key:
+        raise ValueError("Unsupported model.")
+    hardware_profile = get_hardware_profile_payload(force_refresh=True)
+    started_at = time.time()
+    plan = get_model_optimization_plan(model_key, hardware_profile)
+    model_path = None
+    runtime_path = None
+    performance: Dict[str, object]
+    try:
+        ensure_result = ensure_local_model_server(model_key, port=get_model_port(model_key))
+        startup_seconds = round(time.time() - started_at, 3)
+        model_alias = str(ensure_result.get("modelAlias") or get_model_alias(model_key))
+        config = get_registry_model_config(ROOT_DIR, model_key)
+        patterns = config.file_patterns if config else [get_model_file_pattern(model_key)]
+        model_path = match_first_model_file(get_model_directory(model_key), patterns)
+        runtime_path = resolve_llama_server_for_backend(str(plan.get("runtimeBackend") or "cpu"))
+        plan = get_model_optimization_plan(model_key, hardware_profile, model_path=model_path, runtime_path=runtime_path)
+        reply_started = time.time()
+        reply = call_local_model(
+            model_alias,
+            [{"role": "user", "content": "Reply with exactly: OK"}],
+            timeout_seconds=600,
+            max_tokens=32,
+            raw_mode=True,
+        )
+        reply_seconds = round(time.time() - reply_started, 3)
+        output_chars = len(reply or "")
+        performance = {
+            "ok": True,
+            "startupSeconds": startup_seconds,
+            "replySeconds": reply_seconds,
+            "outputChars": output_chars,
+            "charsPerSecond": round(output_chars / reply_seconds, 3) if reply_seconds > 0 else 0,
+            "alreadyRunning": bool(ensure_result.get("alreadyRunning")),
+            "error": "",
+        }
+    except Exception as exc:
+        performance = {
+            "ok": False,
+            "startupSeconds": round(time.time() - started_at, 3),
+            "replySeconds": 0,
+            "outputChars": 0,
+            "charsPerSecond": 0,
+            "alreadyRunning": False,
+            "error": str(exc)[-4000:],
+        }
+    record = record_model_performance_result(
+        model_key,
+        hardware_profile,
+        plan,
+        performance,
+        model_path=model_path,
+        runtime_path=runtime_path,
+    )
+    refreshed = get_hardware_optimization_payload(model_key, force_refresh=True)
+    return {
+        "modelKey": model_key,
+        "performance": performance,
+        "profileRecord": record,
+        **refreshed,
     }
 
 
@@ -9543,6 +10206,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/models":
             json_response(self, {"ok": True, "data": get_models_payload()})
+            return
+        if parsed.path == "/api/hardware/optimization":
+            self.handle_hardware_optimization(parsed)
             return
         if parsed.path == "/api/threads":
             self.handle_threads_list()
@@ -9584,6 +10250,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/tasks/open-project":
             self.handle_open_project_task()
             return
+        if parsed.path == "/api/project/clear":
+            self.handle_project_clear()
+            return
         if parsed.path == "/api/models/redownload":
             self.handle_redownload_model()
             return
@@ -9604,6 +10273,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/models/context-calibration":
             self.handle_model_context_calibration()
+            return
+        if parsed.path == "/api/models/performance-test":
+            self.handle_model_performance_test()
             return
         if parsed.path == "/api/files/generate/plan":
             self.handle_generate_file_plan()
@@ -9787,6 +10459,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             error_response(self, make_error("PROJECT_PATH_INVALID", "Project path is invalid.", str(exc)))
 
+    def handle_project_clear(self) -> None:
+        try:
+            with STATE_LOCK:
+                clear_project_context_locked(ui_state="idle")
+                save_current_thread_locked()
+                status = get_status_payload_unlocked()
+            setattr(self.server, "_pending_edit_internal", None)
+            json_response(self, {"ok": True, "data": status})
+        except Exception as exc:
+            error_response(self, make_error("PROJECT_CLEAR_FAILED", "Failed to clear project context.", str(exc)))
+
     def handle_redownload_model(self) -> None:
         try:
             payload = self.read_json_body()
@@ -9875,6 +10558,27 @@ class WebUIHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             error_response(self, make_error("MODEL_CONTEXT_CALIBRATION_FAILED", "Model context calibration failed.", str(exc)))
+
+    def handle_hardware_optimization(self, parsed: urllib.parse.ParseResult) -> None:
+        try:
+            query = urllib.parse.parse_qs(parsed.query)
+            model_key = str((query.get("modelKey") or [""])[0] or STATE.model_key or get_default_model_key()).strip().lower()
+            force = str((query.get("forceRefresh") or [""])[0]).lower() in {"1", "true", "yes"}
+            json_response(self, {"ok": True, "data": get_hardware_optimization_payload(model_key, force_refresh=force)})
+        except Exception as exc:
+            error_response(self, make_error("HARDWARE_OPTIMIZATION_FAILED", "Hardware optimization failed.", str(exc)))
+
+    def handle_model_performance_test(self) -> None:
+        try:
+            payload = self.read_json_body()
+            model_key = str(payload.get("modelKey") or STATE.model_key or get_default_model_key()).strip().lower()
+            result = run_model_performance_test(model_key)
+            remember_last_used_model_key(model_key)
+            json_response(self, {"ok": True, "data": result})
+        except ValueError as exc:
+            error_response(self, make_error("MODEL_PERFORMANCE_TEST_INVALID", "Model performance test request is invalid.", str(exc)))
+        except Exception as exc:
+            error_response(self, make_error("MODEL_PERFORMANCE_TEST_FAILED", "Model performance test failed.", str(exc)))
 
     def handle_generate_file_plan(self) -> None:
         try:

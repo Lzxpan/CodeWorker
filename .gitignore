@@ -7,6 +7,8 @@ data/indexes/
 data/chat-threads/
 data/model-contexts.json
 data/model-context-calibration.json
+data/model-performance-calibration.json
+data/hardware-model-profiles.json
 data/model-preferences.json
 data/agent-actions.jsonl
 logs/*.json
